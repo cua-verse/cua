@@ -29,13 +29,14 @@ class PostHogTelemetryClient:
 
     def __init__(self):
         """Initialize PostHog telemetry client."""
-        self.installation_id = self._get_or_create_installation_id()
         self.initialized = False
         self.queued_events: List[Dict[str, Any]] = []
+        self.installation_id = "disabled"
 
         # Log telemetry status on startup
         if self.is_telemetry_enabled():
             logger.info("Telemetry enabled")
+            self.installation_id = self._get_or_create_installation_id()
             # Initialize PostHog client if config is available
             self._initialize_posthog()
         else:
@@ -44,12 +45,10 @@ class PostHogTelemetryClient:
     @classmethod
     def is_telemetry_enabled(cls) -> bool:
         """True if telemetry is currently active for this process."""
-        return os.environ.get("CUA_TELEMETRY_ENABLED", "true").lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        # Check if explicitly disabled via CUA_TELEMETRY_DISABLED
+        # disabled = os.environ.get("CUA_TELEMETRY_DISABLED", "").lower()
+        # if disabled in {"1", "true", "yes", "on"}:
+        return False
 
     def _get_or_create_installation_id(self) -> str:
         """Get or create a unique installation ID that persists across runs.

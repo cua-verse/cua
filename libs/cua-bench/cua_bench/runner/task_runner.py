@@ -246,17 +246,18 @@ class TaskRunner:
         if cleanup_before:
             await full_cleanup()
 
-        # Determine if this is a simulated provider
+        # Determine if this is a simulated or remote provider
         is_simulated = provider_type in ("simulated", "webtop")
+        is_remote = provider_type == "remote" or os.environ.get("CUA_PROVIDER") == "remote"
 
-        # Validate env_type (skip validation for simulated since we don't use it)
-        if not is_simulated and env_type not in ENV_CONFIGS:
+        # Validate env_type (skip validation for simulated/remote since we don't manage the env)
+        if not is_simulated and not is_remote and env_type not in ENV_CONFIGS:
             raise ValueError(
                 f"Unknown env_type: {env_type}. Valid types: {list(ENV_CONFIGS.keys())}"
             )
 
-        config = ENV_CONFIGS.get(env_type, {}) if not is_simulated else {}
-        golden_name = golden_name or env_type if not is_simulated else "simulated"
+        config = ENV_CONFIGS.get(env_type, {}) if (not is_simulated and not is_remote) else {}
+        golden_name = golden_name or env_type if (not is_simulated and not is_remote) else "external"
 
         # Generate unique task ID
         task_id = generate_task_id()
@@ -272,13 +273,14 @@ class TaskRunner:
         # Track task for cleanup
         self._running_tasks[task_id] = {
             "network": network_name,
-            "env_container": env_container_name if not is_simulated else None,
+            "env_container": env_container_name if (not is_simulated and not is_remote) else None,
             "agent_container": agent_container_name,
-            "env_image": config.get("image") if not is_simulated else None,
+            "env_image": config.get("image") if (not is_simulated and not is_remote) else None,
             "agent_image": self.agent_image,
             "remove_images": remove_images_after,
             "overlay_path": overlay_path,
             "is_simulated": is_simulated,
+            "is_remote": is_remote,
         }
 
         # Track log streaming process for cleanup
@@ -288,8 +290,8 @@ class TaskRunner:
             # 1. Create network
             await create_network(network_name)
 
-            # 2. Start environment container (skip for simulated providers)
-            if not is_simulated:
+            # 2. Start environment container (skip for simulated/remote providers)
+            if not is_simulated and not is_remote:
                 await self._start_env_container(
                     task_id=task_id,
                     network_name=network_name,
@@ -319,6 +321,7 @@ class TaskRunner:
                 oracle=oracle,
                 output_dir=output_dir,
                 is_simulated=is_simulated,
+                is_remote=is_remote,
             )
 
             # 3.5. Start streaming agent logs to file if requested
@@ -764,6 +767,7 @@ class TaskRunner:
         oracle: bool,
         output_dir: Optional[str],
         is_simulated: bool = False,
+        is_remote: bool = False,
     ) -> ContainerInfo:
         """Start the agent container.
 
@@ -798,20 +802,25 @@ class TaskRunner:
         if resolved_command is not None:
             agent_command = resolved_command
 
-        # Build API URL using network hostname (not used for simulated, but set for consistency)
-        api_url = (
-            f"http://{self.env_hostname}:{config.get('internal_api_port', 5000)}" if config else ""
-        )
-        vnc_url = (
-            f"http://{self.env_hostname}:{config.get('internal_vnc_port', 8006)}" if config else ""
-        )
+        # Build API URL. For remote providers, use the host's environment variables.
+        # For local providers, use the internal network hostname.
+        if is_remote:
+            api_url = os.environ.get("CUA_ENV_API_URL", "")
+            vnc_url = os.environ.get("CUA_ENV_VNC_URL", "")
+        else:
+            api_url = (
+                f"http://{self.env_hostname}:{config.get('internal_api_port', 5000)}" if config else ""
+            )
+            vnc_url = (
+                f"http://{self.env_hostname}:{config.get('internal_vnc_port', 8006)}" if config else ""
+            )
 
         # Build environment variables (available to all agent images)
         env_vars = {
             "CUA_ENV_API_URL": api_url,
             "CUA_ENV_VNC_URL": vnc_url,
-            "CUA_ENV_TYPE": config.get("os_type", "linux") if config else "linux",
-            "CUA_PROVIDER": "simulated" if is_simulated else "remote",
+            "CUA_ENV_TYPE": os.environ.get("CUA_ENV_TYPE") or (config.get("os_type", "linux") if config else "linux"),
+            "CUA_PROVIDER": "remote" if is_remote else ("simulated" if is_simulated else "remote"),
             "CUA_TASK_PATH": "/app/env",
             "CUA_TASK_INDEX": str(task_index),
             "BATCH_TASK_INDEX": str(task_index),  # Legacy compat
@@ -837,6 +846,11 @@ class TaskRunner:
             value = os.environ.get(key)
             if value:
                 env_vars[key] = value
+
+        # Pass Check for telemetry configuration
+        telemetry_disabled = os.environ.get("CUA_TELEMETRY_DISABLED")
+        if telemetry_disabled is not None:
+            env_vars["CUA_TELEMETRY_DISABLED"] = telemetry_disabled
 
         # Build volumes
         volumes = [

@@ -32,6 +32,12 @@ from pathlib import Path
 # in containerized environments where /usr/local may not be writable
 os.environ.setdefault("HF_HOME", "/tmp/hf_cache")
 
+# Disable telemetry in containerized environments if not explicitly set
+# This prevents permission errors when trying to write installation ID
+# to non-writable paths inside Docker containers
+if os.environ.get("CUA_TELEMETRY_DISABLED") is None:
+    os.environ["CUA_TELEMETRY_DISABLED"] = "true"
+
 
 def load_agent_from_path(import_path: str):
     """Load an agent class from an import path like 'path.to.module:ClassName'."""
