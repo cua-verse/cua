@@ -6,6 +6,7 @@ from .core import Task, interact, make
 from .decorators import evaluate_task, setup_task, solve_task, tasks_config
 from .desktop import Desktop
 from .environment import Environment
+from .replay import replay_trajectory
 from .types import (
     Action,
     ClickAction,
@@ -47,4 +48,5 @@ __all__ = [
     "RightClickAction",
     "DoubleClickAction",
     "repr_to_action",
+    "replay_trajectory",
 ]
