@@ -116,23 +116,46 @@ final class LumeController {
     }
 
     /// Get VM details using lightweight path (no VM object instantiation)
-    /// Checks SharedVM cache for running status and gets VNC/IP info if running
+    /// Checks provisioning marker first, then SharedVM cache for running status
     @MainActor
     private func getVMDetailsLightweight(vmDir: VMDirectory, locationName: String) -> VMDetails? {
         let vmName = vmDir.name
 
-        // Check if VM is running via SharedVM cache
+        // Check provisioning marker FIRST - if present, VM is being created
+        if let marker = vmDir.loadProvisioningMarker() {
+            return vmDir.getDetails(
+                locationName: locationName,
+                status: "provisioning",
+                provisioningOperation: marker.operation,
+                vncUrl: nil,
+                ipAddress: nil,
+                sshAvailable: nil
+            )
+        }
+
+        // Check if VM is running via SharedVM cache (same-process fast path)
         let runningVM = SharedVM.shared.getVM(name: vmName)
-        let isRunning = runningVM != nil
+        var isRunning = runningVM != nil
 
         // Get VNC URL and IP address only if running
         var vncUrl: String? = nil
         var ipAddress: String? = nil
         var sshAvailable: Bool? = nil
 
+        // If not in cache, check if session file exists (cross-process fallback)
+        // Session files are created when VM starts and deleted when VM stops
+        if !isRunning {
+            if let session = try? vmDir.loadSession() {
+                isRunning = true
+                vncUrl = session.url
+            }
+        }
+
         if isRunning {
-            // Try to get VNC URL from session file
-            vncUrl = try? vmDir.loadSession().url
+            // Try to get VNC URL from session file (if not already loaded)
+            if vncUrl == nil {
+                vncUrl = try? vmDir.loadSession().url
+            }
 
             // Try to get IP address from DHCP lease if we have MAC address
             if let config = try? vmDir.loadConfig(),
@@ -148,11 +171,24 @@ final class LumeController {
 
         return vmDir.getDetails(
             locationName: locationName,
-            isRunning: isRunning,
+            status: isRunning ? "running" : "stopped",
+            provisioningOperation: nil,
             vncUrl: vncUrl,
             ipAddress: ipAddress,
             sshAvailable: sshAvailable
         )
+    }
+
+
+    /// Validates that a VM is not currently being provisioned
+    /// - Parameters:
+    ///   - vmDir: The VM directory to check
+    ///   - name: The VM name (for error message)
+    /// - Throws: VMError.stillProvisioning if the VM has a provisioning marker
+    private func validateNotProvisioning(_ vmDir: VMDirectory, name: String) throws {
+        if vmDir.loadProvisioningMarker() != nil {
+            throw VMError.stillProvisioning(name)
+        }
     }
 
     @MainActor
@@ -172,7 +208,11 @@ final class LumeController {
 
         do {
             // Validate source VM exists
-            _ = try self.validateVMExists(normalizedName, storage: sourceLocation)
+            let actualSourceLocation = try self.validateVMExists(normalizedName, storage: sourceLocation)
+
+            // Check if source VM is still being provisioned
+            let sourceVmDir = try home.getVMDirectory(normalizedName, storage: actualSourceLocation)
+            try validateNotProvisioning(sourceVmDir, name: normalizedName)
 
             // Get the source VM and check if it's running
             let sourceVM = try get(name: normalizedName, storage: sourceLocation)
@@ -293,17 +333,226 @@ final class LumeController {
                 "noDisplay": "\(noDisplay)",
             ])
 
-        do {
-            try validateCreateParameters(name: name, os: os, ipsw: ipsw, storage: storage)
+        // Validate parameters upfront
+        try validateCreateParameters(name: name, os: os, ipsw: ipsw, storage: storage)
 
-            let vm = try await createTempVMConfig(
+        // Create target VM directory early with provisioning marker
+        // so VM appears in list immediately with "provisioning" status
+        let vmDir = try home.getVMDirectory(name, storage: storage)
+
+        do {
+            try FileManager.default.createDirectory(
+                atPath: vmDir.dir.path,
+                withIntermediateDirectories: true
+            )
+
+            // Create minimal config so VM shows up in list
+            let config = try VMConfig(
                 os: os,
                 cpuCount: cpuCount,
                 memorySize: memorySize,
                 diskSize: diskSize,
                 display: display
             )
+            try vmDir.saveConfig(config)
 
+            // Write provisioning marker
+            try vmDir.saveProvisioningMarker(ProvisioningMarker(operation: "ipsw_install"))
+            Logger.info("Provisioning marker created", metadata: ["name": name])
+        } catch {
+            // Clean up if we fail to set up provisioning marker
+            try? vmDir.delete()
+            Logger.error("Failed to create VM", metadata: ["error": error.localizedDescription])
+            throw error
+        }
+
+        do {
+            // Use createInternal which handles all the actual work
+            try await createInternal(
+                name: name,
+                os: os,
+                diskSize: diskSize,
+                cpuCount: cpuCount,
+                memorySize: memorySize,
+                display: display,
+                ipsw: ipsw,
+                storage: storage,
+                unattendedConfig: unattendedConfig,
+                debug: debug,
+                debugDir: debugDir,
+                noDisplay: noDisplay,
+                vncPort: vncPort,
+                vmDir: vmDir
+            )
+
+            // Clear provisioning marker on success
+            vmDir.clearProvisioningMarker()
+            Logger.info("Provisioning marker cleared", metadata: ["name": name])
+
+        } catch {
+            // Clear provisioning marker on failure (vmDir may have been deleted by createInternal)
+            vmDir.clearProvisioningMarker()
+            Logger.error("Failed to create VM", metadata: ["error": error.localizedDescription])
+            throw error
+        }
+    }
+
+    /// Creates a VM asynchronously, returning immediately while the VM is being provisioned.
+    /// The VM will appear with status "provisioning" in `lume ls` until creation completes.
+    /// Poll VM status to check progress.
+    ///
+    /// - Parameters:
+    ///   - name: Name for the new VM
+    ///   - os: Operating system type ("macos" or "linux")
+    ///   - diskSize: Disk size in bytes
+    ///   - cpuCount: Number of CPU cores
+    ///   - memorySize: Memory size in bytes
+    ///   - display: Display resolution string (e.g., "1920x1080")
+    ///   - ipsw: Path to IPSW file or "latest" for macOS
+    ///   - storage: Optional storage location name or path
+    ///   - unattendedConfig: Optional unattended setup configuration
+    @MainActor
+    public func createAsync(
+        name: String,
+        os: String,
+        diskSize: UInt64,
+        cpuCount: Int,
+        memorySize: UInt64,
+        display: String,
+        ipsw: String?,
+        storage: String? = nil,
+        unattendedConfig: UnattendedConfig? = nil
+    ) throws {
+        Logger.info(
+            "Starting async VM creation",
+            metadata: [
+                "name": name,
+                "os": os,
+                "location": storage ?? "default",
+                "unattended": unattendedConfig != nil ? "yes" : "no",
+            ])
+
+        // Validate parameters upfront (this checks VM doesn't already exist)
+        try validateCreateParameters(name: name, os: os, ipsw: ipsw, storage: storage)
+
+        Logger.info("Spawning background task for VM creation", metadata: ["name": name])
+
+        // All parameters passed to Task are value types (Sendable)
+        // The Task will create its own LumeController instance
+        Task.detached { @MainActor @Sendable in
+            // Create a new controller for the background task
+            let controller = LumeController()
+
+            // Get the VM directory
+            let vmDir: VMDirectory
+            do {
+                vmDir = try controller.home.getVMDirectory(name, storage: storage)
+            } catch {
+                Logger.error("Failed to get VM directory",
+                            metadata: ["name": name, "error": error.localizedDescription])
+                return
+            }
+
+            // Create the VM directory and write provisioning marker first
+            // so VM appears in list immediately
+            do {
+                try FileManager.default.createDirectory(
+                    atPath: vmDir.dir.path,
+                    withIntermediateDirectories: true
+                )
+
+                // Create minimal config so VM shows up in list
+                let config = try VMConfig(
+                    os: os,
+                    cpuCount: cpuCount,
+                    memorySize: memorySize,
+                    diskSize: diskSize,
+                    display: display
+                )
+                try vmDir.saveConfig(config)
+
+                // Write provisioning marker
+                try vmDir.saveProvisioningMarker(ProvisioningMarker(operation: "ipsw_install"))
+                Logger.info("Provisioning marker created", metadata: ["name": name])
+            } catch {
+                Logger.error("Failed to create provisioning marker",
+                            metadata: ["name": name, "error": error.localizedDescription])
+                return
+            }
+
+            do {
+                // Run the internal create which does all the work
+                // (skips validation since we already validated)
+                try await controller.createInternal(
+                    name: name,
+                    os: os,
+                    diskSize: diskSize,
+                    cpuCount: cpuCount,
+                    memorySize: memorySize,
+                    display: display,
+                    ipsw: ipsw,
+                    storage: storage,
+                    unattendedConfig: unattendedConfig,
+                    vmDir: vmDir
+                )
+
+                // Clear marker on success
+                vmDir.clearProvisioningMarker()
+                Logger.info("Async VM creation completed successfully", metadata: ["name": name])
+
+            } catch {
+                // Clear marker and cleanup on failure
+                vmDir.clearProvisioningMarker()
+                do {
+                    try vmDir.delete()
+                } catch let cleanupError {
+                    Logger.error("Failed to clean up VM directory after async creation failure",
+                               metadata: ["error": cleanupError.localizedDescription])
+                }
+                Logger.error("Async VM creation failed",
+                            metadata: ["name": name, "error": error.localizedDescription])
+            }
+        }
+    }
+
+    /// Internal create method that skips validation (used by createAsync)
+    @MainActor
+    private func createInternal(
+        name: String,
+        os: String,
+        diskSize: UInt64,
+        cpuCount: Int,
+        memorySize: UInt64,
+        display: String,
+        ipsw: String?,
+        storage: String? = nil,
+        unattendedConfig: UnattendedConfig? = nil,
+        debug: Bool = false,
+        debugDir: String? = nil,
+        noDisplay: Bool = true,
+        vncPort: Int = 0,
+        vmDir: VMDirectory? = nil
+    ) async throws {
+        Logger.info(
+            "Creating VM (internal)",
+            metadata: [
+                "name": name,
+                "os": os,
+                "location": storage ?? "default",
+            ])
+
+        let vm = try await createTempVMConfig(
+            os: os,
+            cpuCount: cpuCount,
+            memorySize: memorySize,
+            diskSize: diskSize,
+            display: display
+        )
+
+        // Track the temp directory for cleanup on failure
+        let tempVMDir = vm.vmDirContext.dir
+
+        do {
             try await vm.setup(
                 ipswPath: ipsw ?? "none",
                 cpuCount: cpuCount,
@@ -312,24 +561,49 @@ final class LumeController {
                 display: display
             )
 
+            // If vmDir was pre-created (async flow), we need to handle finalization differently
+            if let existingVmDir = vmDir {
+                // Delete the pre-created directory (with just config and marker)
+                // and let finalize create it fresh with all the VM files
+                try existingVmDir.delete()
+            }
+
             try vm.finalize(to: name, home: home, storage: storage)
+        } catch {
+            // Clean up the temporary VM directory on setup/finalize failure
+            Logger.info("Cleaning up temporary VM directory after failed creation",
+                       metadata: ["path": tempVMDir.dir.path])
+            do {
+                try tempVMDir.delete()
+            } catch let cleanupError {
+                Logger.error("Failed to clean up temporary VM directory",
+                           metadata: ["error": cleanupError.localizedDescription])
+            }
+            throw error
+        }
 
-            Logger.info("VM created successfully", metadata: ["name": name])
+        Logger.info("VM created successfully", metadata: ["name": name])
 
-            // Run unattended setup if config is provided
-            if let config = unattendedConfig, os.lowercased() == "macos" {
-                // Wait for the installation VZVirtualMachine to fully release auxiliary storage locks.
-                // The VM created during IPSW installation holds a lock on the auxiliary storage file.
-                // Swift's ARC may not immediately deallocate it, so we wait to ensure the lock is released.
-                Logger.info("Waiting for installation resources to be released before unattended setup")
-                try await Task.sleep(nanoseconds: 3_000_000_000)  // 3 seconds
-                Logger.info("Starting unattended Setup Assistant automation", metadata: ["name": name])
+        // Run unattended setup if config is provided
+        if let config = unattendedConfig, os.lowercased() == "macos" {
+            // Update provisioning marker for unattended phase (only if async flow)
+            if vmDir != nil {
+                // Re-get the vmDir since we deleted and recreated it
+                let updatedVmDir = try home.getVMDirectory(name, storage: storage)
+                try updatedVmDir.saveProvisioningMarker(ProvisioningMarker(operation: "unattended_setup"))
+            }
 
-                // Load the finalized VM
-                let finalVM = try get(name: name, storage: storage)
+            // Wait for the installation VZVirtualMachine to fully release auxiliary storage locks.
+            Logger.info("Waiting for installation resources to be released before unattended setup")
+            try await Task.sleep(nanoseconds: 3_000_000_000)  // 3 seconds
+            Logger.info("Starting unattended Setup Assistant automation", metadata: ["name": name])
 
-                // Run the unattended installer
-                let installer = UnattendedInstaller()
+            // Load the finalized VM
+            let finalVM = try get(name: name, storage: storage)
+
+            // Run the unattended installer
+            let installer = UnattendedInstaller()
+            do {
                 try await installer.install(
                     vm: finalVM,
                     config: config,
@@ -338,14 +612,24 @@ final class LumeController {
                     debug: debug,
                     debugDir: debugDir
                 )
-
-                Logger.info("Unattended setup completed", metadata: ["name": name])
+            } catch {
+                // Clean up the finalized VM directory on unattended setup failure
+                Logger.info("Cleaning up VM after failed unattended setup",
+                           metadata: ["name": name])
+                do {
+                    let vmDirToDelete = try home.getVMDirectory(name, storage: storage)
+                    try vmDirToDelete.delete()
+                } catch let cleanupError {
+                    Logger.error("Failed to clean up VM after unattended setup failure",
+                               metadata: ["error": cleanupError.localizedDescription])
+                }
+                throw error
             }
-        } catch {
-            Logger.error("Failed to create VM", metadata: ["error": error.localizedDescription])
-            throw error
+
+            Logger.info("Unattended setup completed", metadata: ["name": name])
         }
     }
+
 
     /// Run unattended Setup Assistant automation on an existing macOS VM
     @MainActor
@@ -497,6 +781,10 @@ final class LumeController {
             let actualLocation = try self.validateVMExists(
                 normalizedName, storage: storage)
 
+            // Check if VM is still being provisioned
+            let vmDir = try home.getVMDirectory(normalizedName, storage: actualLocation)
+            try validateNotProvisioning(vmDir, name: normalizedName)
+
             // Try to get VM from cache first
             let vm: VM
             if let cachedVM = SharedVM.shared.getVM(name: normalizedName) {
@@ -602,6 +890,9 @@ final class LumeController {
                         "actual": actualLocationName ?? "default",
                     ])
             }
+
+            // Check if VM is still being provisioned
+            try validateNotProvisioning(vmDir, name: normalizedName)
 
             // Validate parameters using the located VMDirectory
             try validateRunParameters(
@@ -944,6 +1235,20 @@ final class LumeController {
         try SettingsManager.shared.setCachingEnabled(enabled)
 
         Logger.info("Caching setting updated", metadata: ["enabled": "\(enabled)"])
+    }
+
+    // MARK: - Telemetry Management
+
+    public func isTelemetryEnabled() -> Bool {
+        return SettingsManager.shared.isTelemetryEnabled()
+    }
+
+    public func setTelemetryEnabled(_ enabled: Bool) throws {
+        Logger.info("Setting telemetry enabled", metadata: ["enabled": "\(enabled)"])
+
+        try SettingsManager.shared.setTelemetryEnabled(enabled)
+
+        Logger.info("Telemetry setting updated", metadata: ["enabled": "\(enabled)"])
     }
 
     // MARK: - Private Helper Methods

@@ -8,6 +8,7 @@ import asyncio
 import os
 import shutil
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -27,6 +28,18 @@ from .docker_utils import (
     stop_container,
     wait_for_container,
 )
+
+# =============================================================================
+# Provider Type Enum
+# =============================================================================
+
+class ProviderType(Enum):
+    """Provider type enumeration."""
+    SIMULATED = "simulated"
+    WEBTOP = "webtop"
+    NATIVE = "native"
+    COMPUTER = "computer"
+
 
 # =============================================================================
 # Configuration
@@ -246,23 +259,40 @@ class TaskRunner:
         if cleanup_before:
             await full_cleanup()
 
-        # Determine if this is a simulated or remote provider
-        is_simulated = provider_type in ("simulated", "webtop")
-        is_remote = provider_type == "remote" or os.environ.get("CUA_PROVIDER") == "remote"
+        # Determine provider type
+        # Priority: explicit arg > env var > default native
+        provider_value = provider_type or os.environ.get("CUA_PROVIDER", "native")
+        try:
+            provider = ProviderType(provider_value)
+        except ValueError:
+            raise ValueError(f"Unknown provider type: {provider_value}")
+        
+        is_simulated = provider in (ProviderType.SIMULATED, ProviderType.WEBTOP)
+        is_computer = provider == ProviderType.COMPUTER
+        is_native = provider == ProviderType.NATIVE
+        # Pre-flight check: ensure required env vars for computer provider
+        if is_computer:
+            if not os.environ.get("CUA_ENV_API_URL"):
+                raise ValueError(
+                    "For computer provider, CUA_ENV_API_URL must be set. "
+                    "Example: export CUA_ENV_API_URL=http://localhost:5000"
+                )
 
-        # Validate env_type (skip validation for simulated/remote since we don't manage the env)
-        if not is_simulated and not is_remote and env_type not in ENV_CONFIGS:
+        # Validate env_type (skip validation for simulated/computer since we don't manage the env)
+        if is_native and env_type not in ENV_CONFIGS:
             raise ValueError(
                 f"Unknown env_type: {env_type}. Valid types: {list(ENV_CONFIGS.keys())}"
             )
 
-        config = ENV_CONFIGS.get(env_type, {}) if (not is_simulated and not is_remote) else {}
-        golden_name = golden_name or env_type if (not is_simulated and not is_remote) else "external"
+        config = ENV_CONFIGS.get(env_type, {}) if is_native else {}
+        golden_name = golden_name or env_type if is_native else None
 
         # Generate unique task ID
         task_id = generate_task_id()
-        network_name = f"cua-task-{task_id}"
-        env_container_name = f"cua-env-{task_id}"
+        
+        # Create network only for native provider
+        network_name = f"cua-task-{task_id}" if is_native else None
+        env_container_name = f"cua-env-{task_id}" if is_native else None
         agent_container_name = f"cua-agent-{task_id}"
 
         # Create task overlay for QEMU types (protects golden image)
@@ -273,25 +303,25 @@ class TaskRunner:
         # Track task for cleanup
         self._running_tasks[task_id] = {
             "network": network_name,
-            "env_container": env_container_name if (not is_simulated and not is_remote) else None,
+            "env_container": env_container_name if is_native else None,
             "agent_container": agent_container_name,
-            "env_image": config.get("image") if (not is_simulated and not is_remote) else None,
+            "env_image": config.get("image") if is_native else None,
             "agent_image": self.agent_image,
             "remove_images": remove_images_after,
             "overlay_path": overlay_path,
             "is_simulated": is_simulated,
-            "is_remote": is_remote,
+            "is_computer": is_computer,
         }
 
         # Track log streaming process for cleanup
         log_stream_process = None
 
         try:
-            # 1. Create network
-            await create_network(network_name)
+            if is_native:
+                # 1. Create network
+                await create_network(network_name)
 
-            # 2. Start environment container (skip for simulated/remote providers)
-            if not is_simulated and not is_remote:
+                # 2. Start environment container (skip for simulated/computer providers)
                 await self._start_env_container(
                     task_id=task_id,
                     network_name=network_name,
@@ -320,8 +350,7 @@ class TaskRunner:
                 max_steps=max_steps,
                 oracle=oracle,
                 output_dir=output_dir,
-                is_simulated=is_simulated,
-                is_remote=is_remote,
+                provider=provider,
             )
 
             # 3.5. Start streaming agent logs to file if requested
@@ -758,16 +787,15 @@ class TaskRunner:
         env_path: Path,
         task_index: int,
         config: dict,
-        agent: Optional[str],
-        agent_image: Optional[str],
-        agent_command: Optional[List[str]],
-        agent_import_path: Optional[str],
-        model: Optional[str],
-        max_steps: int,
-        oracle: bool,
-        output_dir: Optional[str],
-        is_simulated: bool = False,
-        is_remote: bool = False,
+        agent: Optional[str] = None,
+        agent_image: Optional[str] = None,
+        agent_command: Optional[List[str]] = None,
+        agent_import_path: Optional[str] = None,
+        model: Optional[str] = None,
+        max_steps: int = 100,
+        oracle: bool = False,
+        output_dir: Optional[str] = None,
+        provider: ProviderType = ProviderType.NATIVE,
     ) -> ContainerInfo:
         """Start the agent container.
 
@@ -802,9 +830,9 @@ class TaskRunner:
         if resolved_command is not None:
             agent_command = resolved_command
 
-        # Build API URL. For remote providers, use the host's environment variables.
+        # Build API URL. For computer providers, use the host's environment variables.
         # For local providers, use the internal network hostname.
-        if is_remote:
+        if provider == ProviderType.COMPUTER:
             api_url = os.environ.get("CUA_ENV_API_URL", "")
             vnc_url = os.environ.get("CUA_ENV_VNC_URL", "")
         else:
@@ -820,7 +848,7 @@ class TaskRunner:
             "CUA_ENV_API_URL": api_url,
             "CUA_ENV_VNC_URL": vnc_url,
             "CUA_ENV_TYPE": os.environ.get("CUA_ENV_TYPE") or (config.get("os_type", "linux") if config else "linux"),
-            "CUA_PROVIDER": "remote" if is_remote else ("simulated" if is_simulated else "remote"),
+            "CUA_PROVIDER": provider.value,
             "CUA_TASK_PATH": "/app/env",
             "CUA_TASK_INDEX": str(task_index),
             "BATCH_TASK_INDEX": str(task_index),  # Legacy compat
@@ -889,10 +917,13 @@ class TaskRunner:
                     command.extend(["--max-steps", str(max_steps)])
 
         # Start container (not detached - we want to wait for it)
+        # For computer provider, use host network to access remote API
+        container_network = network_name if network_name else "host"
+        
         return await start_container(
             image=image,
             name=container_name,
-            network=network_name,
+            network=container_network,
             hostname=self.agent_hostname,
             env_vars=env_vars,
             volumes=volumes,
