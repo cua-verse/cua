@@ -63,6 +63,7 @@ def parse_args(argv: list[str]) -> dict:
         "save_pngs": False,
         "filter_events": None,
         "task_index": None,
+        "output_dir": None,
     }
 
     if len(argv) < 2:
@@ -86,6 +87,8 @@ def parse_args(argv: list[str]) -> dict:
             args["filter_events"] = [name.strip() for name in argv[i + 1].split(",")]
         elif arg == "--task-index" and i + 1 < len(argv):
             args["task_index"] = int(argv[i + 1])
+        elif arg == "--output-dir" and i + 1 < len(argv):
+            args["output_dir"] = argv[i + 1]
 
     return args
 
@@ -138,6 +141,7 @@ async def main():
         print("  --save-pngs            Save screenshots as PNGs")
         print("  --filter <events>      Filter trace events")
         print("  --task-index <n>       Override task index")
+        print("  --output-dir <path>    Output directory (default: /tmp/td_output)")
         print("")
         print("Environment variables:")
         print("  CUA_ENV_API_URL        Required. Golden env API URL")
@@ -251,8 +255,8 @@ async def main():
             print(f"Running task {task_index}: {task_cfg.description}")
 
             # Create output directory
-            output_dir = Path("/tmp/td_output")
-            output_dir.mkdir(exist_ok=True)
+            output_dir = Path(args["output_dir"]) if args["output_dir"] else Path("/tmp/td_output")
+            output_dir.mkdir(parents=True, exist_ok=True)
 
             # Start tracing
             try:
@@ -288,8 +292,8 @@ async def main():
                 print(f"Warning: Failed to record reset event: {e}")
 
         # Create output directory (after task setup)
-        output_dir = Path("/tmp/td_output")
-        output_dir.mkdir(exist_ok=True)
+        output_dir = Path(args["output_dir"]) if args["output_dir"] else Path("/tmp/td_output")
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         # Run solver or agent
         if not args["dump_mode"]:
