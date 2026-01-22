@@ -23,6 +23,10 @@ class HumanCompletionUI:
         self.current_button: str = "left"
         self.current_scroll_x: int = 0
         self.current_scroll_y: int = -120
+        # Drag operation state variables
+        self.drag_start_x: Optional[int] = None
+        self.drag_start_y: Optional[int] = None
+        self.drag_start_selected: bool = False
 
     def format_messages_for_chatbot(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Format messages for display in gr.Chatbot with type='messages'."""
@@ -392,12 +396,25 @@ class HumanCompletionUI:
         """Submit a wait action with no kwargs."""
         return self.submit_action("wait")
 
+    def submit_drag_action(self, start_x: int, start_y: int, end_x: int, end_y: int) -> str:
+        """Submit a drag action with start and end coordinates."""
+        # Create a path with start and end points
+        path = [
+            {"x": start_x, "y": start_y},
+            {"x": end_x, "y": end_y}
+        ]
+        return self.submit_action("drag", path=path)
+
     def submit_description_click(
         self, description: str, action_type: str = "click", button: str = "left"
     ) -> str:
         """Submit a description-based action."""
         if action_type == "click":
             return self.submit_action(action_type, element_description=description, button=button)
+        elif action_type == "drag":
+            # For drag action with description, we need both start and end descriptions
+            # For simplicity, we'll use the same description for both start and end
+            return self.submit_action(action_type, element_description=description)
         else:
             return self.submit_action(action_type, element_description=description)
 
@@ -456,6 +473,7 @@ def create_ui():
                                     "left_mouse_up",
                                     "left_mouse_down",
                                     "scroll",
+                                    "drag",
                                 ],
                                 value="click",
                                 scale=2,
@@ -517,6 +535,7 @@ def create_ui():
                                             "move",
                                             "left_mouse_up",
                                             "left_mouse_down",
+                                            "drag",
                                         ],
                                         value="click",
                                     )
@@ -578,6 +597,7 @@ def create_ui():
                 x, y = evt.index
                 action_type = ui_handler.current_action_type or "click"
                 button = ui_handler.current_button or "left"
+                
                 if action_type == "scroll":
                     sx_i = int(ui_handler.current_scroll_x or 0)
                     sy_i = int(ui_handler.current_scroll_y or 0)
@@ -585,6 +605,26 @@ def create_ui():
                     result = ui_handler.submit_action(
                         "scroll", x=x, y=y, scroll_x=sx_i, scroll_y=sy_i
                     )
+                elif action_type == "drag":
+                    # Handle drag action - two clicks: first for start, second for end
+                    if not ui_handler.drag_start_selected:
+                        # First click: set start point
+                        ui_handler.drag_start_x = x
+                        ui_handler.drag_start_y = y
+                        ui_handler.drag_start_selected = True
+                        result = f"✅ Drag start point selected at ({x}, {y}). Please click again to select end point."
+                    else:
+                        # Second click: set end point and submit drag action
+                        if ui_handler.drag_start_x is not None and ui_handler.drag_start_y is not None:
+                            result = ui_handler.submit_drag_action(
+                                ui_handler.drag_start_x, ui_handler.drag_start_y, x, y
+                            )
+                            # Reset drag state
+                            ui_handler.drag_start_selected = False
+                            ui_handler.drag_start_x = None
+                            ui_handler.drag_start_y = None
+                        else:
+                            result = "❌ Drag start point not set. Please try again."
                 else:
                     result = ui_handler.submit_click_action(x, y, action_type, button)
                 ui_handler.wait_for_pending_calls()
@@ -627,6 +667,11 @@ def create_ui():
             # Scroll inputs visible only for scroll
             scroll_x_vis = gr.update(visible=(action_type == "scroll"))
             scroll_y_vis = gr.update(visible=(action_type == "scroll"))
+            # Reset drag state when action type changes
+            if action_type != "drag":
+                ui_handler.drag_start_selected = False
+                ui_handler.drag_start_x = None
+                ui_handler.drag_start_y = None
             # Update state
             ui_handler.current_action_type = action_type or "click"
             return button_vis, scroll_x_vis, scroll_y_vis
