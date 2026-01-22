@@ -833,6 +833,39 @@ class RemoteDesktopSession:
         """
         return await self.shell_command(command, check=check)
 
+    async def copy_file(self, source: str, destination: str) -> Dict[str, Any]:
+        """Copy a file from source to destination."""
+        if self._os_type in ("windows", "win11", "win10", "win7", "winxp", "win98"):
+            # Use PowerShell with UTF-8 to avoid encoding issues with non-ASCII output
+            escaped_source = source.replace("'", "''")
+            escaped_dest = destination.replace("'", "''")
+            cmd = f"powershell -Command \"Copy-Item -Path '{escaped_source}' -Destination '{escaped_dest}'\""
+        else:
+            cmd = f'cp "{source}" "{destination}"'
+        return await self.run_command(cmd)
+
+    async def move_file(self, source: str, destination: str) -> Dict[str, Any]:
+        """Move a file from source to destination."""
+        if self._os_type in ("windows", "win11", "win10", "win7", "winxp", "win98"):
+            # Use PowerShell with UTF-8 to avoid encoding issues with non-ASCII output
+            escaped_source = source.replace("'", "''")
+            escaped_dest = destination.replace("'", "''")
+            cmd = f"powershell -Command \"Move-Item -Path '{escaped_source}' -Destination '{escaped_dest}'\""
+        else:
+            cmd = f'mv "{source}" "{destination}"'
+        return await self.run_command(cmd)
+
+    async def remove_file(self, path: str) -> Dict[str, Any]:
+        """Remove a file from the environment."""
+        if self._os_type in ("windows", "win11", "win10", "win7", "winxp", "win98"):
+            # Use PowerShell with UTF-8 to avoid encoding issues with non-ASCII output
+            escaped_path = path.replace("'", "''")
+            cmd = f"powershell -Command \"Remove-Item -Path '{escaped_path}' -Force\""
+        else:
+            cmd = f'rm -f "{path}"'
+        return await self.run_command(cmd)
+
+
     async def launch_application(self, app_name: str) -> None:
         """Launch an application by name."""
         await self._ensure_computer()

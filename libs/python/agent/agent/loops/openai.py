@@ -19,17 +19,17 @@ async def _map_computer_tool_to_openai(computer_handler: Any) -> Dict[str, Any]:
     """Map a computer tool to OpenAI's computer-use-preview tool schema"""
     # Get dimensions from the computer handler
     try:
-        width, height = await computer_handler.get_dimensions()
+        width, height = await computer_handler["dimensions"]()
     except Exception:
         # Fallback to default dimensions if method fails
-        width, height = 1024, 768
+        width, height = 1920, 1080
 
     # Get environment from the computer handler
     try:
-        environment = await computer_handler.get_environment()
+        environment = await computer_handler["environment"]()
     except Exception:
         # Fallback to default environment if method fails
-        environment = "linux"
+        environment = "windows"
 
     return {
         "type": "computer_use_preview",

@@ -244,6 +244,33 @@ class DesktopSession(Protocol):
         """
         ...
 
+    async def copy_file(self, source: str, destination: str) -> "CommandResult":
+        """Copy a file from source to destination on the native desktop.
+
+        Args:
+            source: Source file path
+            destination: Destination file path
+        """
+        ...
+
+    async def move_file(self, source: str, destination: str) -> "CommandResult":
+        """Move a file from source to destination on the native desktop.
+
+        Args:
+            source: Source file path
+            destination: Destination file path
+        """
+        ...
+
+    async def remove_file(self, path: str) -> "CommandResult":
+        """Remove a file from the native desktop environment.
+
+        Args:
+            path: Path to the file to remove
+        """
+        ...
+
+
     # --- App Management ---
 
     async def install_app(

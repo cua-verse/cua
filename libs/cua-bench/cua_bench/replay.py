@@ -103,7 +103,16 @@ async def replay_trajectory(
 
     # Create computer handler from session._computer (same as ComputerAgent does)
     handler = cuaComputerHandler(session._computer)
+    
+    # Debug: Check computer state before initialization
+    logger.info(f"DEBUG: session._computer type: {type(session._computer)}")
+    logger.info(f"DEBUG: session._computer._initialized: {getattr(session._computer, '_initialized', 'N/A')}")
+    
     await handler._initialize()
+    
+    # Debug: Check handler state after initialization
+    logger.info(f"DEBUG: handler.interface: {handler.interface}")
+    logger.info(f"DEBUG: handler.cua_computer: {handler.cua_computer}")
 
     actions_executed = 0
 
@@ -117,8 +126,14 @@ async def replay_trajectory(
         # Dynamic dispatch - same pattern as ComputerAgent._handle_item()
         method = getattr(handler, action_type, None)
         if method:
-            await method(**action_args)
-            actions_executed += 1
+            try:
+                await method(**action_args)
+                actions_executed += 1
+                logger.info(f"DEBUG: Action {action_type} completed successfully")
+            except Exception as e:
+                logger.error(f"DEBUG: Action {action_type} FAILED with error: {e}")
+                import traceback
+                logger.error(f"DEBUG: Traceback: {traceback.format_exc()}")
         else:
             logger.warning(f"Unknown action type: {action_type}")
 

@@ -836,7 +836,24 @@ class WebDesktopSession(DesktopSession):
         cy = int(rect["y"] + rect["height"] / 2)
         await self.env.step(RightClickAction(x=cx, y=cy))
 
+    async def run_command(self, *args, **kwargs):
+        """Not implemented for simulated sessions."""
+        raise NotImplementedError("Simulated sessions do not support run_command")
+
+    async def copy_file(self, *args, **kwargs):
+        """Not implemented for simulated sessions."""
+        raise NotImplementedError("Simulated sessions do not support copy_file")
+
+    async def move_file(self, *args, **kwargs):
+        """Not implemented for simulated sessions."""
+        raise NotImplementedError("Simulated sessions do not support move_file")
+
+    async def remove_file(self, *args, **kwargs):
+        """Not implemented for simulated sessions."""
+        raise NotImplementedError("Simulated sessions do not support remove_file")
+
     async def close(self) -> None:
+
         if self._page:
             await self._page.close()
         if self.context:

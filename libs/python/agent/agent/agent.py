@@ -230,7 +230,7 @@ class ComputerAgent:
         self.max_retries = max_retries
         self.screenshot_delay = screenshot_delay
         self.use_prompt_caching = use_prompt_caching
-        self.telemetry_enabled = telemetry_enabled
+        self.telemetry_enabled = False
         self.kwargs = additional_generation_kwargs
         self.trust_remote_code = trust_remote_code
         self.api_key = api_key

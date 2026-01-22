@@ -126,13 +126,13 @@ class CuaAgent(BaseAgent):
         async def get_dimensions():
             """Get screen dimensions."""
             # Default dimensions
-            return (1024, 768)
+            return (1920, 1080)
 
         # Get environment type
         async def get_environment():
             """Get environment type."""
-            # Default to linux
-            return "linux"
+            # Default to windows
+            return "windows"
 
         # Build custom computer dict
         custom_computer = {
