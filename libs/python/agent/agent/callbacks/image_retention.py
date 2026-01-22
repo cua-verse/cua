@@ -2,7 +2,6 @@
 Image retention callback handler that limits the number of recent images in message history.
 """
 
-import copy
 from typing import Any, Dict, List, Optional
 
 from .base import AsyncCallbackHandler
@@ -41,15 +40,14 @@ class ImageRetentionCallback(AsyncCallbackHandler):
     def _apply_image_retention(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Apply image retention policy to keep only the N most recent images.
 
-        Replaces image_url with "[omitted]" for older computer_call_output items,
-        keeping only the most recent N images based on only_n_most_recent_images setting.
-        Preserves all other message content including computer_call and reasoning items.
+        Removes computer_call_output items with image_url and their corresponding computer_call items,
+        keeping only the most recent N image pairs based on only_n_most_recent_images setting.
 
         Args:
             messages: List of message dictionaries
 
         Returns:
-            List of messages with image retention policy applied
+            Filtered list of messages with image retention applied
         """
         if self.only_n_most_recent_images is None:
             return messages
@@ -57,7 +55,7 @@ class ImageRetentionCallback(AsyncCallbackHandler):
         # Gather indices of all computer_call_output messages that contain an image_url
         output_indices: List[int] = []
         for idx, msg in enumerate(messages):
-            if isinstance(msg, dict) and msg.get("type") == "computer_call_output":
+            if msg.get("type") == "computer_call_output":
                 out = msg.get("output")
                 if isinstance(out, dict) and ("image_url" in out):
                     output_indices.append(idx)
@@ -69,18 +67,29 @@ class ImageRetentionCallback(AsyncCallbackHandler):
         # Determine which outputs to keep (most recent N)
         keep_output_indices = set(output_indices[-self.only_n_most_recent_images :])
 
-        # Create a deep copy of messages to modify
-        modified_messages = copy.deepcopy(messages)
+        # Build set of indices to remove in one pass
+        to_remove: set[int] = set()
 
         for idx in output_indices:
             if idx in keep_output_indices:
-                continue  # keep this image
+                continue  # keep this screenshot and its context
 
-            # Replace image_url with [omitted] instead of deleting the entire message
-            msg = modified_messages[idx]
-            if isinstance(msg, dict):
-                output = msg.get("output", {})
-                if isinstance(output, dict):
-                    output["image_url"] = "[omitted]"
+            to_remove.add(idx)  # remove the computer_call_output itself
 
-        return modified_messages
+            # Remove the immediately preceding computer_call with matching call_id (if present)
+            call_id = messages[idx].get("call_id")
+            prev_idx = idx - 1
+            if (
+                prev_idx >= 0
+                and messages[prev_idx].get("type") == "computer_call"
+                and messages[prev_idx].get("call_id") == call_id
+            ):
+                to_remove.add(prev_idx)
+                # Check a single reasoning immediately before that computer_call
+                r_idx = prev_idx - 1
+                if r_idx >= 0 and messages[r_idx].get("type") == "reasoning":
+                    to_remove.add(r_idx)
+
+        # Construct filtered list
+        filtered = [m for i, m in enumerate(messages) if i not in to_remove]
+        return filtered
