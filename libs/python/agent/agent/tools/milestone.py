@@ -97,33 +97,34 @@ class MilestoneTool(BaseTool):
         try:
             # 1. Take screenshot
             screenshot_bytes = await self.interface.screenshot()
-            screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
 
             # 2. Prepare remote directory
-            dir_path = "/".join(path.rsplit("/", 1)[:-1]) if "/" in path else "."
+            import os
+            dir_path = os.path.dirname(path)
             if dir_path and dir_path != ".":
-                await self.interface.run_command(f'mkdir -p "{dir_path}"')
+                # Create directory if it doesn't exist
+                try:
+                    # Try to create directory using run_command
+                    # Use platform-agnostic approach
+                    if os.name == 'nt':  # Windows
+                        await self.interface.run_command(f'mkdir "{dir_path}" 2>nul || echo Directory already exists')
+                    else:  # Unix-like
+                        await self.interface.run_command(f'mkdir -p "{dir_path}"')
+                except Exception as dir_error:
+                    logger.error(f"Error creating directory: {dir_error}")
+                    return {"success": False, "error": f"Failed to create directory: {str(dir_error)}"}
 
-            # 3. Save file on remote computer using python (more reliable for binary data)
-            save_cmd = f'''python3 -c "
-import base64
-data = base64.b64decode('{screenshot_b64}')
-with open('{path}', 'wb') as f:
-    f.write(data)
-print('SUCCESS')
-"'''
-            result = await self.interface.run_command(save_cmd)
-
-            if "SUCCESS" in (result.stdout or ""):
+            # 3. Save file using write_bytes (more reliable for binary data)
+            try:
+                await self.interface.write_bytes(path, screenshot_bytes)
                 msg = f"✅ Milestone screenshot saved to: {path}"
                 if description:
                     msg += f" (Milestone: {description})"
                 return {"success": True, "message": msg}
-            else:
-                return {
-                    "success": False,
-                    "error": f"Failed to save screenshot: {result.stderr or result.stdout}",
-                }
+            except Exception as save_error:
+                logger.error(f"Error saving screenshot: {save_error}")
+                return {"success": False, "error": f"Failed to save screenshot: {str(save_error)}"}
 
         except Exception as e:
+            logger.error(f"Error in _execute_save: {e}")
             return {"success": False, "error": str(e)}
