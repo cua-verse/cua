@@ -189,7 +189,7 @@ Task: Click {instruction}. Output ONLY a click action on the target element.""",
             display_width, display_height = image.size
         except Exception:
             # Fallback to default dimensions if image parsing fails
-            display_width, display_height = 1024, 768
+            display_width, display_height = 1920, 1080
 
         # Prepare computer tool for click actions
         computer_tool = {

@@ -12,6 +12,7 @@ from .base import (
     register_tool,
 )
 from .browser_tool import BrowserTool
+from .milestone import MilestoneTool
 
 __all__ = [
     "BaseTool",
@@ -21,4 +22,5 @@ __all__ = [
     "get_tool",
     "TOOL_REGISTRY",
     "BrowserTool",
+    "MilestoneTool",
 ]
