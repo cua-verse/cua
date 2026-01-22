@@ -22,7 +22,7 @@ async def _map_computer_tool_to_openai(computer_handler: Any) -> Dict[str, Any]:
         width, height = await computer_handler["dimensions"]()
     except Exception:
         # Fallback to default dimensions if method fails
-        width, height = 1920, 1080
+        width, height = 1024, 768
 
     # Get environment from the computer handler
     try:

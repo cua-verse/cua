@@ -46,7 +46,6 @@ from .responses import (
     make_tool_error_item,
     replace_failed_computer_calls_with_function_calls,
 )
-from .tools import MilestoneTool
 from .tools.base import BaseComputerTool, BaseTool
 from .types import AgentCapability, IllegalArgumentError, Messages, ToolError
 
@@ -340,18 +339,6 @@ class ComputerAgent:
                         break
 
             self.computer_handler = computer_handler
-
-            # Automatically add milestone screenshot tool if computer is present
-            if self.computer_handler:
-                interface = getattr(self.computer_handler, "interface", None)
-                # Only add if we have an interface and it's not already in tools
-                if interface and not any(
-                    isinstance(t, MilestoneTool) for t in self.tools
-                ):
-                    milestone_tool = MilestoneTool(interface)
-                    self.tools.append(milestone_tool)
-                    # Re-generate tool schemas to include the new tool
-                    self.tool_schemas = self._process_tools()
 
     def _process_input(self, input: Messages) -> List[Dict[str, Any]]:
         """Process input messages and create schemas for the agent loop"""
