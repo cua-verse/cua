@@ -865,6 +865,19 @@ class RemoteDesktopSession:
             cmd = f'rm -f "{path}"'
         return await self.run_command(cmd)
 
+    async def run_file(self, path: str) -> Dict[str, Any]:
+        """Open a file with the default application."""
+        if self._os_type in ("windows", "win11", "win10", "win7", "winxp", "win98"):
+            # Use Start-Process via PowerShell for Windows
+            escaped_path = path.replace("'", "''")
+            cmd = f"powershell -Command \"Start-Process -FilePath '{escaped_path}'\""
+        elif self._os_type == "macos":
+            cmd = f'open "{path}"'
+        else:
+            cmd = f'xdg-open "{path}"'
+        return await self.run_command(cmd)
+
+
 
     async def launch_application(self, app_name: str) -> None:
         """Launch an application by name."""

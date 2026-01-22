@@ -270,6 +270,15 @@ class DesktopSession(Protocol):
         """
         ...
 
+    async def run_file(self, path: str) -> "CommandResult":
+        """Open a file with the default application in the native desktop environment.
+
+        Args:
+            path: Path to the file to open
+        """
+        ...
+
+
 
     # --- App Management ---
 

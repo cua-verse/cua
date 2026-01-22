@@ -852,7 +852,12 @@ class WebDesktopSession(DesktopSession):
         """Not implemented for simulated sessions."""
         raise NotImplementedError("Simulated sessions do not support remove_file")
 
+    async def run_file(self, *args, **kwargs):
+        """Not implemented for simulated sessions."""
+        raise NotImplementedError("Simulated sessions do not support run_file")
+
     async def close(self) -> None:
+
 
         if self._page:
             await self._page.close()
