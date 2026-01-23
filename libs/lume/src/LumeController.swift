@@ -343,6 +343,49 @@ final class LumeController {
         }
     }
 
+    /// Gets VM details using the lightweight path (includes provisioning status)
+    /// Use this instead of get().details when you need accurate status including provisioning state
+    @MainActor
+    public func getDetails(name: String, storage: String? = nil) throws -> VMDetails {
+        let normalizedName = normalizeVMName(name: name)
+        do {
+            let vmDir: VMDirectory
+            let locationName: String
+
+            if let storagePath = storage, storagePath.contains("/") || storagePath.contains("\\") {
+                // Storage is a direct path
+                vmDir = try home.getVMDirectoryFromPath(normalizedName, storagePath: storagePath)
+                guard vmDir.initialized() else {
+                    if vmDir.exists() {
+                        throw VMError.notInitialized(normalizedName)
+                    } else {
+                        throw VMError.notFound(normalizedName)
+                    }
+                }
+                locationName = storagePath
+            } else {
+                // Storage is nil or a named location - find the VM
+                let actualLocation = try self.validateVMExists(normalizedName, storage: storage)
+                vmDir = try home.getVMDirectory(normalizedName, storage: actualLocation)
+                locationName = actualLocation ?? "home"
+            }
+
+            // Use the lightweight path that includes provisioning status
+            guard let details = getVMDetailsLightweight(vmDir: vmDir, locationName: locationName) else {
+                throw VMError.notFound(normalizedName)
+            }
+            return details
+        } catch {
+            Logger.error(
+                "Failed to get VM details",
+                metadata: [
+                    "vmName": normalizedName, "storage": storage ?? "home",
+                    "error": error.localizedDescription,
+                ])
+            throw error
+        }
+    }
+
     @MainActor
     public func create(
         name: String,
@@ -477,6 +520,36 @@ final class LumeController {
         // Validate parameters upfront (this checks VM doesn't already exist)
         try validateCreateParameters(name: name, os: os, ipsw: ipsw, storage: storage)
 
+        // Create VM directory and provisioning marker BEFORE spawning background task
+        // so VM appears in list immediately with "provisioning" status
+        let vmDir = try home.getVMDirectory(name, storage: storage)
+
+        do {
+            try FileManager.default.createDirectory(
+                atPath: vmDir.dir.path,
+                withIntermediateDirectories: true
+            )
+
+            // Create minimal config so VM shows up in list
+            let config = try VMConfig(
+                os: os,
+                cpuCount: cpuCount,
+                memorySize: memorySize,
+                diskSize: diskSize,
+                display: display
+            )
+            try vmDir.saveConfig(config)
+
+            // Write provisioning marker
+            try vmDir.saveProvisioningMarker(ProvisioningMarker(operation: "ipsw_install"))
+            Logger.info("Provisioning marker created", metadata: ["name": name])
+        } catch {
+            // Clean up if we fail to set up provisioning marker
+            try? vmDir.delete()
+            Logger.error("Failed to create VM", metadata: ["error": error.localizedDescription])
+            throw error
+        }
+
         Logger.info("Spawning background task for VM creation", metadata: ["name": name])
 
         // All parameters passed to Task are value types (Sendable)
@@ -484,43 +557,6 @@ final class LumeController {
         Task.detached { @MainActor @Sendable in
             // Create a new controller for the background task
             let controller = LumeController()
-
-            // Get the VM directory
-            let vmDir: VMDirectory
-            do {
-                vmDir = try controller.home.getVMDirectory(name, storage: storage)
-            } catch {
-                Logger.error("Failed to get VM directory",
-                            metadata: ["name": name, "error": error.localizedDescription])
-                return
-            }
-
-            // Create the VM directory and write provisioning marker first
-            // so VM appears in list immediately
-            do {
-                try FileManager.default.createDirectory(
-                    atPath: vmDir.dir.path,
-                    withIntermediateDirectories: true
-                )
-
-                // Create minimal config so VM shows up in list
-                let config = try VMConfig(
-                    os: os,
-                    cpuCount: cpuCount,
-                    memorySize: memorySize,
-                    diskSize: diskSize,
-                    display: display
-                )
-                try vmDir.saveConfig(config)
-
-                // Write provisioning marker
-                try vmDir.saveProvisioningMarker(ProvisioningMarker(operation: "ipsw_install"))
-                Logger.info("Provisioning marker created", metadata: ["name": name])
-            } catch {
-                Logger.error("Failed to create provisioning marker",
-                            metadata: ["name": name, "error": error.localizedDescription])
-                return
-            }
 
             do {
                 // Run the internal create which does all the work
