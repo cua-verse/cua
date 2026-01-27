@@ -550,10 +550,11 @@ final class LumeMCPServer {
         }
         let storage = args?["storage"]?.stringValue
 
-        let vm = try controller.get(name: name, storage: storage)
+        // Use getDetails() for consistent status including provisioning state
+        let vmDetails = try controller.getDetails(name: name, storage: storage)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let json = try encoder.encode(vm.details)
+        let json = try encoder.encode(vmDetails)
         return CallTool.Result(content: [.text(String(data: json, encoding: .utf8) ?? "{}")])
     }
 
@@ -572,17 +573,33 @@ final class LumeMCPServer {
             sharedDirectories.append(SharedDirectory(hostPath: expandedPath, tag: "shared", readOnly: false))
         }
 
-        try await controller.runVM(
-            name: name,
-            noDisplay: noDisplay,
-            sharedDirectories: sharedDirectories,
-            storage: storage
-        )
+        // Run VM in detached task to avoid blocking (same pattern as HTTP API)
+        Task.detached { @MainActor @Sendable in
+            do {
+                let vmController = LumeController()
+                try await vmController.runVM(
+                    name: name,
+                    noDisplay: noDisplay,
+                    sharedDirectories: sharedDirectories,
+                    storage: storage
+                )
+            } catch {
+                Logger.error(
+                    "Failed to start VM in background task",
+                    metadata: [
+                        "name": name,
+                        "error": error.localizedDescription,
+                    ])
+            }
+        }
+
+        // Wait briefly for VM to initialize and get IP
+        try await Task.sleep(nanoseconds: 2_000_000_000)  // 2 seconds
 
         // Get VM details after starting to return IP
-        let vm = try controller.get(name: name, storage: storage)
+        let vmDetails = try controller.getDetails(name: name, storage: storage)
         var response = "VM '\(name)' started successfully."
-        if let ip = vm.details.ipAddress {
+        if let ip = vmDetails.ipAddress {
             response += "\nIP Address: \(ip)"
             response += "\nSSH: ssh lume@\(ip) (password: lume)"
         }

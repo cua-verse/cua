@@ -1039,7 +1039,7 @@ wheels = [
 
 [[package]]
 name = "cua-agent"
-version = "0.7.12"
+version = "0.7.17"
 source = { editable = "libs/python/agent" }
 dependencies = [
     { name = "aiohttp" },
@@ -1208,7 +1208,7 @@ requires-dist = [
 
 [[package]]
 name = "cua-computer"
-version = "0.5.6"
+version = "0.5.10"
 source = { editable = "libs/python/computer" }
 dependencies = [
     { name = "aiohttp" },
@@ -1252,7 +1252,7 @@ provides-extras = ["lume", "lumier", "ui", "all"]
 
 [[package]]
 name = "cua-computer-server"
-version = "0.3.2"
+version = "0.3.5"
 source = { editable = "libs/python/computer-server" }
 dependencies = [
     { name = "aiohttp" },
@@ -1285,6 +1285,9 @@ macos = [
     { name = "pyobjc-framework-cocoa" },
     { name = "pyobjc-framework-quartz" },
 ]
+mcp = [
+    { name = "fastmcp" },
+]
 windows = [
     { name = "pywin32" },
 ]
@@ -1293,9 +1296,7 @@ windows = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9.1" },
     { name = "fastapi", specifier = ">=0.111.0" },
-    { name = "opentelemetry-api", specifier = ">=1.39.1" },
-    { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.39.1" },
-    { name = "opentelemetry-sdk", specifier = ">=1.39.1" },
+    { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=2.0,<3" },
     { name = "pillow", specifier = ">=10.2.0" },
     { name = "playwright", specifier = ">=1.40.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
@@ -1316,16 +1317,14 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27.0" },
     { name = "websockets", specifier = ">=12.0" },
 ]
-provides-extras = ["macos", "linux", "windows"]
+provides-extras = ["mcp", "macos", "linux", "windows"]
 
 [[package]]
 name = "cua-core"
-version = "0.1.14"
+version = "0.1.16"
 source = { editable = "libs/python/core" }
 dependencies = [
-    { name = "httpx" },
     { name = "posthog" },
-    { name = "pydantic" },
 ]
 
 [package.optional-dependencies]
@@ -1351,7 +1350,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx", specifier = ">=0.24.0" },
     { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.20.0" },
     { name = "opentelemetry-api", marker = "extra == 'telemetry'", specifier = ">=1.20.0" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otel'", specifier = ">=1.20.0" },
@@ -1359,7 +1357,6 @@ requires-dist = [
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.20.0" },
     { name = "opentelemetry-sdk", marker = "extra == 'telemetry'", specifier = ">=1.20.0" },
     { name = "posthog", specifier = ">=3.20.0" },
-    { name = "pydantic", specifier = ">=2.0.0" },
     { name = "sentry-sdk", marker = "extra == 'sentry'", specifier = ">=1.39.0" },
     { name = "sentry-sdk", marker = "extra == 'telemetry'", specifier = ">=1.39.0" },
 ]

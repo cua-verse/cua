@@ -8,6 +8,8 @@
     "sandboxed-python",
     "local-computer-server",
     "human-in-the-loop",
+    "vnc-recorder",
+    "demonstration-guided-skills",
     "trajectories",
     "tracing",
     "chat-history",
