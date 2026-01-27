@@ -917,6 +917,20 @@ class GenericComputerInterface(BaseComputerInterface):
                 async with self._recv_lock:
                     response = await asyncio.wait_for(self._ws.recv(), timeout=120)
                 self.logger.debug(f"Completed command: {command}")
+                # Handle both string and bytes responses
+                if isinstance(response, bytes):
+                    try:
+                        response = response.decode('utf-8')
+                    except UnicodeDecodeError:
+                        # Try common Windows encodings, then fall back to replace mode
+                        for encoding in ['cp1252', 'gbk', 'latin1']:
+                            try:
+                                response = response.decode(encoding)
+                                break
+                            except (UnicodeDecodeError, LookupError):
+                                continue
+                        else:
+                            response = response.decode('utf-8', errors='replace')
                 return json.loads(response)
             except Exception as e:
                 last_error = e
@@ -956,8 +970,21 @@ class GenericComputerInterface(BaseComputerInterface):
             # Send the request
             async with aiohttp.ClientSession() as session:
                 async with session.post(self.rest_uri, json=payload, headers=headers) as response:
-                    # Get the response text
-                    response_text = await response.text()
+                    # Get the response bytes and decode with error handling
+                    # This handles non-UTF-8 characters from Windows command output
+                    response_bytes = await response.read()
+                    try:
+                        response_text = response_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        # Try common Windows encodings, then fall back to replace mode
+                        for encoding in ['cp1252', 'gbk', 'latin1']:
+                            try:
+                                response_text = response_bytes.decode(encoding)
+                                break
+                            except (UnicodeDecodeError, LookupError):
+                                continue
+                        else:
+                            response_text = response_bytes.decode('utf-8', errors='replace')
 
                     # Trim whitespace
                     response_text = response_text.strip()

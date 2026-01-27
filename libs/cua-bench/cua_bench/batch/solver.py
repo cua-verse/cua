@@ -199,7 +199,7 @@ async def main():
                 print("Failed to start tracing; continuing without trace.")
 
             # Reset will create the session and run setup
-            screenshot, task_cfg = await env.reset(task_id=task_index)
+            screenshot, task_cfg = await env.reset(task_id=task_index, skip_setup=args["dump_mode"])
             session = env.session
 
             # Wait 2.0s to ensure environment is ready
@@ -267,11 +267,12 @@ async def main():
 
             # Run setup
             _t0 = time.perf_counter()
-            if env.setup_task_fn:
+            if not args["dump_mode"] and env.setup_task_fn:
                 await env.setup_task_fn(task_cfg, session)
 
             # Wait a moment for setup to execute before taking screenshot
-            await asyncio.sleep(2.0)
+            if not args["dump_mode"]:
+                await asyncio.sleep(2.0)
 
             screenshot = await session.screenshot()
             _elapsed = time.perf_counter() - _t0

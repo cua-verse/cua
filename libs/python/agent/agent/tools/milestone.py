@@ -92,6 +92,14 @@ class MilestoneTool(BaseTool):
             logger.error(f"Error saving milestone screenshot: {e}")
             return {"success": False, "error": str(e)}
 
+    def _is_windows_path(self, path: str) -> bool:
+        """Detect if the path is a Windows path based on format."""
+        import re
+        # Windows paths: C:\, D:\, \\server\, or contain backslashes
+        return bool(re.match(r'^[A-Za-z]:\\', path) or 
+                    path.startswith('\\\\') or 
+                    '\\' in path)
+
     async def _execute_save(self, path: str, description: str) -> dict:
         """Execute the screenshot save asynchronously."""
         try:
@@ -99,15 +107,27 @@ class MilestoneTool(BaseTool):
             screenshot_bytes = await self.interface.screenshot()
 
             # 2. Prepare remote directory
-            import os
-            dir_path = os.path.dirname(path)
+            # Detect remote OS from path format (not local os.name)
+            is_windows = self._is_windows_path(path)
+            
+            if is_windows:
+                # Use ntpath for Windows path manipulation
+                import ntpath
+                dir_path = ntpath.dirname(path)
+            else:
+                import posixpath
+                dir_path = posixpath.dirname(path)
+            
             if dir_path and dir_path != ".":
                 # Create directory if it doesn't exist
                 try:
                     # Try to create directory using run_command
-                    # Use platform-agnostic approach
-                    if os.name == 'nt':  # Windows
-                        await self.interface.run_command(f'mkdir "{dir_path}" 2>nul || echo Directory already exists')
+                    # Use platform-agnostic approach based on path format
+                    if is_windows:
+                        # Use PowerShell for reliable directory creation on Windows
+                        await self.interface.run_command(
+                            f'powershell -Command "New-Item -ItemType Directory -Force -Path \'{dir_path}\' | Out-Null"'
+                        )
                     else:  # Unix-like
                         await self.interface.run_command(f'mkdir -p "{dir_path}"')
                 except Exception as dir_error:

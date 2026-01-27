@@ -278,6 +278,33 @@ class DesktopSession(Protocol):
         """
         ...
 
+    async def makedirs(self, path: str) -> "CommandResult":
+        """Create a directory and any necessary parent directories on the native desktop.
+
+        Args:
+            path: Path to the directory to create
+        """
+        ...
+
+    async def exists(self, path: str) -> bool:
+        """Check if a path (file or directory) exists on the native desktop.
+
+        Args:
+            path: Path to check
+        """
+        ...
+
+    async def list_dir(self, path: str) -> List[str]:
+
+        """List the contents of a directory on the native desktop.
+
+        Args:
+            path: Path to the directory
+        """
+        ...
+
+
+
 
 
     # --- App Management ---

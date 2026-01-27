@@ -797,17 +797,13 @@ class RemoteDesktopSession:
         await self._ensure_computer()
         await self.interface.write_bytes(path, data)
 
-    async def file_exists(self, path: str) -> bool:
-        """Check if a file exists in the environment."""
+    async def exists(self, path: str) -> bool:
+        """Check if a path exists in the environment."""
         await self._ensure_computer()
-        return await self.interface.file_exists(path)
-
-    async def directory_exists(self, path: str) -> bool:
-        """Check if a directory exists in the environment."""
-        await self._ensure_computer()
-        return await self.interface.directory_exists(path)
+        return await self.interface.file_exists(path) or await self.interface.directory_exists(path)
 
     async def list_dir(self, path: str) -> list[str]:
+
         """List contents of a directory in the environment."""
         await self._ensure_computer()
         return await self.interface.list_dir(path)
@@ -876,6 +872,17 @@ class RemoteDesktopSession:
         else:
             cmd = f'xdg-open "{path}"'
         return await self.run_command(cmd)
+
+    async def makedirs(self, path: str) -> Dict[str, Any]:
+        """Create a directory and its parents."""
+        if self._os_type in ("windows", "win11", "win10", "win7", "winxp", "win98"):
+            # Use PowerShell to create directory with parents (Force ensures it works like mkdir -p)
+            escaped_path = path.replace("'", "''")
+            cmd = f"powershell -Command \"New-Item -ItemType Directory -Force -Path '{escaped_path}'\""
+        else:
+            cmd = f'mkdir -p "{path}"'
+        return await self.run_command(cmd)
+
 
 
 

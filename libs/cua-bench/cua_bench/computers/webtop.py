@@ -856,6 +856,19 @@ class WebDesktopSession(DesktopSession):
         """Not implemented for simulated sessions."""
         raise NotImplementedError("Simulated sessions do not support run_file")
 
+    async def makedirs(self, *args, **kwargs):
+        """Not implemented for simulated sessions."""
+        raise NotImplementedError("Simulated sessions do not support makedirs")
+
+    async def exists(self, *args, **kwargs):
+        """Not implemented for simulated sessions."""
+        raise NotImplementedError("Simulated sessions do not support exists")
+
+    async def list_dir(self, *args, **kwargs):
+        """Not implemented for simulated sessions."""
+        raise NotImplementedError("Simulated sessions do not support list_dir")
+
+
     async def close(self) -> None:
 
 

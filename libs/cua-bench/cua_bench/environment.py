@@ -154,7 +154,10 @@ class Environment:
 
     # --- Lifecycle API ---
     async def reset(
-        self, task_id: Optional[int] = None, run_id: Optional[str] = None
+        self,
+        task_id: Optional[int] = None,
+        run_id: Optional[str] = None,
+        skip_setup: bool = False,
     ) -> Tuple[bytes, Dict]:
         # Reset session state
         if self.session is not None:
@@ -187,7 +190,7 @@ class Environment:
             await self.create_sandbox(provider=provider, setup_config=setup_config)
 
         # Setup current task
-        if self.current_task is not None and self.setup_task_fn is not None:
+        if not skip_setup and self.current_task is not None and self.setup_task_fn is not None:
             try:
                 await _call_function(self.setup_task_fn, self.current_task, self.session)
             except Exception as e:

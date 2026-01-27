@@ -786,7 +786,7 @@ class ComputerAgent:
                             prompt_tokens=0,
                             completion_tokens=0,
                             total_tokens=0,
-                        ),
+                        ).model_dump(),
                     }
 
         await self._on_run_end(loop_kwargs, old_items, new_items)

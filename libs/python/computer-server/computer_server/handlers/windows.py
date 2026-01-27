@@ -224,7 +224,7 @@ class WindowsAutomationHandler(BaseAutomationHandler):
         """Convert a key string (e.g., 'enter', 'ctrl', 'a') to pynput Key or char."""
         if not key:
             return None
-        lk = key.lower()
+        lk = key.lower().replace("arrow", "")
         special = {
             "enter": KBKey.enter,
             "return": KBKey.enter,

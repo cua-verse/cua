@@ -85,16 +85,34 @@ class cuaComputerHandler(AsyncComputerHandler):
         assert self.interface is not None
         await self.interface.move_cursor(x, y)
 
+    def _normalize_key(self, key: str) -> str:
+        """Normalize key names from OpenAI format to interface format.
+        """
+        # Mapping from OpenAI/DOM key names to interface key names
+        key_mapping = {
+            "ARROWUP": "up",
+            "ARROWDOWN": "down",
+            "ARROWLEFT": "left",
+            "ARROWRIGHT": "right",
+        }
+        
+        # Return mapped key if it exists, otherwise return lowercase version
+        return key_mapping.get(key, key.lower())
+
     async def keypress(self, keys: Union[List[str], str]) -> None:
         """Press key combination."""
         assert self.interface is not None
         if isinstance(keys, str):
             keys = keys.replace("-", "+").split("+")
-        if len(keys) == 1:
-            await self.interface.press_key(keys[0])
+        
+        # Normalize all key names
+        normalized_keys = [self._normalize_key(k) for k in keys]
+        
+        if len(normalized_keys) == 1:
+            await self.interface.press_key(normalized_keys[0])
         else:
             # Handle key combinations
-            await self.interface.hotkey(*keys)
+            await self.interface.hotkey(*normalized_keys)
 
     async def drag(self, path: List[Dict[str, int]]) -> None:
         """Drag along specified path."""
