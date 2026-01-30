@@ -23,10 +23,43 @@ Usage:
 
 import asyncio
 import importlib
+import logging
 import os
 import sys
 import time
 from pathlib import Path
+
+# Configure logging if not already configured
+def setup_logging(output_dir=None):
+    """Configure logging if not already configured.
+    
+    Args:
+        output_dir: Directory to save log files
+    """
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        root_logger.setLevel(logging.INFO)
+        formatter = logging.Formatter(
+            fmt="%(asctime)s %(levelname)s %(module)s/%(lineno)d: %(message)s"
+        )
+        
+        # Console handler
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler.setLevel(logging.INFO)
+        stdout_handler.setFormatter(formatter)
+        root_logger.addHandler(stdout_handler)
+        
+        # File handler if output directory is provided
+        if output_dir:
+            log_dir = Path(output_dir) / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "solver.log"
+            
+            file_handler = logging.FileHandler(log_file, encoding="utf-8")
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(formatter)
+            root_logger.addHandler(file_handler)
+            root_logger.info(f"Logging to file: {log_file}")
 
 # Set HuggingFace cache to writable location to avoid permission issues
 # in containerized environments where /usr/local may not be writable
@@ -98,21 +131,27 @@ async def main():
 
     Connects to a running golden environment via HTTP and executes tasks.
     """
-    # Debug: Print all input variables
-    print("=" * 60)
-    print("DEBUG: Input Variables")
-    print("=" * 60)
-    print(f"sys.argv: {sys.argv}")
-    print("")
-
     args = parse_args(sys.argv)
 
-    print("Parsed arguments:")
-    for key, value in args.items():
-        print(f"  {key}: {value}")
-    print("")
+    # Setup logging with output directory
+    output_dir = args["output_dir"] or os.environ.get("EVALUATION_OUTPUT_DIR")
+    setup_logging(output_dir)
 
-    print("Environment variables:")
+    # Get logger
+    logger = logging.getLogger(__name__)
+
+    # Debug: Log all input variables
+    logger.debug("=" * 60)
+    logger.debug("DEBUG: Input Variables")
+    logger.debug("=" * 60)
+    logger.debug(f"sys.argv: {sys.argv}")
+    logger.debug("")
+
+    logger.info("Parsed arguments:")
+    for key, value in args.items():
+        logger.info(f"  {key}: {value}")
+
+    logger.info("Environment variables:")
     env_vars = [
         "CUA_PROVIDER",
         "CUA_ENV_API_URL",
@@ -121,32 +160,32 @@ async def main():
         "BATCH_TASK_INDEX",
         "BATCH_TASK_COUNT",
         "HF_HOME",
+        "EVALUATION_OUTPUT_DIR",
     ]
     for var in env_vars:
         value = os.environ.get(var, "<not set>")
-        print(f"  {var}: {value}")
-    print("=" * 60)
-    print("")
+        logger.info(f"  {var}: {value}")
+    logger.info("=" * 60)
 
     if args["env_path"] is None:
-        print("Usage: python -m cua_bench.batch.solver <env_path> [OPTIONS]")
-        print("")
-        print("Options:")
-        print("  --dump                 Skip solver, just setup + evaluate")
-        print("  --eval                 Run agent instead of oracle")
-        print("  --agent <name>         Agent name from registry")
-        print("  --agent-import-path <path>  Agent class import path")
-        print("  --model <model>        Model to use for agent")
-        print("  --max-steps <n>        Maximum steps for agent")
-        print("  --save-pngs            Save screenshots as PNGs")
-        print("  --filter <events>      Filter trace events")
-        print("  --task-index <n>       Override task index")
-        print("  --output-dir <path>    Output directory (default: /tmp/td_output)")
-        print("")
-        print("Environment variables:")
-        print("  CUA_ENV_API_URL        Required. Golden env API URL")
-        print("  CUA_ENV_VNC_URL        Optional. VNC URL for debugging")
-        print("  CUA_ENV_TYPE           Optional. Environment type (linux/windows/android)")
+        logger.error("Usage: python -m cua_bench.batch.solver <env_path> [OPTIONS]")
+        logger.error("")
+        logger.error("Options:")
+        logger.error("  --dump                 Skip solver, just setup + evaluate")
+        logger.error("  --eval                 Run agent instead of oracle")
+        logger.error("  --agent <name>         Agent name from registry")
+        logger.error("  --agent-import-path <path>  Agent class import path")
+        logger.error("  --model <model>        Model to use for agent")
+        logger.error("  --max-steps <n>        Maximum steps for agent")
+        logger.error("  --save-pngs            Save screenshots as PNGs")
+        logger.error("  --filter <events>      Filter trace events")
+        logger.error("  --task-index <n>       Override task index")
+        logger.error("  --output-dir <path>    Output directory (default: /tmp/td_output)")
+        logger.error("")
+        logger.error("Environment variables:")
+        logger.error("  CUA_ENV_API_URL        Required. Golden env API URL")
+        logger.error("  CUA_ENV_VNC_URL        Optional. VNC URL for debugging")
+        logger.error("  CUA_ENV_TYPE           Optional. Environment type (linux/windows/android)")
         sys.exit(1)
 
     env_path = args["env_path"]
@@ -165,15 +204,15 @@ async def main():
         task_index = int(os.environ.get("BATCH_TASK_INDEX", "0"))
     task_count = int(os.environ.get("BATCH_TASK_COUNT", "1"))
 
-    print(f"Starting task {task_index} of {task_count}")
-    print(f"Environment: {env_path}")
-    print(f"Provider: {provider}")
+    logger.info(f"Starting task {task_index} of {task_count}")
+    logger.info(f"Environment: {env_path}")
+    logger.info(f"Provider: {provider}")
     if provider == "simulated":
-        print("Using local Playwright session")
+        logger.info("Using local Playwright session")
     else:
-        print(f"API URL: {env_api_url}")
+        logger.info(f"API URL: {env_api_url}")
         if env_vnc_url:
-            print(f"VNC URL: {env_vnc_url}")
+            logger.info(f"VNC URL: {env_vnc_url}")
 
     try:
         # Load task definition
@@ -189,14 +228,14 @@ async def main():
 
         if provider == "simulated":
             # Simulated provider - use env.reset() to create local Playwright session
-            print("Creating local simulated session...")
+            logger.info("Creating local simulated session...")
 
             # Start tracing
             try:
                 tid = env.tracing.start()
-                print(f"Tracing started. trajectory_id={tid}")
+                logger.info(f"Tracing started. trajectory_id={tid}")
             except Exception:
-                print("Failed to start tracing; continuing without trace.")
+                logger.warning("Failed to start tracing; continuing without trace.")
 
             # Reset will create the session and run setup
             screenshot, task_cfg = await env.reset(task_id=task_index, skip_setup=args["dump_mode"])
@@ -206,21 +245,21 @@ async def main():
             # (For some reason playwright sessions need a short delay here)
             await asyncio.sleep(2.0)
 
-            print("✓ Simulated session created and task setup complete")
-            print(f"  Screenshot: {len(screenshot)} bytes")
-            print(f"  Task: {task_cfg.description}")
+            logger.info("✓ Simulated session created and task setup complete")
+            logger.debug(f"  Screenshot: {len(screenshot)} bytes")
+            logger.debug(f"  Task: {task_cfg.description}")
         else:
             # Remote provider - connect to remote environment via API
             if not env_api_url:
-                print(
+                logger.error(
                     "Error: CUA_ENV_API_URL environment variable is required for remote provider."
                 )
-                print("")
-                print("Start a golden environment first:")
-                print("  cb env start linux-docker")
-                print("  cb env start windows-qemu")
-                print("")
-                print("Then set CUA_ENV_API_URL to the environment's API URL.")
+                logger.error("")
+                logger.error("Start a golden environment first:")
+                logger.error("  cb env start linux-docker")
+                logger.error("  cb env start windows-qemu")
+                logger.error("")
+                logger.error("Then set CUA_ENV_API_URL to the environment's API URL.")
                 sys.exit(1)
 
             from cua_bench.computers.remote import RemoteDesktopSession
@@ -234,25 +273,25 @@ async def main():
             # Wait for environment to be ready
             # Windows needs longer boot time than Linux
             boot_timeout = 300 if env_type == "windows" else 120
-            print(f"Waiting for environment to be ready (timeout={boot_timeout}s)...")
+            logger.info(f"Waiting for environment to be ready (timeout={boot_timeout}s)...")
             if not await session.wait_until_ready(timeout=boot_timeout):
-                print("Error: Environment did not become ready within timeout")
+                logger.error("Error: Environment did not become ready within timeout")
                 sys.exit(1)
-            print("✓ Environment is ready")
+            logger.info("✓ Environment is ready")
 
             # Load all tasks
             if env.tasks_config_fn is None:
-                print("Error: No @cb.tasks_config function found")
+                logger.error("Error: No @cb.tasks_config function found")
                 sys.exit(1)
 
             tasks = env.tasks_config_fn()
 
             if task_index >= len(tasks):
-                print(f"Task index {task_index} >= number of tasks {len(tasks)}, skipping")
+                logger.info(f"Task index {task_index} >= number of tasks {len(tasks)}, skipping")
                 sys.exit(0)
 
             task_cfg = tasks[task_index]
-            print(f"Running task {task_index}: {task_cfg.description}")
+            logger.info(f"Running task {task_index}: {task_cfg.description}")
 
             # Create output directory
             output_dir = Path(args["output_dir"]) if args["output_dir"] else Path("/tmp/td_output")
@@ -261,22 +300,22 @@ async def main():
             # Start tracing
             try:
                 tid = env.tracing.start()
-                print(f"Tracing started. trajectory_id={tid}")
+                logger.info(f"Tracing started. trajectory_id={tid}")
             except Exception:
-                print("Failed to start tracing; continuing without trace.")
+                logger.warning("Failed to start tracing; continuing without trace.")
 
             # Run setup
             _t0 = time.perf_counter()
-            if not args["dump_mode"] and env.setup_task_fn:
+            if env.setup_task_fn:
                 await env.setup_task_fn(task_cfg, session)
 
             # Wait a moment for setup to execute before taking screenshot
-            if not args["dump_mode"]:
+            if env.setup_task_fn:
                 await asyncio.sleep(2.0)
 
             screenshot = await session.screenshot()
             _elapsed = time.perf_counter() - _t0
-            print(f"✓ Setup complete in {_elapsed:.2f}s (screenshot: {len(screenshot)} bytes)")
+            logger.info(f"✓ Setup complete in {_elapsed:.2f}s (screenshot: {len(screenshot)} bytes)")
 
             # Record reset event with screenshot
             try:
@@ -290,7 +329,7 @@ async def main():
                     [screenshot],
                 )
             except Exception as e:
-                print(f"Warning: Failed to record reset event: {e}")
+                logger.warning(f"Failed to record reset event: {e}")
 
         # Create output directory (after task setup)
         output_dir = Path(args["output_dir"]) if args["output_dir"] else Path("/tmp/td_output")
@@ -308,8 +347,8 @@ async def main():
 
                     agent_class = get_agent(args["agent_name"])
                     if agent_class is None:
-                        print(f"Error: Unknown agent '{args['agent_name']}'")
-                        print(f"Available agents: {', '.join(list_agents())}")
+                        logger.error(f"Error: Unknown agent '{args['agent_name']}'")
+                        logger.error(f"Available agents: {', '.join(list_agents())}")
                         sys.exit(1)
 
                 if agent_class:
@@ -323,7 +362,7 @@ async def main():
                     logging_dir = output_dir / f"task_{task_index}_agent_logs"
                     logging_dir.mkdir(exist_ok=True, parents=True)
 
-                    print(f"Running agent: {agent.name()}")
+                    logger.info(f"Running agent: {agent.name()}")
                     try:
                         agent_result = await agent.perform_task(
                             task_description=task_cfg.description,
@@ -331,29 +370,29 @@ async def main():
                             logging_dir=logging_dir,
                             tracer=env.tracing,
                         )
-                        print(f"✓ Agent complete: {agent_result}")
+                        logger.info(f"✓ Agent complete: {agent_result}")
 
                         from cua_bench.agents.base import FailureMode
 
                         if agent_result.failure_mode not in (FailureMode.UNSET, FailureMode.NONE):
-                            print(f"✗ Agent failed with failure mode: {agent_result.failure_mode}")
+                            logger.error(f"✗ Agent failed with failure mode: {agent_result.failure_mode}")
                             await session.close()
                             sys.exit(1)
                     except Exception as e:
-                        print(f"Agent execution failed: {e}")
+                        logger.error(f"Agent execution failed: {e}")
                         import traceback
 
                         traceback.print_exc()
                         await session.close()
                         sys.exit(1)
                 else:
-                    print("ℹ Eval mode without agent: skipping to evaluation")
+                    logger.info("ℹ Eval mode without agent: skipping to evaluation")
             else:
                 # Run oracle solution
                 if env.solve_task_fn:
                     await env.solve_task_fn(task_cfg, session)
                     screenshot = await session.screenshot()
-                    print(f"✓ Solution complete (screenshot: {len(screenshot)} bytes)")
+                    logger.info(f"✓ Solution complete (screenshot: {len(screenshot)} bytes)")
 
                     # Record solution event with screenshot
                     try:
@@ -363,16 +402,16 @@ async def main():
                             [screenshot],
                         )
                     except Exception as e:
-                        print(f"Warning: Failed to record solve event: {e}")
+                        logger.warning(f"Failed to record solve event: {e}")
                 else:
-                    print("Warning: No @cb.solve_task function found")
+                    logger.warning("No @cb.solve_task function found")
         else:
-            print("ℹ Dump mode: skipping solver")
+            logger.info("ℹ Dump mode: skipping solver")
 
         # Evaluate
         if env.evaluate_task_fn:
             result = await env.evaluate_task_fn(task_cfg, session)
-            print(f"✓ Evaluation result: {result}")
+            logger.info(f"✓ Evaluation result: {result}")
 
             # Record evaluation event
             try:
@@ -381,7 +420,7 @@ async def main():
                     {"result": result},
                 )
             except Exception as e:
-                print(f"Warning: Failed to record evaluate event: {e}")
+                logger.warning(f"Failed to record evaluate event: {e}")
 
         # Save trace (non-fatal - task success doesn't depend on trace saving)
         trace_dir = output_dir / f"task_{task_index}_trace"
@@ -393,22 +432,22 @@ async def main():
                 image_dir=str(image_dir),
                 filter_events=args["filter_events"],
             )
-            print(f"✓ Trace saved to {trace_dir}")
+            logger.info(f"✓ Trace saved to {trace_dir}")
         except Exception as e:
             # Trace saving failure is non-fatal - the task still succeeded
-            print(f"Warning: Failed to save trace (task still completed successfully): {e}")
+            logger.warning(f"Failed to save trace (task still completed successfully): {e}")
             if "Permission denied" in str(e) or "Keys mismatch" in str(e):
-                print("  Hint: If using containers, ensure HF_HOME is set to a writable path")
+                logger.warning("  Hint: If using containers, ensure HF_HOME is set to a writable path")
 
         # Close session
         if provider == "simulated":
             await env.close()
         else:
             await session.close()
-        print(f"\n✓ Task {task_index} completed successfully!")
+        logger.info(f"\n✓ Task {task_index} completed successfully!")
 
     except Exception as e:
-        print(f"Error running task {task_index}: {e}")
+        logger.error(f"Error running task {task_index}: {e}")
         import traceback
 
         traceback.print_exc()
