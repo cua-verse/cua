@@ -373,12 +373,16 @@ def create_span(
         yield None
         return
 
+    ctx = None
     try:
-        with _tracer.start_as_current_span(name, attributes=attributes) as span:
-            yield span
+        ctx = _tracer.start_as_current_span(name, attributes=attributes)
     except Exception as e:
-        logger.debug(f"Failed to create span: {e}")
+        logger.debug(f"Failed to create span context: {e}")
         yield None
+        return
+
+    with ctx as span:
+        yield span
 
 
 def instrument_async(

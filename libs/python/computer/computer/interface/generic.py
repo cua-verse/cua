@@ -332,15 +332,17 @@ class GenericComputerInterface(BaseComputerInterface):
 
     async def get_screen_size(self) -> Dict[str, int]:
         result = await self._send_command("get_screen_size")
-        if result["success"] and result["size"]:
+        if result.get("success") and result.get("size"):
             return result["size"]
-        raise RuntimeError("Failed to get screen size")
+        error_msg = result.get("error", "Unknown error")
+        raise RuntimeError(f"Failed to get screen size: {error_msg}")
 
     async def get_cursor_position(self) -> Dict[str, int]:
         result = await self._send_command("get_cursor_position")
-        if result["success"] and result["position"]:
+        if result.get("success") and result.get("position"):
             return result["position"]
-        raise RuntimeError("Failed to get cursor position")
+        error_msg = result.get("error", "Unknown error")
+        raise RuntimeError(f"Failed to get cursor position: {error_msg}")
 
     # Clipboard Actions
     async def copy_to_clipboard(self) -> str:
