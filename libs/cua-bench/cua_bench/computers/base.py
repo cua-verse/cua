@@ -272,10 +272,10 @@ class DesktopSession(Protocol):
         ...
 
     async def remove_file(self, path: str) -> "CommandResult":
-        """Remove a file from the native desktop environment.
+        """Remove a file or directory (including contents) from the native desktop environment.
 
         Args:
-            path: Path to the file to remove
+            path: Path to the file or directory to remove
         """
         ...
 

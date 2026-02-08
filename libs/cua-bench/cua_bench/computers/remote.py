@@ -870,13 +870,14 @@ class RemoteDesktopSession:
         return await self.run_command(cmd)
 
     async def remove_file(self, path: str) -> Dict[str, Any]:
-        """Remove a file from the environment."""
+        """Remove a file or directory (including contents) from the environment."""
         if self._os_type in ("windows", "win11", "win10", "win7", "winxp", "win98"):
             # Use PowerShell with UTF-8 to avoid encoding issues with non-ASCII output
+            # -Recurse handles directories with contents, -Force suppresses prompts
             escaped_path = path.replace("'", "''")
-            cmd = f"powershell -Command \"Remove-Item -Path '{escaped_path}' -Force\""
+            cmd = f"powershell -Command \"Remove-Item -Path '{escaped_path}' -Recurse -Force\""
         else:
-            cmd = f'rm -f "{path}"'
+            cmd = f'rm -rf "{path}"'
         return await self.run_command(cmd)
 
     async def run_file(self, path: str) -> Dict[str, Any]:
