@@ -253,6 +253,15 @@ class DesktopSession(Protocol):
         """
         ...
 
+    async def copy_folder(self, source: str, destination: str) -> "CommandResult":
+        """Copy a folder and all its contents recursively from source to destination.
+
+        Args:
+            source: Source folder path
+            destination: Destination folder path
+        """
+        ...
+
     async def move_file(self, source: str, destination: str) -> "CommandResult":
         """Move a file from source to destination on the native desktop.
 
