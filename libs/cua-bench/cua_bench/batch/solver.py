@@ -299,8 +299,9 @@ async def initialize_simulated_environment(args, env, task_index, logger):
     """Initialize simulated environment using local Playwright session."""
     logger.info("Creating local simulated session...")
 
-    # Start tracing
-    start_tracing(env, logger)
+    # Start tracing (skip in dump mode)
+    if not args["dump_mode"]:
+        start_tracing(env, logger)
 
     # Determine if setup should be skipped
     skip_setup = args["dump_mode"] or args["task_only"] or args["evaluate_only"]
@@ -349,8 +350,9 @@ async def initialize_remote_environment(args, env, task_index, env_api_url, env_
     if not load_tasks(env, task_index, logger):
         sys.exit(0)
 
-    # Start tracing
-    start_tracing(env, logger)
+    # Start tracing (skip in dump mode)
+    if not args["dump_mode"]:
+        start_tracing(env, logger)
 
     # Run setup if needed
     screenshot = await run_setup_if_needed(args, env, session, logger)
