@@ -1655,8 +1655,8 @@ print(f"<<<VENV_EXEC_START>>>{{output_json}}<<<VENV_EXEC_END>>>")
 '''
 
         encoded_code = base64.b64encode(python_code.encode("utf-8")).decode("ascii")
-        # Use python3 on POSIX systems, python on Windows
-        python_cmd = "python" if self.os_type == "windows" else "python3"
+        # Use 'python' everywhere; interpreter and deps are controlled by the environment server (e.g. xfce image)
+        python_cmd = "python"
         python_command = f"{python_cmd} -c \"import base64; exec(base64.b64decode('{encoded_code}').decode('utf-8'))\""
         result = await self.interface.run_command(python_command)
 
@@ -1785,12 +1785,12 @@ print(p.pid)
 import base64, subprocess, os, sys
 code = base64.b64decode("{payload_b64}").decode("utf-8")
 with open("{log}", "ab", buffering=0) as f:
-    p = subprocess.Popen(["python3", "-c", code], stdout=f, stderr=subprocess.STDOUT, preexec_fn=getattr(os, "setsid", None))
+    p = subprocess.Popen(["python", "-c", code], stdout=f, stderr=subprocess.STDOUT, preexec_fn=getattr(os, "setsid", None))
 print(p.pid)
 """
             launcher_b64 = base64.b64encode(launcher_code.encode("utf-8")).decode("ascii")
-            # Use python3 on POSIX systems
-            cmd = f"python3 -c \"import base64; exec(base64.b64decode('{launcher_b64}').decode('utf-8'))\""
+            # Use 'python' so remote uses same interpreter as image (consistent with python_exec)
+            cmd = f"python -c \"import base64; exec(base64.b64decode('{launcher_b64}').decode('utf-8'))\""
             result = await self.interface.run_command(cmd)
             stdout_lines = (result.stdout or "").strip().splitlines()
             if not stdout_lines:
