@@ -1,0 +1,27 @@
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[project]
+name = "cua-env"
+version = "0.1.0"
+description = "OpenEnv-based environment protocol for decoupled CUA agent-environment interaction"
+authors = [
+    { name = "TryCua", email = "gh@trycua.com" }
+]
+dependencies = [
+    "cua-agent>=0.7.0",
+    "openenv-core>=0.2.1",
+]
+requires-python = ">=3.12,<3.14"
+
+[project.optional-dependencies]
+bridge = [
+    "cua-bridge>=0.1.0",
+]
+
+[tool.pdm]
+distribution = true
+
+[tool.pdm.build]
+includes = ["env/"]
