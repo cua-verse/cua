@@ -1,11 +1,12 @@
 """AgentHLE Agent implementation using the Computer Agent SDK.
    - Add milestone tool to the agent.
+   - TinyClaw memory store for cross-turn persistence.
 """
 
-import base64
+import os
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING
 
 from . import register_agent
 from .base import AgentResult, BaseAgent, FailureMode
@@ -62,9 +63,17 @@ class AgentHLEAgent(BaseAgent):
         if logging_dir:
             trajectory_dir = logging_dir / "trajectories"
             trajectory_dir.mkdir(parents=True, exist_ok=True)
-        
+
         from agent.tools import MilestoneTool
         milestone_tool = MilestoneTool(session.interface)
+
+        # Initialize TinyClaw memory store
+        from memory import MemoryStore
+
+        memory_base = Path(os.environ.get("MEMORY_BASE_DIR", "memory_data")).resolve()
+        self.memory_store = MemoryStore(memory_base)
+        print(f"TinyClaw MemoryStore initialized at: {memory_base}")
+
         # Create agent with custom computer
         agent = ComputerAgent(
             model=self.model,
@@ -93,6 +102,11 @@ class AgentHLEAgent(BaseAgent):
                 step += 1
                 for k in total_usage:
                     total_usage[k] += result["usage"].get(k, 0)
+
+                # Log step to TinyClaw memory store
+                self.memory_store.append_to_daily_log(
+                    f"Step {step}: tokens={total_usage['total_tokens']}"
+                )
 
                 # Record agent step to tracer
                 if tracer:
@@ -130,6 +144,16 @@ class AgentHLEAgent(BaseAgent):
 
             print(f"\nTotal usage: {total_usage}")
             print(f"Steps completed: {step}/{self.max_steps}")
+
+            # Verify TinyClaw memory store write/read/search cycle
+            log_files = self.memory_store.list_log_files()
+            search_results = self.memory_store.search(["step", "tokens"])
+            print(f"\n[TinyClaw] Daily logs: {log_files}")
+            print(f"[TinyClaw] Search 'step tokens': {len(search_results)} results")
+            if log_files:
+                content = self.memory_store.read_file(log_files[-1])
+                line_count = len([ln for ln in content.splitlines() if ln.strip()])
+                print(f"[TinyClaw] Latest log has {line_count} non-empty lines")
 
             # Determine failure mode
             if task_completed:
