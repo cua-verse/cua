@@ -68,19 +68,25 @@ class AgentHLEAgent(BaseAgent):
         milestone_tool = MilestoneTool(session.interface)
 
         # Initialize TinyClaw memory store
-        from memory import MemoryStore
+        from memory import MemoryStore, MemorySearchTool
 
         memory_base = Path(os.environ.get("MEMORY_BASE_DIR", "memory_data")).resolve()
         self.memory_store = MemoryStore(memory_base)
+        memory_search_tool = MemorySearchTool(self.memory_store)
         print(f"TinyClaw MemoryStore initialized at: {memory_base}")
 
         # Create agent with custom computer
         agent = ComputerAgent(
             model=self.model,
-            tools=[session._computer, milestone_tool],
+            tools=[session._computer, milestone_tool, memory_search_tool],
             only_n_most_recent_images=3,
             trajectory_dir=trajectory_dir,
-            instructions="Use the provided computer to complete the task as described. When the task is complete, indicate so clearly by outputting 'DONE'.",
+            instructions=(
+                "Use the provided computer to complete the task as described. "
+                "You have a memory_search tool — use it to recall past observations, "
+                "strategies, or mistakes before making decisions. "
+                "When the task is complete, indicate so clearly by outputting 'DONE'."
+            ),
         )
         print("AgentHLE Agent initialized with model:", self.model)
 
@@ -154,6 +160,15 @@ class AgentHLEAgent(BaseAgent):
                 content = self.memory_store.read_file(log_files[-1])
                 line_count = len([ln for ln in content.splitlines() if ln.strip()])
                 print(f"[TinyClaw] Latest log has {line_count} non-empty lines")
+
+            # Verify MemorySearchTool via tool.call() and log evidence
+            tool_result = memory_search_tool.call({"keywords": ["step", "tokens"]})
+            print(f"[TinyClaw] memory_search tool returned {len(tool_result.splitlines())} lines")
+            self.memory_store.append_to_daily_log(
+                f"[US-MEM-002] memory_search tool verified: "
+                f"query=['step','tokens'] returned {len(tool_result.splitlines())} results. "
+                f"First line: {tool_result.splitlines()[0] if tool_result.splitlines() else 'N/A'}"
+            )
 
             # Determine failure mode
             if task_completed:
