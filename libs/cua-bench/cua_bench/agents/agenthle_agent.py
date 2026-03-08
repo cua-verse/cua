@@ -68,23 +68,24 @@ class AgentHLEAgent(BaseAgent):
         milestone_tool = MilestoneTool(session.interface)
 
         # Initialize TinyClaw memory store
-        from memory import MemoryStore, MemorySearchTool
+        from memory import MemoryStore, MemoryGetTool, MemorySearchTool
 
         memory_base = Path(os.environ.get("MEMORY_BASE_DIR", "memory_data")).resolve()
         self.memory_store = MemoryStore(memory_base)
         memory_search_tool = MemorySearchTool(self.memory_store)
+        memory_get_tool = MemoryGetTool(self.memory_store)
         print(f"TinyClaw MemoryStore initialized at: {memory_base}")
 
         # Create agent with custom computer
         agent = ComputerAgent(
             model=self.model,
-            tools=[session._computer, milestone_tool, memory_search_tool],
+            tools=[session._computer, milestone_tool, memory_search_tool, memory_get_tool],
             only_n_most_recent_images=3,
             trajectory_dir=trajectory_dir,
             instructions=(
                 "Use the provided computer to complete the task as described. "
-                "You have a memory_search tool — use it to recall past observations, "
-                "strategies, or mistakes before making decisions. "
+                "You have memory_search and memory_get tools — use memory_search to find "
+                "relevant memories, then memory_get to read full context around matches. "
                 "When the task is complete, indicate so clearly by outputting 'DONE'."
             ),
         )
