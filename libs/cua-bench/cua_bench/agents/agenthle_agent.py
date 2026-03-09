@@ -68,24 +68,69 @@ class AgentHLEAgent(BaseAgent):
         milestone_tool = MilestoneTool(session.interface)
 
         # Initialize TinyClaw memory store
-        from memory import MemoryStore, MemoryGetTool, MemorySearchTool
+        from memory import MemoryStore, MemoryGetTool, MemorySearchTool, MemoryWriteTool
 
         memory_base = Path(os.environ.get("MEMORY_BASE_DIR", "memory_data")).resolve()
-        self.memory_store = MemoryStore(memory_base)
+        task_id = os.environ.get("MEMORY_TASK_ID")
+        self.memory_store = MemoryStore(memory_base, task_id=task_id)
         memory_search_tool = MemorySearchTool(self.memory_store)
         memory_get_tool = MemoryGetTool(self.memory_store)
+        memory_write_tool = MemoryWriteTool(self.memory_store)
         print(f"TinyClaw MemoryStore initialized at: {memory_base}")
+
+        if task_id:
+            session_path = self.memory_store.init_session()
+            print(f"TinyClaw session initialized: {session_path}")
+
+        # Inject prior knowledge into instructions if available
+        prior_knowledge = ""
+        global_mem = self.memory_store.read_file("MEMORY.md").strip()
+        if global_mem:
+            prior_knowledge += (
+                "\n\n## Global Memory (cross-task)\n"
+                + global_mem
+                + "\n\n"
+            )
+        if task_id:
+            task_mem = self.memory_store.read_task_memory()
+            if task_mem.strip():
+                prior_knowledge += (
+                    "## Prior Task Knowledge\n"
+                    + task_mem.strip()
+                    + "\n\n"
+                )
 
         # Create agent with custom computer
         agent = ComputerAgent(
             model=self.model,
-            tools=[session._computer, milestone_tool, memory_search_tool, memory_get_tool],
+            tools=[session._computer, milestone_tool, memory_search_tool, memory_get_tool, memory_write_tool],
             only_n_most_recent_images=3,
             trajectory_dir=trajectory_dir,
             instructions=(
-                "Use the provided computer to complete the task as described. "
-                "You have memory_search and memory_get tools — use memory_search to find "
-                "relevant memories, then memory_get to read full context around matches. "
+                prior_knowledge
+                + "Use the provided computer to complete the task as described.\n\n"
+                "## Memory Tools — USE IMMEDIATELY\n"
+                "You have three memory tools:\n"
+                "- memory_search: search memory for keywords. Returns matched lines with file/line.\n"
+                "- memory_get: read a memory file (or line range) found via search.\n"
+                "- memory_write: write to one of three targets:\n"
+                "  - target='session': append to the current session log (timestamped, for this run only)\n"
+                "  - target='task_memory': overwrite TASK_MEMORY.md — **this is the most important target**. "
+                "TASK_MEMORY.md is injected word-for-word into your instructions at the start of every "
+                "future run on this task. It is the PRIMARY way to pass knowledge forward across runs. "
+                "Write strategies, map layouts, known pitfalls, and successful approaches here.\n"
+                "  - target='memory': overwrite MEMORY.md (cross-task long-term knowledge)\n\n"
+                "**Step 1 (MANDATORY):** Before doing ANYTHING else, call memory_search with keywords "
+                "relevant to your task (e.g. the game name, goal, key terms). This retrieves prior "
+                "knowledge that will help you avoid repeating mistakes.\n\n"
+                "**Ongoing:** After every significant observation or discovery (a new screen, a "
+                "failed action, a successful strategy), call memory_write with target='session' "
+                "to record it. Write frequently — short notes are fine.\n\n"
+                "**Periodically (every ~10 steps) and before finishing:** Call memory_write with "
+                "target='task_memory' to persist a structured summary of everything you have learned "
+                "so far — what worked, what failed, map layout, optimal paths, key observations. "
+                "This ensures knowledge survives even if the run is cut short. Update it as you learn more; "
+                "each write replaces the previous content, so always include ALL your knowledge.\n\n"
                 "When the task is complete, indicate so clearly by outputting 'DONE'."
             ),
         )
@@ -109,11 +154,6 @@ class AgentHLEAgent(BaseAgent):
                 step += 1
                 for k in total_usage:
                     total_usage[k] += result["usage"].get(k, 0)
-
-                # Log step to TinyClaw memory store
-                self.memory_store.append_to_daily_log(
-                    f"Step {step}: tokens={total_usage['total_tokens']}"
-                )
 
                 # Record agent step to tracer
                 if tracer:
@@ -152,24 +192,43 @@ class AgentHLEAgent(BaseAgent):
             print(f"\nTotal usage: {total_usage}")
             print(f"Steps completed: {step}/{self.max_steps}")
 
-            # Verify TinyClaw memory store write/read/search cycle
-            log_files = self.memory_store.list_log_files()
-            search_results = self.memory_store.search(["step", "tokens"])
-            print(f"\n[TinyClaw] Daily logs: {log_files}")
-            print(f"[TinyClaw] Search 'step tokens': {len(search_results)} results")
-            if log_files:
-                content = self.memory_store.read_file(log_files[-1])
-                line_count = len([ln for ln in content.splitlines() if ln.strip()])
-                print(f"[TinyClaw] Latest log has {line_count} non-empty lines")
+            # Post-run: consolidate session observations into TASK_MEMORY.md
+            # The agent is instructed to do this itself, but may get cut off at
+            # max_steps.  As a safety net, read the session log and append any
+            # new observations so the next run benefits from this run's knowledge.
+            if task_id and self.memory_store._current_session_path:
+                try:
+                    session_content = self.memory_store._current_session_path.read_text(
+                        encoding="utf-8"
+                    )
+                    # Strip the header line ("# Session NNN — …")
+                    observations = "\n".join(
+                        ln for ln in session_content.splitlines()
+                        if ln.strip() and not ln.startswith("# Session ")
+                    ).strip()
+                    if observations:
+                        existing = self.memory_store.read_task_memory().strip()
+                        session_name = self.memory_store._current_session_path.stem
+                        new_section = f"\n\n## {session_name} observations\n{observations}"
+                        self.memory_store.write_task_memory(
+                            (existing + new_section) if existing else new_section.strip()
+                        )
+                        print("[TinyClaw] Consolidated session → TASK_MEMORY.md")
 
-            # Verify MemorySearchTool via tool.call() and log evidence
-            tool_result = memory_search_tool.call({"keywords": ["step", "tokens"]})
-            print(f"[TinyClaw] memory_search tool returned {len(tool_result.splitlines())} lines")
-            self.memory_store.append_to_daily_log(
-                f"[US-MEM-002] memory_search tool verified: "
-                f"query=['step','tokens'] returned {len(tool_result.splitlines())} results. "
-                f"First line: {tool_result.splitlines()[0] if tool_result.splitlines() else 'N/A'}"
-            )
+                        # Also consolidate cross-task observations into global MEMORY.md.
+                        # Appends a task-labeled section so knowledge accumulates across tasks.
+                        existing_memory = self.memory_store.read_file("MEMORY.md").strip()
+                        task_section = (
+                            f"\n\n## {task_id} / {session_name}\n{observations}"
+                        )
+                        self.memory_store.write_memory(
+                            (existing_memory + task_section)
+                            if existing_memory
+                            else task_section.strip()
+                        )
+                        print("[TinyClaw] Consolidated session → MEMORY.md")
+                except Exception as e:
+                    print(f"[TinyClaw] Warning: session consolidation failed: {e}")
 
             # Determine failure mode
             if task_completed:
