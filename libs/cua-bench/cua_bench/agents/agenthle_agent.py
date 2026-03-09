@@ -72,15 +72,23 @@ class AgentHLEAgent(BaseAgent):
 
         memory_base = Path(os.environ.get("MEMORY_BASE_DIR", "memory_data")).resolve()
         task_id = os.environ.get("MEMORY_TASK_ID")
+        if not task_id and logging_dir:
+            # Auto-derive from logging_dir: {output_dir}/task_N_agent_logs → output_dir.name
+            task_id = logging_dir.parent.name
+            print(f"[TinyClaw] Auto-derived task_id from logging_dir: {task_id}")
+        if not task_id:
+            raise RuntimeError(
+                "MEMORY_TASK_ID env var not set and cannot be inferred from logging_dir. "
+                "Set MEMORY_TASK_ID or provide a logging_dir to enable task-scoped memory."
+            )
         self.memory_store = MemoryStore(memory_base, task_id=task_id)
         memory_search_tool = MemorySearchTool(self.memory_store)
         memory_get_tool = MemoryGetTool(self.memory_store)
         memory_write_tool = MemoryWriteTool(self.memory_store)
         print(f"TinyClaw MemoryStore initialized at: {memory_base}")
 
-        if task_id:
-            session_path = self.memory_store.init_session()
-            print(f"TinyClaw session initialized: {session_path}")
+        session_path = self.memory_store.init_session()
+        print(f"TinyClaw session initialized: {session_path}")
 
         # Inject prior knowledge into instructions if available
         prior_knowledge = ""
