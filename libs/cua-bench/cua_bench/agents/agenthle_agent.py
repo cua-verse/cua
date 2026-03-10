@@ -1,6 +1,7 @@
 """AgentHLE Agent implementation using the Computer Agent SDK.
    - Add milestone tool to the agent.
    - TinyClaw memory store for cross-turn persistence.
+   - Planner LLM extracts observations from agent reasoning (agent is read-only for memory).
 """
 
 import os
@@ -13,6 +14,20 @@ from .base import AgentResult, BaseAgent, FailureMode
 
 if TYPE_CHECKING:
     from ..computers import DesktopSession
+
+# How often the planner summarizes accumulated reasoning into the session log.
+_PLANNER_FLUSH_INTERVAL = 10
+
+
+def _extract_reasoning(result: dict) -> list[str]:
+    """Extract reasoning summary texts from a single agent step result."""
+    texts: list[str] = []
+    for item in result.get("output", []):
+        if item.get("type") == "reasoning":
+            for s in item.get("summary", []):
+                if s.get("type") == "summary_text" and s.get("text"):
+                    texts.append(s["text"])
+    return texts
 
 
 @register_agent("agenthle-agent")
@@ -27,6 +42,39 @@ class AgentHLEAgent(BaseAgent):
     @staticmethod
     def name() -> str:
         return "agenthle-agent"
+
+    async def _flush_reasoning_to_session(
+        self, reasoning_buffer: list[str], step: int
+    ) -> None:
+        """Call planner LLM to summarize reasoning buffer and write to session log."""
+        if not reasoning_buffer:
+            return
+
+        from memory import call_planner
+
+        numbered = "\n".join(
+            f"- Step {step - len(reasoning_buffer) + i + 1}: {r}"
+            for i, r in enumerate(reasoning_buffer)
+        )
+
+        try:
+            summary = await call_planner(
+                system_prompt=(
+                    "You are an observation extractor. Given a sequence of agent reasoning "
+                    "summaries from a computer-use session, extract the key observations: "
+                    "what the agent saw, what actions succeeded or failed, what it learned "
+                    "about the environment. Output a concise bulleted list. Omit routine "
+                    "navigation (clicking, scrolling) unless it revealed something new."
+                ),
+                user_prompt=numbered,
+            )
+            if summary and summary.strip():
+                self.memory_store.append_to_session_log(summary.strip())
+                print(f"[TinyClaw] Planner flushed observations at step {step}")
+        except Exception as e:
+            # Planner failure is non-fatal — log raw reasoning as fallback
+            print(f"[TinyClaw] Planner flush failed ({e}), writing raw reasoning")
+            self.memory_store.append_to_session_log(numbered)
 
     async def perform_task(
         self,
@@ -67,8 +115,9 @@ class AgentHLEAgent(BaseAgent):
         from agent.tools import MilestoneTool
         milestone_tool = MilestoneTool(session.interface)
 
-        # Initialize TinyClaw memory store
-        from memory import MemoryStore, MemoryGetTool, MemorySearchTool, MemoryWriteTool
+        # Initialize TinyClaw memory store (agent has read-only access;
+        # planner LLM handles all writes via _flush_reasoning_to_session)
+        from memory import MemoryStore, MemoryGetTool, MemorySearchTool
 
         memory_base = Path(os.environ.get("MEMORY_BASE_DIR", "memory_data")).resolve()
         task_id = os.environ.get("MEMORY_TASK_ID")
@@ -84,7 +133,6 @@ class AgentHLEAgent(BaseAgent):
         self.memory_store = MemoryStore(memory_base, task_id=task_id)
         memory_search_tool = MemorySearchTool(self.memory_store)
         memory_get_tool = MemoryGetTool(self.memory_store)
-        memory_write_tool = MemoryWriteTool(self.memory_store)
         print(f"TinyClaw MemoryStore initialized at: {memory_base}")
 
         session_path = self.memory_store.init_session()
@@ -108,37 +156,25 @@ class AgentHLEAgent(BaseAgent):
                     + "\n\n"
                 )
 
-        # Create agent with custom computer
+        # Create agent with read-only memory tools (no memory_write).
+        # The planner LLM handles all memory writes by summarizing the
+        # agent's reasoning every _PLANNER_FLUSH_INTERVAL steps.
         agent = ComputerAgent(
             model=self.model,
-            tools=[session._computer, milestone_tool, memory_search_tool, memory_get_tool, memory_write_tool],
+            tools=[session._computer, milestone_tool, memory_search_tool, memory_get_tool],
             only_n_most_recent_images=3,
             trajectory_dir=trajectory_dir,
             instructions=(
                 prior_knowledge
                 + "Use the provided computer to complete the task as described.\n\n"
-                "## Memory Tools — USE IMMEDIATELY\n"
-                "You have three memory tools:\n"
-                "- memory_search: search memory for keywords. Returns matched lines with file/line.\n"
-                "- memory_get: read a memory file (or line range) found via search.\n"
-                "- memory_write: write to one of three targets:\n"
-                "  - target='session': append to the current session log (timestamped, for this run only)\n"
-                "  - target='task_memory': overwrite TASK_MEMORY.md — **this is the most important target**. "
-                "TASK_MEMORY.md is injected word-for-word into your instructions at the start of every "
-                "future run on this task. It is the PRIMARY way to pass knowledge forward across runs. "
-                "Write strategies, map layouts, known pitfalls, and successful approaches here.\n"
-                "  - target='memory': overwrite MEMORY.md (cross-task long-term knowledge)\n\n"
+                "## Memory Tools\n"
+                "You have two read-only memory tools:\n"
+                "- memory_search: search memory for keywords. Returns matched lines with file/line/score.\n"
+                "- memory_get: read a specific memory file (or line range) found via search.\n\n"
                 "**Step 1 (MANDATORY):** Before doing ANYTHING else, call memory_search with keywords "
                 "relevant to your task (e.g. the game name, goal, key terms). This retrieves prior "
                 "knowledge that will help you avoid repeating mistakes.\n\n"
-                "**Ongoing:** After every significant observation or discovery (a new screen, a "
-                "failed action, a successful strategy), call memory_write with target='session' "
-                "to record it. Write frequently — short notes are fine.\n\n"
-                "**Periodically (every ~10 steps) and before finishing:** Call memory_write with "
-                "target='task_memory' to persist a structured summary of everything you have learned "
-                "so far — what worked, what failed, map layout, optimal paths, key observations. "
-                "This ensures knowledge survives even if the run is cut short. Update it as you learn more; "
-                "each write replaces the previous content, so always include ALL your knowledge.\n\n"
+                "Your observations are recorded automatically — focus on completing the task.\n\n"
                 "When the task is complete, indicate so clearly by outputting 'DONE'."
             ),
         )
@@ -155,6 +191,7 @@ class AgentHLEAgent(BaseAgent):
 
             step = 0
             task_completed = False
+            reasoning_buffer: list[str] = []
 
             async for result in agent.run(instruction):
                 sys.stdout.flush()  # Flush output
@@ -162,6 +199,14 @@ class AgentHLEAgent(BaseAgent):
                 step += 1
                 for k in total_usage:
                     total_usage[k] += result["usage"].get(k, 0)
+
+                # Collect reasoning from this step
+                reasoning_buffer.extend(_extract_reasoning(result))
+
+                # Planner flush: summarize reasoning buffer every N steps
+                if step % _PLANNER_FLUSH_INTERVAL == 0 and reasoning_buffer:
+                    await self._flush_reasoning_to_session(reasoning_buffer, step)
+                    reasoning_buffer.clear()
 
                 # Record agent step to tracer
                 if tracer:
@@ -189,7 +234,6 @@ class AgentHLEAgent(BaseAgent):
                     break
 
                 # Check if task is completed (agent returned done or similar)
-
                 for item in result["output"]:
                     if item["type"] == "message":
                         if "DONE" in item["content"][0]["text"]:
@@ -197,46 +241,17 @@ class AgentHLEAgent(BaseAgent):
                             task_completed = True
                             break
 
+            # Flush any remaining reasoning
+            if reasoning_buffer:
+                await self._flush_reasoning_to_session(reasoning_buffer, step)
+                reasoning_buffer.clear()
+
             print(f"\nTotal usage: {total_usage}")
             print(f"Steps completed: {step}/{self.max_steps}")
 
-            # Post-run: consolidate session observations into TASK_MEMORY.md
-            # The agent is instructed to do this itself, but may get cut off at
-            # max_steps.  As a safety net, read the session log and append any
-            # new observations so the next run benefits from this run's knowledge.
+            # Post-run: use planner to consolidate session → TASK_MEMORY.md
             if task_id and self.memory_store._current_session_path:
-                try:
-                    session_content = self.memory_store._current_session_path.read_text(
-                        encoding="utf-8"
-                    )
-                    # Strip the header line ("# Session NNN — …")
-                    observations = "\n".join(
-                        ln for ln in session_content.splitlines()
-                        if ln.strip() and not ln.startswith("# Session ")
-                    ).strip()
-                    if observations:
-                        existing = self.memory_store.read_task_memory().strip()
-                        session_name = self.memory_store._current_session_path.stem
-                        new_section = f"\n\n## {session_name} observations\n{observations}"
-                        self.memory_store.write_task_memory(
-                            (existing + new_section) if existing else new_section.strip()
-                        )
-                        print("[TinyClaw] Consolidated session → TASK_MEMORY.md")
-
-                        # Also consolidate cross-task observations into global MEMORY.md.
-                        # Appends a task-labeled section so knowledge accumulates across tasks.
-                        existing_memory = self.memory_store.read_file("MEMORY.md").strip()
-                        task_section = (
-                            f"\n\n## {task_id} / {session_name}\n{observations}"
-                        )
-                        self.memory_store.write_memory(
-                            (existing_memory + task_section)
-                            if existing_memory
-                            else task_section.strip()
-                        )
-                        print("[TinyClaw] Consolidated session → MEMORY.md")
-                except Exception as e:
-                    print(f"[TinyClaw] Warning: session consolidation failed: {e}")
+                await self._consolidate_session(task_id)
 
             # Determine failure mode
             if task_completed:
@@ -261,3 +276,87 @@ class AgentHLEAgent(BaseAgent):
                 total_output_tokens=0,
                 failure_mode=FailureMode.UNKNOWN,
             )
+
+    async def _consolidate_session(self, task_id: str) -> None:
+        """Post-run: planner merges session log into TASK_MEMORY.md and MEMORY.md.
+
+        Falls back to naive append if planner call fails.
+        """
+        from memory import call_planner
+
+        try:
+            session_content = self.memory_store._current_session_path.read_text(
+                encoding="utf-8"
+            )
+            # Strip the header line ("# Session NNN — …")
+            observations = "\n".join(
+                ln for ln in session_content.splitlines()
+                if ln.strip() and not ln.startswith("# Session ")
+            ).strip()
+            if not observations:
+                print("[TinyClaw] No session observations to consolidate")
+                return
+
+            existing_task_mem = self.memory_store.read_task_memory().strip()
+            session_name = self.memory_store._current_session_path.stem
+
+            # Phase 1: compact session + existing task memory → new TASK_MEMORY.md
+            try:
+                compacted_task = await call_planner(
+                    system_prompt=(
+                        "You are a memory compaction assistant. Merge the new session "
+                        "observations into the existing task memory. Remove contradictions, "
+                        "deduplicate, and keep only actionable task-specific knowledge "
+                        "(map layouts, strategies, item locations, enemy stats, what worked, "
+                        "what failed). Output the complete updated task memory as markdown."
+                    ),
+                    user_prompt=(
+                        f"## Existing task memory\n{existing_task_mem or '(empty)'}\n\n"
+                        f"## New observations from {session_name}\n{observations}"
+                    ),
+                )
+                if compacted_task and compacted_task.strip():
+                    self.memory_store.write_task_memory(compacted_task.strip())
+                    print("[TinyClaw] Planner compacted session → TASK_MEMORY.md")
+                else:
+                    raise ValueError("Planner returned empty compaction")
+            except Exception as e:
+                print(f"[TinyClaw] Planner compaction failed ({e}), falling back to naive append")
+                new_section = f"\n\n## {session_name} observations\n{observations}"
+                self.memory_store.write_task_memory(
+                    (existing_task_mem + new_section) if existing_task_mem else new_section.strip()
+                )
+                print("[TinyClaw] Naive append → TASK_MEMORY.md")
+
+            # Phase 2: extract cross-task patterns → MEMORY.md
+            updated_task_mem = self.memory_store.read_task_memory().strip()
+            existing_memory = self.memory_store.read_file("MEMORY.md").strip()
+
+            try:
+                compacted_global = await call_planner(
+                    system_prompt=(
+                        "You are a memory compaction assistant. Extract cross-task patterns "
+                        "from the task-specific memory and merge into global memory. Keep only "
+                        "knowledge that generalizes beyond this specific task: general strategies, "
+                        "tool usage patterns, environment observations, UI navigation tips. "
+                        "Output the complete updated global memory as markdown."
+                    ),
+                    user_prompt=(
+                        f"## Existing global memory\n{existing_memory or '(empty)'}\n\n"
+                        f"## Task memory for {task_id}\n{updated_task_mem}"
+                    ),
+                )
+                if compacted_global and compacted_global.strip():
+                    self.memory_store.write_memory(compacted_global.strip())
+                    print("[TinyClaw] Planner compacted task memory → MEMORY.md")
+                else:
+                    raise ValueError("Planner returned empty compaction")
+            except Exception as e:
+                print(f"[TinyClaw] Global compaction failed ({e}), falling back to naive append")
+                task_section = f"\n\n## {task_id} / {session_name}\n{observations}"
+                self.memory_store.write_memory(
+                    (existing_memory + task_section) if existing_memory else task_section.strip()
+                )
+                print("[TinyClaw] Naive append → MEMORY.md")
+        except Exception as e:
+            print(f"[TinyClaw] Warning: session consolidation failed: {e}")
