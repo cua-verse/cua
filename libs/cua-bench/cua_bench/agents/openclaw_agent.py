@@ -1,5 +1,15 @@
-"""AgentHLE Agent implementation using the Computer Agent SDK.
-   - Add milestone tool to the agent.
+"""OpenClaw Agent — faithful reproduction of OpenClaw's agent-side architecture for CUA.
+
+Adapts OpenClaw's context management (system prompt construction, compaction pipeline,
+memory recall, tool loop, session persistence) to CUA's constraints:
+  - instructions= for persistent context (only content never truncated)
+  - Trajectory-based observation (CUA reasoning in trajectory files, not conversation)
+
+References:
+  - docs/openclaw-source-analysis.md — OpenClaw source code analysis
+  - docs/openclaw-context-flow.html — interactive visual pipeline
+  - openclaw/docs/concepts/ — component-level docs
+  - architecture.md — AgentHLE system architecture
 """
 
 import sys
@@ -13,9 +23,9 @@ if TYPE_CHECKING:
     from ..computers import DesktopSession
 
 
-@register_agent("agenthle-agent")
-class AgentHLEAgent(BaseAgent):
-    """Agent implementation using the CUA Computer Agent SDK."""
+@register_agent("openclaw-agent")
+class OpenClawAgent(BaseAgent):
+    """OpenClaw agent reproduction for CUA benchmark framework."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -24,7 +34,7 @@ class AgentHLEAgent(BaseAgent):
 
     @staticmethod
     def name() -> str:
-        return "agenthle-agent"
+        return "openclaw-agent"
 
     async def perform_task(
         self,
@@ -49,8 +59,8 @@ class AgentHLEAgent(BaseAgent):
             from agent import ComputerAgent
         except ImportError as e:
             raise RuntimeError(
-                "agenthle-agent requires the `agenthle-agent` package to be installed. "
-                "Install it with: pip install agenthle-agent"
+                "openclaw-agent requires the CUA `agent` package. "
+                "Run: uv sync --reinstall"
             ) from e
 
         # Render instruction with template if provided
@@ -72,7 +82,7 @@ class AgentHLEAgent(BaseAgent):
             trajectory_dir=trajectory_dir,
             instructions="Use the provided computer to complete the task as described. When the task is complete, indicate so clearly by outputting 'DONE'.",
         )
-        print("AgentHLE Agent initialized with model:", self.model)
+        print("OpenClaw Agent initialized with model:", self.model)
 
         # Run the agent and track usage
         try:
