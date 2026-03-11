@@ -19,9 +19,10 @@ You wake up fresh each session. Memory files are your continuity:
 - **Task memory** (`TASK_MEMORY.md`) — curated knowledge about this task, like strategies and key observations
 - **Session logs** (`memory/session-NNN.md`) — append-only logs of what happened each session
 
-> **Note**: Writing to memory files requires the memory tools provided by US-OC-003
-> (Memory Tools). Until those are available, memory files are read-only from the
-> agent's perspective.
+Use the memory tools to interact with these files:
+- `memory_search` — keyword search across TASK_MEMORY.md and session logs
+- `memory_get` — read a specific file or line range
+- `memory_write` — append to session log or overwrite TASK_MEMORY.md
 
 ### Write It Down — No "Mental Notes"!
 

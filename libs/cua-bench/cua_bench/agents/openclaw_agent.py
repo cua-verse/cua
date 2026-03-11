@@ -73,10 +73,19 @@ class OpenClawAgent(BaseAgent):
             trajectory_dir.mkdir(parents=True, exist_ok=True)
 
         from agent.tools import MilestoneTool
+        from agent.tools.base import BaseTool
+
         milestone_tool = MilestoneTool(session.interface)
 
         # Build structured system prompt via PromptBuilder (US-OC-001)
-        from .openclaw import ContextFile, MemoryStore, PromptBuilder
+        from .openclaw import (
+            ContextFile,
+            MemoryGetTool,
+            MemorySearchTool,
+            MemoryStore,
+            MemoryWriteTool,
+            PromptBuilder,
+        )
 
         # Initialize memory store (US-OC-002)
         # Derive task_id from logging_dir name or fall back to "default"
@@ -84,8 +93,18 @@ class OpenClawAgent(BaseAgent):
         memory_store = MemoryStore(task_id=task_id)
         memory_store.init_session()
 
-        tools = [session._computer, milestone_tool]
-        tool_summaries = {tool.name: tool.description for tool in tools}
+        # Memory tools (US-OC-003)
+        memory_search = MemorySearchTool(memory_store)
+        memory_get = MemoryGetTool(memory_store)
+        memory_write = MemoryWriteTool(memory_store)
+
+        tools = [session._computer, milestone_tool, memory_search, memory_get, memory_write]
+        # Build tool summaries for prompt — only BaseTool instances have .name/.description
+        tool_summaries = {
+            tool.name: tool.description
+            for tool in tools
+            if isinstance(tool, BaseTool)
+        }
         agents_md = (Path(__file__).parent / "openclaw" / "AGENTS.md").read_text()
 
         # Build context files, injecting TASK_MEMORY.md if it exists
