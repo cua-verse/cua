@@ -108,9 +108,10 @@ class OpenClawAgent(BaseAgent):
         agents_md = (Path(__file__).parent / "openclaw" / "AGENTS.md").read_text()
 
         # Build context files, injecting TASK_MEMORY.md if it exists
+        # Note: task description is NOT injected here — it's passed separately
+        # via agent.run(instruction) to avoid duplication in context.
         context_files = [
             ContextFile(path="AGENTS.md", content=agents_md),
-            ContextFile(path="task.md", content=instruction),
         ]
         bootstrap = memory_store.get_bootstrap_context()
         if bootstrap:

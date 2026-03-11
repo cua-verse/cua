@@ -17,7 +17,7 @@ class ContextFile:
     Follows OpenClaw's contextFiles bootstrap injection pattern.
     """
 
-    path: str  # Display label ("AGENTS.md", "task.md")
+    path: str  # Display label ("AGENTS.md", "TASK_MEMORY.md")
     content: str  # Full content to inject
 
 
@@ -47,7 +47,7 @@ class PromptBuilder:
       2. Tools — registered tool names with descriptions
       3. Memory Recall — when/how to use memory tools (only if memory tools present)
       4. Current Date & Time — UTC timestamp (ref: OpenClaw system-prompt.ts)
-      5. Project Context — bootstrap injection (AGENTS.md, task.md, etc.)
+      5. Project Context — bootstrap injection (AGENTS.md, TASK_MEMORY.md, etc.)
     """
 
     def __init__(self, config: PromptConfig | None = None) -> None:
@@ -138,6 +138,7 @@ class PromptBuilder:
                 "memory/session-*.md; then use memory_get to pull only the needed lines. "
                 "If low confidence after search, say you checked."
             ),
+            "Citations: include Source: <path#line> when referencing memory snippets.",
             "",
         ]
 

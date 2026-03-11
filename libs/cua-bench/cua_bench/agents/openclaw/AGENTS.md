@@ -6,9 +6,8 @@ This task environment is home. Treat it that way.
 
 Before doing anything else:
 
-1. `TASK_MEMORY.md` is already injected into your system prompt — read it for curated task knowledge
-2. Read the **two most recent** session logs in `memory/` (e.g. `session-NNN.md` and `session-(N-1).md`) for recent context
-3. Then proceed with the task
+1. Read the **two most recent** session logs in `memory/` (e.g. `session-NNN.md` and `session-(N-1).md`) for recent context
+2. Then proceed with the task
 
 Don't ask permission. Just do it.
 
