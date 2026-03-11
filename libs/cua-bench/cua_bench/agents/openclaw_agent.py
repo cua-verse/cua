@@ -74,13 +74,29 @@ class OpenClawAgent(BaseAgent):
 
         from agent.tools import MilestoneTool
         milestone_tool = MilestoneTool(session.interface)
+
+        # Build structured system prompt via PromptBuilder (US-OC-001)
+        from .openclaw import ContextFile, PromptBuilder
+
+        tools = [session._computer, milestone_tool]
+        tool_summaries = {tool.name: tool.description for tool in tools}
+        agents_md = (Path(__file__).parent / "openclaw" / "AGENTS.md").read_text()
+        builder = PromptBuilder()
+        instructions = builder.build(
+            tool_summaries=tool_summaries,
+            context_files=[
+                ContextFile(path="AGENTS.md", content=agents_md),
+                ContextFile(path="task.md", content=instruction),
+            ],
+        )
+
         # Create agent with custom computer
         agent = ComputerAgent(
             model=self.model,
-            tools=[session._computer, milestone_tool],
+            tools=tools,
             only_n_most_recent_images=3,
             trajectory_dir=trajectory_dir,
-            instructions="Use the provided computer to complete the task as described. When the task is complete, indicate so clearly by outputting 'DONE'.",
+            instructions=instructions,
         )
         print("OpenClaw Agent initialized with model:", self.model)
 

@@ -89,7 +89,10 @@ class PromptBuilder:
         ]
 
     def _build_tools(self, tool_summaries: dict[str, str]) -> list[str]:
-        """Build the Tools section listing registered tools."""
+        """Build the Tools section listing registered tools.
+
+        Tool order reflects caller's dict insertion order (Python 3.7+ stable).
+        """
         lines = ["## Tools", "", "You have access to the following tools:", ""]
         for name, description in tool_summaries.items():
             lines.append(f"- **{name}**: {description}")
@@ -102,23 +105,27 @@ class PromptBuilder:
         Mirrors OpenClaw's buildMemorySection() in system-prompt.ts:
         search-first behavioral directive, not a generic tutorial.
         """
-        memory_tools = {"memory_search", "memory_get", "memory_write"}
+        memory_tools = {"memory_search", "memory_get"}
         if not memory_tools.intersection(tool_summaries):
             return []
 
         return [
             "## Memory Recall",
             (
-                "Before acting on anything about prior runs, strategies, game state, "
-                "or task-specific knowledge: run memory_search first; then use memory_get "
-                "to pull only the needed lines. If low confidence after search, note that "
-                "you checked and proceed."
+                "Before acting on anything about prior attempts, strategies, environment "
+                "observations, or task state: run memory_search on MEMORY.md + memory/*.md; "
+                "then use memory_get to pull only the needed lines. If low confidence after "
+                "search, say you checked."
             ),
             "",
         ]
 
     def _build_project_context(self, context_files: list[ContextFile]) -> list[str]:
-        """Build the Project Context section with injected file contents."""
+        """Build the Project Context section with injected file contents.
+
+        # TODO US-OC-008: add per-file and total char size caps
+        # (ref: openclaw bootstrap 20K/150K limits)
+        """
         if not context_files:
             return []
 

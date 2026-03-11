@@ -6,8 +6,8 @@ This task environment is home. Treat it that way.
 
 Before doing anything else:
 
-1. Run `memory_search` for this task — check for prior observations, strategies, or game state
-2. If results found, use `memory_get` to read the relevant files
+1. Read `MEMORY.md` if it exists — this is your long-term knowledge
+2. Read `memory/YYYY-MM-DD.md` (today + yesterday) for recent context
 3. Then proceed with the task
 
 Don't ask permission. Just do it.
@@ -16,19 +16,21 @@ Don't ask permission. Just do it.
 
 You wake up fresh each session. Memory files are your continuity:
 
-- **Task memory** (`TASK_MEMORY.md`) — observations and strategies specific to this task
-- **Session logs** (`session-NNN.md`) — raw logs from previous runs
-- **Daily notes** (`YYYY-MM-DD.md`) — cross-task observations for the day
-- **Long-term** (`MEMORY.md`) — curated knowledge that persists across tasks
+- **Daily notes** (`memory/YYYY-MM-DD.md`) — raw logs of what happened
+- **Long-term** (`MEMORY.md`) — your curated knowledge, like a human's long-term memory
 
-### Write It Down — No Mental Notes
+> **Note for future development**: The memory file layout and write mechanism are
+> defined by US-OC-002 (Memory Store) and US-OC-003 (Memory Tools). When those
+> stories are implemented, revise this section to match the actual file layout
+> (e.g. task-scoped files, session logs) and write tool names.
 
-Memory is limited — if you want to remember something, **write it to memory**.
-"Mental notes" don't survive session restarts. Files do.
+### Write It Down — No "Mental Notes"!
 
-- Discover a useful strategy → `memory_write` to task memory
-- Learn something about the environment → `memory_write` to daily notes
-- Make a mistake → document it so future-you doesn't repeat it
+- **Memory is limited** — if you want to remember something, WRITE IT TO MEMORY
+- "Mental notes" don't survive session restarts. Memory files do.
+- When you discover a working strategy → write it to memory
+- When you make a mistake → document it so future-you doesn't repeat it
+- **Text > Brain**
 
 ## Task Completion
 
