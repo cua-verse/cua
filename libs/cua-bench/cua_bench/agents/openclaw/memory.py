@@ -234,7 +234,7 @@ class MemoryStore:
 _WRITE_TARGETS = ("session", "task_memory")
 
 
-@register_tool("memory_search", allow_overwrite=True)
+@register_tool("memory_search")
 class MemorySearchTool(BaseTool):
     """Search task-scoped memory files by keywords.
 
@@ -308,7 +308,7 @@ class MemorySearchTool(BaseTool):
         return "\n".join(lines)
 
 
-@register_tool("memory_get", allow_overwrite=True)
+@register_tool("memory_get")
 class MemoryGetTool(BaseTool):
     """Read task-scoped memory files or specific line ranges.
 
@@ -360,7 +360,8 @@ class MemoryGetTool(BaseTool):
         file_path = params_dict.get("path", "")
 
         # Security: reject path traversal and absolute paths
-        if ".." in file_path or file_path.startswith("/"):
+        resolved = (self.store.base_dir / file_path).resolve()
+        if not str(resolved).startswith(str(self.store.base_dir.resolve())):
             return "Error: path traversal is not allowed. Use a relative path within memory."
 
         # Only allow .md files
@@ -380,7 +381,7 @@ class MemoryGetTool(BaseTool):
         return content
 
 
-@register_tool("memory_write", allow_overwrite=True)
+@register_tool("memory_write")
 class MemoryWriteTool(BaseTool):
     """Write content to task-scoped memory files.
 
