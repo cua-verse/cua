@@ -6,8 +6,8 @@ This task environment is home. Treat it that way.
 
 Before doing anything else:
 
-1. Read `MEMORY.md` if it exists — this is your long-term knowledge
-2. Read `memory/YYYY-MM-DD.md` (today + yesterday) for recent context
+1. `TASK_MEMORY.md` is already injected into your system prompt — read it for curated task knowledge
+2. Read the **two most recent** session logs in `memory/` (e.g. `session-NNN.md` and `session-(N-1).md`) for recent context
 3. Then proceed with the task
 
 Don't ask permission. Just do it.
@@ -16,13 +16,12 @@ Don't ask permission. Just do it.
 
 You wake up fresh each session. Memory files are your continuity:
 
-- **Daily notes** (`memory/YYYY-MM-DD.md`) — raw logs of what happened
-- **Long-term** (`MEMORY.md`) — your curated knowledge, like a human's long-term memory
+- **Task memory** (`TASK_MEMORY.md`) — curated knowledge about this task, like strategies and key observations
+- **Session logs** (`memory/session-NNN.md`) — append-only logs of what happened each session
 
-> **Note for future development**: The memory file layout and write mechanism are
-> defined by US-OC-002 (Memory Store) and US-OC-003 (Memory Tools). When those
-> stories are implemented, revise this section to match the actual file layout
-> (e.g. task-scoped files, session logs) and write tool names.
+> **Note**: Writing to memory files requires the memory tools provided by US-OC-003
+> (Memory Tools). Until those are available, memory files are read-only from the
+> agent's perspective.
 
 ### Write It Down — No "Mental Notes"!
 

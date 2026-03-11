@@ -7,6 +7,7 @@ Reference implementation: openclaw/src/agents/system-prompt.ts (buildAgentSystem
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 
 @dataclass
@@ -32,6 +33,7 @@ class PromptConfig:
     """Configuration for which prompt sections to include."""
 
     identity: SectionConfig = field(default_factory=SectionConfig)
+    time: SectionConfig = field(default_factory=SectionConfig)
     tools: SectionConfig = field(default_factory=SectionConfig)
     memory: SectionConfig = field(default_factory=SectionConfig)
     project_context: SectionConfig = field(default_factory=SectionConfig)
@@ -40,11 +42,12 @@ class PromptConfig:
 class PromptBuilder:
     """Assembles structured system instructions from composable sections.
 
-    Sections (in order):
+    Sections (in order, matching OpenClaw's system-prompt.ts):
       1. Identity — one-line agent role
       2. Tools — registered tool names with descriptions
       3. Memory Recall — when/how to use memory tools (only if memory tools present)
-      4. Project Context — bootstrap injection (AGENTS.md, task.md, etc.)
+      4. Current Date & Time — UTC timestamp (ref: OpenClaw system-prompt.ts)
+      5. Project Context — bootstrap injection (AGENTS.md, task.md, etc.)
     """
 
     def __init__(self, config: PromptConfig | None = None) -> None:
@@ -70,6 +73,9 @@ class PromptBuilder:
             if memory_lines:
                 parts.extend(memory_lines)
 
+        if self.config.time.enabled:
+            parts.extend(self._build_time())
+
         if self.config.project_context.enabled and context_files:
             parts.extend(self._build_project_context(context_files))
 
@@ -85,6 +91,21 @@ class PromptBuilder:
                 "Your role is to complete computer-use tasks on a remote Windows desktop "
                 "by observing screenshots and performing mouse/keyboard actions."
             ),
+            "",
+        ]
+
+    def _build_time(self) -> list[str]:
+        """Build the Current Date & Time section.
+
+        Mirrors OpenClaw's system prompt which injects the current UTC timestamp
+        so the agent knows the date/time without needing a tool call.
+        """
+        now = datetime.now(timezone.utc)
+        return [
+            "## Current Date & Time",
+            "",
+            "- **Time zone:** UTC",
+            f"- **Current:** {now.strftime('%Y-%m-%d %H:%M UTC')}",
             "",
         ]
 
@@ -113,9 +134,9 @@ class PromptBuilder:
             "## Memory Recall",
             (
                 "Before acting on anything about prior attempts, strategies, environment "
-                "observations, or task state: run memory_search on MEMORY.md + memory/*.md; "
-                "then use memory_get to pull only the needed lines. If low confidence after "
-                "search, say you checked."
+                "observations, or task state: run memory_search on TASK_MEMORY.md + "
+                "memory/session-*.md; then use memory_get to pull only the needed lines. "
+                "If low confidence after search, say you checked."
             ),
             "",
         ]
@@ -136,8 +157,9 @@ class PromptBuilder:
             "",
         ]
         for cf in context_files:
-            lines.append(f"## {cf.path}")
-            lines.append("")
+            lines.append(f"### {cf.path}")
+            lines.append("```")
             lines.append(cf.content)
+            lines.append("```")
             lines.append("")
         return lines

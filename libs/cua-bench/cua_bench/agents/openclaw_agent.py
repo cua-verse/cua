@@ -76,18 +76,33 @@ class OpenClawAgent(BaseAgent):
         milestone_tool = MilestoneTool(session.interface)
 
         # Build structured system prompt via PromptBuilder (US-OC-001)
-        from .openclaw import ContextFile, PromptBuilder
+        from .openclaw import ContextFile, MemoryStore, PromptBuilder
+
+        # Initialize memory store (US-OC-002)
+        # Derive task_id from logging_dir name or fall back to "default"
+        task_id = logging_dir.parent.name if logging_dir else "default"
+        memory_store = MemoryStore(task_id=task_id)
+        memory_store.init_session()
 
         tools = [session._computer, milestone_tool]
         tool_summaries = {tool.name: tool.description for tool in tools}
         agents_md = (Path(__file__).parent / "openclaw" / "AGENTS.md").read_text()
+
+        # Build context files, injecting TASK_MEMORY.md if it exists
+        context_files = [
+            ContextFile(path="AGENTS.md", content=agents_md),
+            ContextFile(path="task.md", content=instruction),
+        ]
+        bootstrap = memory_store.get_bootstrap_context()
+        if bootstrap:
+            context_files.append(
+                ContextFile(path="TASK_MEMORY.md", content=bootstrap)
+            )
+
         builder = PromptBuilder()
         instructions = builder.build(
             tool_summaries=tool_summaries,
-            context_files=[
-                ContextFile(path="AGENTS.md", content=agents_md),
-                ContextFile(path="task.md", content=instruction),
-            ],
+            context_files=context_files,
         )
 
         # Create agent with custom computer
