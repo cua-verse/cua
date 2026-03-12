@@ -85,6 +85,7 @@ class OpenClawAgent(BaseAgent):
             MemoryStore,
             MemoryWriteTool,
             PromptBuilder,
+            SessionManager,
         )
 
         # Initialize memory store (US-OC-002)
@@ -92,6 +93,10 @@ class OpenClawAgent(BaseAgent):
         task_id = logging_dir.parent.name if logging_dir else "default"
         memory_store = MemoryStore(task_id=task_id)
         memory_store.init_session()
+
+        # Initialize session persistence (US-OC-004)
+        session_mgr = SessionManager(task_id=task_id)
+        session_mgr.init_session(model=self.model)
 
         # Memory tools (US-OC-003)
         memory_search = MemorySearchTool(memory_store)
@@ -136,10 +141,11 @@ class OpenClawAgent(BaseAgent):
         print("OpenClaw Agent initialized with model:", self.model)
 
         # Run the agent and track usage
+        # CUA SDK yields usage with input_tokens/output_tokens (OpenAI Responses API format)
         try:
             total_usage = {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
                 "total_tokens": 0,
                 "response_cost": 0.0,
             }
@@ -153,6 +159,80 @@ class OpenClawAgent(BaseAgent):
                 step += 1
                 for k in total_usage:
                     total_usage[k] += result["usage"].get(k, 0)
+
+                # Session persistence: track step, tokens, and log messages (US-OC-004)
+                step_input = result["usage"].get("input_tokens", 0)
+                step_output = result["usage"].get("output_tokens", 0)
+                session_mgr.update_step_count(step)
+                session_mgr.update_tokens(step_input, step_output)
+
+                # Log all output to transcript (matching OpenClaw's content array format)
+                step_usage = {
+                    "input": step_input,
+                    "output": step_output,
+                    "cost": result["usage"].get("response_cost", 0),
+                }
+                for item in result["output"]:
+                    item_type = item.get("type")
+                    if item_type == "message":
+                        # Assistant text — build content array from SDK output
+                        content_blocks = []
+                        for block in item.get("content", []):
+                            content_blocks.append({
+                                "type": "text",
+                                "text": block.get("text", ""),
+                            })
+                        if content_blocks:
+                            session_mgr.append_message(
+                                "assistant", content_blocks,
+                                usage=step_usage,
+                                stop_reason=result.get("stop_reason"),
+                            )
+                    elif item_type == "function_call":
+                        # Tool call (memory_search, memory_get, etc.)
+                        session_mgr.append_message(
+                            "assistant",
+                            [{
+                                "type": "toolCall",
+                                "id": item.get("call_id", ""),
+                                "name": item.get("name", ""),
+                                "arguments": item.get("arguments", ""),
+                            }],
+                            stop_reason="tool_use",
+                        )
+                    elif item_type == "function_call_output":
+                        # Tool result
+                        session_mgr.append_message(
+                            "toolResult",
+                            [{"type": "text", "text": item.get("output", "")}],
+                        )
+                    elif item_type == "computer_call":
+                        # Computer action (screenshot, click, type, etc.)
+                        action = item.get("action", {})
+                        session_mgr.append_message(
+                            "assistant",
+                            [{
+                                "type": "computer_call",
+                                "id": item.get("call_id", ""),
+                                "action": action,
+                            }],
+                            stop_reason="tool_use",
+                        )
+                    elif item_type == "computer_call_output":
+                        # Computer result (screenshot image reference)
+                        # Store reference only — actual images live in trajectories
+                        output = item.get("output", {})
+                        output_type = output.get("type", "") if isinstance(output, dict) else ""
+                        if output_type == "input_image":
+                            session_mgr.append_message(
+                                "toolResult",
+                                [{"type": "image", "source": "trajectory"}],
+                            )
+                        else:
+                            session_mgr.append_message(
+                                "toolResult",
+                                [{"type": "text", "text": str(output)[:500]}],
+                            )
 
                 # Record agent step to tracer
                 if tracer:
@@ -200,8 +280,8 @@ class OpenClawAgent(BaseAgent):
                 failure_mode = FailureMode.NONE  # Completed within max_steps
 
             return AgentResult(
-                total_input_tokens=total_usage.get("prompt_tokens", 0),
-                total_output_tokens=total_usage.get("completion_tokens", 0),
+                total_input_tokens=total_usage.get("input_tokens", 0),
+                total_output_tokens=total_usage.get("output_tokens", 0),
                 failure_mode=failure_mode,
             )
         except Exception as e:

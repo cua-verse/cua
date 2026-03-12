@@ -6,6 +6,7 @@ Components:
   - ContextFile: bootstrap file injection container
   - MemoryStore / SearchResult: task-workspace persistent memory storage
   - MemorySearchTool / MemoryGetTool / MemoryWriteTool: agent memory tools
+  - SessionManager / SessionState / TokenUsage / TranscriptEntry: session persistence
 """
 
 from .memory import (
@@ -16,6 +17,7 @@ from .memory import (
     SearchResult,
 )
 from .prompt import ContextFile, PromptBuilder, PromptConfig, SectionConfig
+from .session import SessionManager, SessionState, TokenUsage, TranscriptEntry
 
 __all__ = [
     "ContextFile",
@@ -27,4 +29,8 @@ __all__ = [
     "PromptConfig",
     "SearchResult",
     "SectionConfig",
+    "SessionManager",
+    "SessionState",
+    "TokenUsage",
+    "TranscriptEntry",
 ]
