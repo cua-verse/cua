@@ -8,11 +8,12 @@ adapted for CUA's single-task benchmark context. Keeps 3 of 10 OpenClaw JSONL en
 Key differences from OpenClaw:
 - 3 of 10 entry types (session, message, compaction)
 - Single JSONL file per task (session headers mark run boundaries)
-- Explicit run numbers in state.json
+- Run numbers derived from transcript session headers (not stored in state.json)
 - Task-scoped: sessions_dir/<task_id>/ vs OpenClaw's agent-scoped routing keys
 """
 
 import json
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -27,19 +28,37 @@ class TokenUsage:
     """Cumulative token usage tracking.
 
     Uses input_tokens/output_tokens naming to match CUA SDK (OpenAI Responses API format).
+    Cache token fields track Anthropic prompt caching usage.
     """
 
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    context_tokens: int = 0
 
-    def accumulate(self, input_tokens: int, output_tokens: int) -> None:
+    def accumulate(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        *,
+        cache_read: int = 0,
+        cache_write: int = 0,
+        context_tokens: int = 0,
+    ) -> None:
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
+        self.cache_read += cache_read
+        self.cache_write += cache_write
+        self.context_tokens += context_tokens
 
     def to_dict(self) -> dict[str, int]:
         return {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
+            "cache_read": self.cache_read,
+            "cache_write": self.cache_write,
+            "context_tokens": self.context_tokens,
         }
 
     @classmethod
@@ -47,44 +66,55 @@ class TokenUsage:
         return cls(
             input_tokens=data.get("input_tokens", 0),
             output_tokens=data.get("output_tokens", 0),
+            cache_read=data.get("cache_read", 0),
+            cache_write=data.get("cache_write", 0),
+            context_tokens=data.get("context_tokens", 0),
         )
 
 
 @dataclass
 class SessionState:
-    """Cross-run metadata persisted in state.json."""
+    """Cross-run metadata persisted in state.json.
+
+    Run numbers are derived from transcript session headers, not stored here.
+    """
 
     task_id: str
-    run_number: int = 0
     step_count: int = 0
     total_tokens: TokenUsage = field(default_factory=TokenUsage)
     compaction_count: int = 0
     compaction_summaries: list[str] = field(default_factory=list)
+    model: str = ""
+    system_prompt_report: dict[str, Any] | None = None
     created_at: str = ""
     updated_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "task_id": self.task_id,
-            "run_number": self.run_number,
             "step_count": self.step_count,
             "total_tokens": self.total_tokens.to_dict(),
             "compaction_count": self.compaction_count,
             "compaction_summaries": self.compaction_summaries,
+            "model": self.model,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+        if self.system_prompt_report is not None:
+            d["system_prompt_report"] = self.system_prompt_report
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SessionState":
         tokens_data = data.get("total_tokens", {})
         return cls(
             task_id=data["task_id"],
-            run_number=data.get("run_number", 0),
             step_count=data.get("step_count", 0),
             total_tokens=TokenUsage.from_dict(tokens_data),
             compaction_count=data.get("compaction_count", 0),
             compaction_summaries=list(data.get("compaction_summaries", [])),
+            model=data.get("model", ""),
+            system_prompt_report=data.get("system_prompt_report"),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
         )
@@ -189,9 +219,12 @@ class SessionManager:
     def init_session(self, model: str = "") -> SessionState:
         """Initialize a new run session.
 
-        Loads existing state (if any), increments run_number, resets step_count,
+        Loads existing state (if any), resets step_count, sets model,
         preserves cumulative tokens and compaction summaries, and appends a
         session header entry to transcript.jsonl.
+
+        Run number is derived by counting existing session headers in the
+        transcript rather than being stored in state.json.
 
         Returns the updated SessionState.
         """
@@ -200,19 +233,22 @@ class SessionManager:
 
         if existing is not None:
             self._state = existing
-            self._state.run_number += 1
             self._state.step_count = 0
+            self._state.model = model
             self._state.updated_at = now
         else:
             self._state = SessionState(
                 task_id=self.task_id,
-                run_number=1,
                 step_count=0,
+                model=model,
                 created_at=now,
                 updated_at=now,
             )
 
         self.save_state()
+
+        # Derive run_number from transcript session headers
+        run_number = self._count_session_headers() + 1
 
         # Append session header to transcript
         entry = TranscriptEntry(
@@ -223,7 +259,7 @@ class SessionManager:
             data={
                 "version": 1,
                 "task_id": self.task_id,
-                "run_number": self._state.run_number,
+                "run_number": run_number,
                 "model": model,
             },
         )
@@ -377,8 +413,127 @@ class SessionManager:
             return list(loaded.compaction_summaries)
         return []
 
+    def set_system_prompt_report(self, report: dict[str, Any]) -> None:
+        """Store a system prompt report in state.json."""
+        if self._state is not None:
+            self._state.system_prompt_report = report
+            self.save_state()
+
+    def _count_session_headers(self) -> int:
+        """Count the number of session header entries in the transcript."""
+        if not self.transcript_path.exists():
+            return 0
+        count = 0
+        for line in self.transcript_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if data.get("type") == "session":
+                count += 1
+        return count
+
     def _append_entry(self, entry: TranscriptEntry) -> None:
         """Append a single JSONL line to the transcript file."""
         self.task_dir.mkdir(parents=True, exist_ok=True)
         with open(self.transcript_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry.to_dict()) + "\n")
+
+
+def build_system_prompt_report(
+    *,
+    system_prompt: str,
+    context_files: list[Any] | None = None,
+    tool_summaries: dict[str, str] | None = None,
+    tools: list[Any] | None = None,
+    source: str = "run",
+) -> dict[str, Any]:
+    """Build a report describing the system prompt composition.
+
+    Measures total prompt size, splits project vs non-project context,
+    catalogs injected files and tool schemas. Uses duck-typing for tool
+    objects to avoid importing BaseTool.
+
+    Based on OpenClaw's system prompt reporting for observability.
+    """
+    total_chars = len(system_prompt)
+
+    # Split project vs non-project context at "# Project Context" header
+    project_marker = "# Project Context"
+    marker_pos = system_prompt.find(project_marker)
+    if marker_pos >= 0:
+        project_context_chars = total_chars - marker_pos
+        non_project_context_chars = marker_pos
+    else:
+        project_context_chars = 0
+        non_project_context_chars = total_chars
+
+    # Injected files
+    injected_files: list[dict[str, Any]] = []
+    if context_files is not None:
+        for cf in context_files:
+            raw_content = getattr(cf, "content", "")
+            raw_chars = len(raw_content) if raw_content else 0
+            name = getattr(cf, "name", str(cf))
+
+            # Measure how many chars actually appear in the prompt
+            if raw_content and raw_content in system_prompt:
+                injected_chars = len(raw_content)
+            elif name in system_prompt:
+                # Content was truncated; measure what's between file markers
+                injected_chars = raw_chars  # fallback
+            else:
+                injected_chars = 0
+
+            injected_files.append({
+                "name": name,
+                "raw_chars": raw_chars,
+                "injected_chars": injected_chars,
+                "truncated": injected_chars < raw_chars,
+            })
+
+    # Tools
+    tool_entries: list[dict[str, Any]] = []
+    if tools is not None:
+        for tool in tools:
+            name = getattr(tool, "name", str(tool))
+            summary_chars = len(tool_summaries.get(name, "")) if tool_summaries else 0
+
+            entry: dict[str, Any] = {"name": name, "summary_chars": summary_chars}
+
+            # Duck-typed schema extraction
+            if hasattr(tool, "parameters"):
+                params = tool.parameters
+                if isinstance(params, dict):
+                    schema_str = json.dumps(params)
+                    entry["schema_chars"] = len(schema_str)
+                    props = params.get("properties", {})
+                    entry["properties_count"] = len(props) if isinstance(props, dict) else 0
+                else:
+                    entry["schema_chars"] = 0
+                    entry["properties_count"] = 0
+
+            tool_entries.append(entry)
+    elif tool_summaries is not None:
+        for name, summary in tool_summaries.items():
+            tool_entries.append({
+                "name": name,
+                "summary_chars": len(summary),
+            })
+
+    return {
+        "source": source,
+        "generated_at": time.time(),
+        "system_prompt": {
+            "chars": total_chars,
+            "project_context_chars": project_context_chars,
+            "non_project_context_chars": non_project_context_chars,
+        },
+        "injected_files": injected_files,
+        "tools": {
+            "entries": tool_entries,
+        },
+    }

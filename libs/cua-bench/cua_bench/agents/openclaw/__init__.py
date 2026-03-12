@@ -17,7 +17,13 @@ from .memory import (
     SearchResult,
 )
 from .prompt import ContextFile, PromptBuilder, PromptConfig, SectionConfig
-from .session import SessionManager, SessionState, TokenUsage, TranscriptEntry
+from .session import (
+    SessionManager,
+    SessionState,
+    TokenUsage,
+    TranscriptEntry,
+    build_system_prompt_report,
+)
 
 __all__ = [
     "ContextFile",
@@ -33,4 +39,5 @@ __all__ = [
     "SessionState",
     "TokenUsage",
     "TranscriptEntry",
+    "build_system_prompt_report",
 ]
