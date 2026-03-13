@@ -159,12 +159,14 @@ class OpenClawAgent(BaseAgent):
         # Build structured system prompt via PromptBuilder (US-OC-001)
         from .openclaw import (
             ContextFile,
+            ContextOverflowCallback,
             MemoryGetTool,
             MemorySearchTool,
             MemoryStore,
             MemoryWriteTool,
             PromptBuilder,
             SessionManager,
+            is_context_overflow_error,
         )
 
         # Initialize memory store (US-OC-002)
@@ -209,6 +211,16 @@ class OpenClawAgent(BaseAgent):
             context_files=context_files,
         )
 
+        # Context overflow detection (US-OC-005)
+        # Allow env override for testing (e.g. CONTEXT_WINDOW_OVERRIDE=50000)
+        import os
+        ctx_override = os.environ.get("CONTEXT_WINDOW_OVERRIDE")
+        overflow_cb = ContextOverflowCallback(
+            model=self.model,
+            context_window=int(ctx_override) if ctx_override else None,
+            instructions_tokens=len(instructions) // 4,
+        )
+
         # Create agent with custom computer
         agent = ComputerAgent(
             model=self.model,
@@ -216,6 +228,7 @@ class OpenClawAgent(BaseAgent):
             only_n_most_recent_images=3,
             trajectory_dir=trajectory_dir,
             instructions=instructions,
+            callbacks=[overflow_cb],
         )
         print("OpenClaw Agent initialized with model:", self.model)
 
@@ -292,6 +305,11 @@ class OpenClawAgent(BaseAgent):
                     except Exception as e:
                         print(f"Warning: Failed to record agent step to tracer: {e}")
 
+                # Proactive context overflow detection (US-OC-005)
+                if overflow_cb.needs_compaction:
+                    print(f"[ContextOverflow] Compaction needed at step {step}")
+                    # US-OC-006 will add: await compact(session_mgr, overflow_cb, ...)
+
                 # Check if we've reached max_steps
                 if step >= self.max_steps:
                     print(f"\n[Max steps reached] Stopped at step {step}/{self.max_steps}")
@@ -323,6 +341,11 @@ class OpenClawAgent(BaseAgent):
                 failure_mode=failure_mode,
             )
         except Exception as e:
+            # Reactive context overflow detection (US-OC-005)
+            if is_context_overflow_error(str(e)):
+                overflow_cb.force_compaction()
+                print(f"[ContextOverflow] API rejected — overflow: {e}")
+                # US-OC-006 will add retry-after-compact logic
             print(f"Agent execution failed: {e}")
             import traceback
 

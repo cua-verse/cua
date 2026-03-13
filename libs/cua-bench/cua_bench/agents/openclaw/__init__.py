@@ -7,8 +7,10 @@ Components:
   - MemoryStore / SearchResult: task-workspace persistent memory storage
   - MemorySearchTool / MemoryGetTool / MemoryWriteTool: agent memory tools
   - SessionManager / SessionState / TokenUsage / TranscriptEntry: session persistence
+  - ContextOverflowCallback / is_context_overflow_error: context overflow detection (US-OC-005)
 """
 
+from .context import ContextOverflowCallback, is_context_overflow_error
 from .memory import (
     MemoryGetTool,
     MemorySearchTool,
@@ -27,6 +29,7 @@ from .session import (
 
 __all__ = [
     "ContextFile",
+    "ContextOverflowCallback",
     "MemoryGetTool",
     "MemorySearchTool",
     "MemoryStore",
@@ -40,4 +43,5 @@ __all__ = [
     "TokenUsage",
     "TranscriptEntry",
     "build_system_prompt_report",
+    "is_context_overflow_error",
 ]
