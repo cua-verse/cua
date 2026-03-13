@@ -1,4 +1,4 @@
-"""Context overflow detection and tool result truncation for the OpenClaw agent harness.
+"""Context overflow detection, tool result truncation, and compaction pipeline.
 
 Proactive detection: ContextOverflowCallback runs in CUA's on_llm_start callback chain,
 estimating token usage and truncating oversized tool results before the API call.
@@ -6,17 +6,24 @@ estimating token usage and truncating oversized tool results before the API call
 Reactive detection: is_context_overflow_error() catches API rejections when proactive
 detection underestimates.
 
+Compaction pipeline (US-OC-006): When overflow is detected, compact_messages() summarizes
+older conversation history while preserving key identifiers, producing a CompactionResult
+that the agent loop uses to restart with a compacted context.
+
 Reference implementation:
+  - openclaw/src/agents/compaction.ts — chunk splitting, summarization, identifier preservation
+  - openclaw/src/agents/pi-embedded-runner/compact.ts — compaction orchestration
   - openclaw/src/agents/pi-embedded-runner/tool-result-truncation.ts — truncation logic
   - openclaw/src/agents/pi-embedded-helpers/errors.ts — error classification
-  - openclaw/src/agents/compaction.ts — context budgeting constants
 """
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from agent.callbacks.base import AsyncCallbackHandler
@@ -323,3 +330,490 @@ class ContextOverflowCallback(AsyncCallbackHandler):
             f"({self.overflow_ratio:.0%}), needs_compaction={self._needs_compaction}"
         )
         return messages
+
+    def reset_after_compaction(self) -> None:
+        """Reset state after a compaction cycle so the next on_llm_start re-evaluates."""
+        self._needs_compaction = False
+        self._current_tokens = 0
+
+
+# ===========================================================================
+# Compaction Pipeline (US-OC-006)
+#
+# Adapted from openclaw/src/agents/compaction.ts.
+# Key differences from OpenClaw:
+#   - CUA stop-compact-resume pattern (can't inject mid-run)
+#   - litellm.acompletion for summarization
+#   - Transcript-based message extraction
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Compaction constants
+# ---------------------------------------------------------------------------
+
+BASE_CHUNK_RATIO = 0.4
+"""Default chunk size as a share of context window."""
+
+MIN_CHUNK_RATIO = 0.15
+"""Minimum chunk ratio when large messages reduce it."""
+
+SUMMARIZATION_OVERHEAD_TOKENS = 4096
+"""Reserved tokens for summarization prompt, system message, serialization."""
+
+DEFAULT_SUMMARY_FALLBACK = "No prior history."
+"""Fallback when summarization fails completely."""
+
+MAX_SUMMARIZATION_RETRIES = 3
+"""Number of retry attempts for LLM summarization calls."""
+
+# ---------------------------------------------------------------------------
+# Compaction prompts (from OpenClaw compaction.ts)
+# ---------------------------------------------------------------------------
+
+IDENTIFIER_PRESERVATION_INSTRUCTIONS = (
+    "Preserve all opaque identifiers exactly as written (no shortening or "
+    "reconstruction), including UUIDs, hashes, IDs, tokens, API keys, "
+    "hostnames, IPs, ports, URLs, and file names."
+)
+
+SUMMARIZATION_SYSTEM_PROMPT = (
+    "You are a conversation summarizer. Produce a concise but complete summary "
+    "of the conversation history provided. Focus on actions taken, decisions made, "
+    "current state, and pending tasks. "
+    + IDENTIFIER_PRESERVATION_INSTRUCTIONS
+)
+
+MERGE_SUMMARIES_INSTRUCTIONS = (
+    "Merge these partial summaries into a single cohesive summary.\n\n"
+    "MUST PRESERVE:\n"
+    "- Active tasks and their current status (in-progress, blocked, pending)\n"
+    "- Batch operation progress (e.g., '5/17 items completed')\n"
+    "- The last thing the user requested and what was being done about it\n"
+    "- Decisions made and their rationale\n"
+    "- TODOs, open questions, and constraints\n"
+    "- Any commitments or follow-ups promised\n\n"
+    "PRIORITIZE recent context over older history."
+)
+
+
+# ---------------------------------------------------------------------------
+# CompactionResult
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CompactionResult:
+    """Result of a compaction operation."""
+
+    summary: str
+    """The compaction summary text."""
+
+    tokens_before: int
+    """Estimated tokens before compaction."""
+
+    tokens_after: int
+    """Estimated tokens after compaction (summary + kept messages)."""
+
+    first_kept_message_index: int
+    """Index in the original message list where kept messages start."""
+
+    chunks_processed: int
+    """Number of chunks that were summarized."""
+
+
+# ---------------------------------------------------------------------------
+# Chunk splitting
+# ---------------------------------------------------------------------------
+
+def chunk_messages_by_token_share(
+    messages: list[dict[str, Any]], parts: int = 2
+) -> list[list[dict[str, Any]]]:
+    """Split messages into ``parts`` chunks targeting equal token budgets.
+
+    Adapted from OpenClaw's splitMessagesByTokenShare. Preserves message order.
+    """
+    if not messages or parts < 1:
+        return []
+    if parts == 1:
+        return [list(messages)]
+
+    total = estimate_messages_tokens(messages)
+    if total == 0:
+        return [list(messages)]
+
+    target_per_part = total / parts
+    chunks: list[list[dict[str, Any]]] = []
+    current_chunk: list[dict[str, Any]] = []
+    current_tokens = 0
+
+    for msg in messages:
+        msg_tokens = estimate_message_tokens(msg)
+        # Start new chunk if adding this message exceeds target and we have room
+        if (
+            current_chunk
+            and current_tokens + msg_tokens > target_per_part
+            and len(chunks) < parts - 1
+        ):
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_tokens = 0
+        current_chunk.append(msg)
+        current_tokens += msg_tokens
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+
+def chunk_messages_by_max_tokens(
+    messages: list[dict[str, Any]], max_tokens: int
+) -> list[list[dict[str, Any]]]:
+    """Split messages so each chunk stays under ``max_tokens``.
+
+    Adapted from OpenClaw's chunkMessagesByMaxTokens.
+    Oversized single messages get their own chunk.
+    """
+    if not messages or max_tokens <= 0:
+        return []
+
+    safe_max = int(max_tokens / SAFETY_MARGIN)
+    chunks: list[list[dict[str, Any]]] = []
+    current_chunk: list[dict[str, Any]] = []
+    current_tokens = 0
+
+    for msg in messages:
+        msg_tokens = estimate_message_tokens(msg)
+        if current_chunk and current_tokens + msg_tokens > safe_max:
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_tokens = 0
+        current_chunk.append(msg)
+        current_tokens += msg_tokens
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks
+
+
+def compute_adaptive_chunk_ratio(
+    messages: list[dict[str, Any]], context_window: int
+) -> float:
+    """Dynamically adjust chunk ratio based on average message size.
+
+    Adapted from OpenClaw's computeAdaptiveChunkRatio.
+    Reduces the ratio when messages are large relative to the context window.
+    """
+    if not messages or context_window <= 0:
+        return BASE_CHUNK_RATIO
+
+    total_tokens = estimate_messages_tokens(messages)
+    avg_tokens = total_tokens / len(messages)
+    safe_avg = avg_tokens * SAFETY_MARGIN
+    ratio = safe_avg / context_window
+
+    if ratio > 0.1:
+        reduction = min(ratio * 2, BASE_CHUNK_RATIO - MIN_CHUNK_RATIO)
+        return max(MIN_CHUNK_RATIO, BASE_CHUNK_RATIO - reduction)
+
+    return BASE_CHUNK_RATIO
+
+
+# ---------------------------------------------------------------------------
+# Message serialization for summarization
+# ---------------------------------------------------------------------------
+
+def serialize_messages_for_summary(messages: list[dict[str, Any]]) -> str:
+    """Convert message dicts to readable text for the summarization prompt.
+
+    Strips base64 image data and preserves role, text content, tool names,
+    and action descriptions.
+    """
+    lines: list[str] = []
+    for msg in messages:
+        role = msg.get("role", msg.get("type", "unknown"))
+        content = msg.get("content", "")
+
+        if isinstance(content, str):
+            lines.append(f"[{role}] {content}")
+        elif isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                btype = block.get("type", "")
+                if btype == "text" and block.get("text"):
+                    parts.append(block["text"])
+                elif btype == "function_call":
+                    name = block.get("name", "unknown")
+                    args = block.get("arguments", "")
+                    if isinstance(args, str) and len(args) > 200:
+                        args = args[:200] + "..."
+                    parts.append(f"[tool_call: {name}({args})]")
+                elif btype == "computer_call":
+                    action = block.get("action", {})
+                    parts.append(f"[computer: {json.dumps(action)[:200]}]")
+                elif btype == "tool_result":
+                    result_text = str(block.get("content", ""))[:500]
+                    parts.append(f"[tool_result: {result_text}]")
+                # Skip image/base64 content entirely
+            if parts:
+                lines.append(f"[{role}] {' | '.join(parts)}")
+        else:
+            text = str(content)[:500]
+            lines.append(f"[{role}] {text}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# LLM-based summarization
+# ---------------------------------------------------------------------------
+
+async def summarize_chunk(
+    messages: list[dict[str, Any]],
+    model: str,
+    *,
+    previous_summary: str | None = None,
+    custom_instructions: str | None = None,
+) -> str:
+    """Summarize a chunk of messages via litellm.acompletion.
+
+    Args:
+        messages: The message chunk to summarize.
+        model: litellm model string (e.g. "anthropic/claude-sonnet-4-20250514").
+        previous_summary: Summary of earlier chunks for continuity.
+        custom_instructions: Optional additional instructions.
+
+    Returns:
+        Summary text.
+    """
+    import litellm
+
+    system_parts = [SUMMARIZATION_SYSTEM_PROMPT]
+    if custom_instructions:
+        system_parts.append(custom_instructions)
+
+    user_parts: list[str] = []
+    if previous_summary:
+        user_parts.append(f"## Previous context summary\n{previous_summary}\n")
+    user_parts.append("## Conversation to summarize\n")
+    user_parts.append(serialize_messages_for_summary(messages))
+
+    llm_messages = [
+        {"role": "system", "content": "\n\n".join(system_parts)},
+        {"role": "user", "content": "\n".join(user_parts)},
+    ]
+
+    last_error: Exception | None = None
+    for attempt in range(MAX_SUMMARIZATION_RETRIES):
+        try:
+            response = await litellm.acompletion(
+                model=model,
+                messages=llm_messages,
+                max_tokens=2048,
+                temperature=0.3,
+            )
+            content = response.choices[0].message.content
+            return content.strip() if content else DEFAULT_SUMMARY_FALLBACK
+        except Exception as e:
+            last_error = e
+            if attempt < MAX_SUMMARIZATION_RETRIES - 1:
+                backoff = min(0.5 * (2 ** attempt), 5.0)
+                print(f"[Compaction] Summarization attempt {attempt + 1} failed: {e}, retrying in {backoff:.1f}s")
+                await asyncio.sleep(backoff)
+
+    print(f"[Compaction] All summarization attempts failed: {last_error}")
+    raise last_error  # type: ignore[misc]
+
+
+async def summarize_chunks_iterative(
+    chunks: list[list[dict[str, Any]]],
+    model: str,
+    *,
+    custom_instructions: str | None = None,
+) -> str:
+    """Iteratively summarize chunks, feeding each summary as context to the next.
+
+    Adapted from OpenClaw's summarizeChunks pattern.
+    """
+    if not chunks:
+        return DEFAULT_SUMMARY_FALLBACK
+
+    summary: str | None = None
+    for i, chunk in enumerate(chunks):
+        print(f"[Compaction] Summarizing chunk {i + 1}/{len(chunks)} ({len(chunk)} messages)")
+        summary = await summarize_chunk(
+            chunk,
+            model,
+            previous_summary=summary,
+            custom_instructions=custom_instructions,
+        )
+
+    return summary or DEFAULT_SUMMARY_FALLBACK
+
+
+async def _merge_summaries(
+    summaries: list[str],
+    model: str,
+) -> str:
+    """Merge partial summaries into a single cohesive summary."""
+    import litellm
+
+    user_content = "\n\n---\n\n".join(
+        f"### Part {i + 1}\n{s}" for i, s in enumerate(summaries)
+    )
+    llm_messages = [
+        {"role": "system", "content": MERGE_SUMMARIES_INSTRUCTIONS + "\n\n" + IDENTIFIER_PRESERVATION_INSTRUCTIONS},
+        {"role": "user", "content": user_content},
+    ]
+
+    response = await litellm.acompletion(
+        model=model,
+        messages=llm_messages,
+        max_tokens=2048,
+        temperature=0.3,
+    )
+    content = response.choices[0].message.content
+    return content.strip() if content else DEFAULT_SUMMARY_FALLBACK
+
+
+def _is_oversized_for_summary(msg: dict[str, Any], context_window: int) -> bool:
+    """Check if a single message exceeds 50% of the context window."""
+    return estimate_message_tokens(msg) > context_window * 0.5
+
+
+async def summarize_with_fallback(
+    messages: list[dict[str, Any]],
+    model: str,
+    context_window: int,
+    max_chunk_tokens: int,
+    *,
+    custom_instructions: str | None = None,
+) -> str:
+    """Three-tier summarization with progressive fallback.
+
+    1. Full summarization of all messages
+    2. Exclude oversized messages, summarize the rest
+    3. Static fallback noting message count
+    """
+    # Tier 1: full summarization
+    try:
+        chunks = chunk_messages_by_max_tokens(messages, max_chunk_tokens)
+        if chunks:
+            return await summarize_chunks_iterative(
+                chunks, model, custom_instructions=custom_instructions
+            )
+    except Exception as e:
+        print(f"[Compaction] Tier 1 (full) failed: {e}")
+
+    # Tier 2: exclude oversized messages
+    try:
+        filtered = [m for m in messages if not _is_oversized_for_summary(m, context_window)]
+        oversized_count = len(messages) - len(filtered)
+        if filtered:
+            chunks = chunk_messages_by_max_tokens(filtered, max_chunk_tokens)
+            if chunks:
+                summary = await summarize_chunks_iterative(
+                    chunks, model, custom_instructions=custom_instructions
+                )
+                if oversized_count > 0:
+                    summary += f"\n\n[Note: {oversized_count} oversized message(s) excluded from summary]"
+                return summary
+    except Exception as e:
+        print(f"[Compaction] Tier 2 (filtered) failed: {e}")
+
+    # Tier 3: static fallback
+    return (
+        f"[Compaction fallback] {len(messages)} messages could not be summarized. "
+        f"The conversation contained tool calls, computer interactions, and text exchanges."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main compaction entry point
+# ---------------------------------------------------------------------------
+
+async def compact_messages(
+    messages: list[dict[str, Any]],
+    model: str,
+    context_window: int,
+    *,
+    custom_instructions: str | None = None,
+) -> CompactionResult:
+    """Compact older conversation messages into a summary.
+
+    Splits messages into two halves by token budget: the first half is summarized,
+    the second half is kept verbatim. Uses adaptive chunk sizing for large messages.
+
+    Args:
+        messages: Full message history to compact.
+        model: litellm model string for summarization LLM calls.
+        context_window: Context window size in tokens.
+        custom_instructions: Optional instructions for the summarization prompt.
+
+    Returns:
+        CompactionResult with summary, token counts, and split point.
+    """
+    if not messages:
+        return CompactionResult(
+            summary=DEFAULT_SUMMARY_FALLBACK,
+            tokens_before=0,
+            tokens_after=0,
+            first_kept_message_index=0,
+            chunks_processed=0,
+        )
+
+    tokens_before = estimate_messages_tokens(messages)
+    print(f"[Compaction] Starting: {len(messages)} messages, ~{tokens_before} tokens")
+
+    # Split into to-compact (first half) and to-keep (second half)
+    halves = chunk_messages_by_token_share(messages, parts=2)
+    if len(halves) < 2:
+        # Not enough to split — compact everything
+        to_compact = messages
+        to_keep: list[dict[str, Any]] = []
+        first_kept_index = len(messages)
+    else:
+        to_compact = halves[0]
+        to_keep = halves[1]
+        first_kept_index = len(halves[0])
+
+    # Adaptive chunk ratio for the to-compact portion
+    chunk_ratio = compute_adaptive_chunk_ratio(to_compact, context_window)
+    max_chunk_tokens = int(context_window * chunk_ratio) - SUMMARIZATION_OVERHEAD_TOKENS
+    max_chunk_tokens = max(max_chunk_tokens, 2000)  # safety floor
+
+    print(
+        f"[Compaction] Split: {len(to_compact)} to compact, {len(to_keep)} to keep, "
+        f"chunk_ratio={chunk_ratio:.2f}, max_chunk_tokens={max_chunk_tokens}"
+    )
+
+    # Summarize the older portion
+    summary = await summarize_with_fallback(
+        to_compact,
+        model,
+        context_window,
+        max_chunk_tokens,
+        custom_instructions=custom_instructions,
+    )
+
+    # Count chunks processed
+    chunks = chunk_messages_by_max_tokens(to_compact, max_chunk_tokens)
+    chunks_processed = len(chunks)
+
+    # Estimate tokens after: summary + kept messages
+    summary_tokens = len(summary) // 4
+    kept_tokens = estimate_messages_tokens(to_keep) if to_keep else 0
+    tokens_after = summary_tokens + kept_tokens
+
+    print(
+        f"[Compaction] Done: ~{tokens_before} → ~{tokens_after} tokens "
+        f"({chunks_processed} chunks summarized)"
+    )
+
+    return CompactionResult(
+        summary=summary,
+        tokens_before=tokens_before,
+        tokens_after=tokens_after,
+        first_kept_message_index=first_kept_index,
+        chunks_processed=chunks_processed,
+    )

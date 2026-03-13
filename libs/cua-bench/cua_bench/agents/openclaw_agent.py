@@ -232,8 +232,13 @@ class OpenClawAgent(BaseAgent):
         )
         print("OpenClaw Agent initialized with model:", self.model)
 
-        # Run the agent and track usage
+        # Run the agent with stop-compact-resume pattern (US-OC-006)
         # CUA SDK yields usage with input_tokens/output_tokens (OpenAI Responses API format)
+        #
+        # CUA's ComputerAgent.run() is an opaque async generator — we cannot inject
+        # compaction summaries mid-run. Instead: break out of the loop, compact the
+        # transcript, rebuild the instruction with the compaction summary, create a
+        # new agent, and resume.
         try:
             total_usage = {
                 "input_tokens": 0,
@@ -244,88 +249,114 @@ class OpenClawAgent(BaseAgent):
 
             step = 0
             task_completed = False
+            max_compactions = 3
+            compaction_count = 0
+            compaction_triggered = False
 
-            async for result in agent.run(instruction):
-                sys.stdout.flush()  # Flush output
+            while compaction_count <= max_compactions:
+                compaction_triggered = False
 
-                step += 1
-                for k in total_usage:
-                    total_usage[k] += result["usage"].get(k, 0)
+                async for result in agent.run(instruction):
+                    sys.stdout.flush()  # Flush output
 
-                # Session persistence: track step, tokens, and log messages (US-OC-004)
-                step_input = result["usage"].get("input_tokens", 0)
-                step_output = result["usage"].get("output_tokens", 0)
-                session_mgr.update_step_count(step)
-                session_mgr.update_tokens(step_input, step_output)
+                    step += 1
+                    for k in total_usage:
+                        total_usage[k] += result["usage"].get(k, 0)
 
-                # Group step output into logical turns and log to transcript
-                assistant_content, tool_results = group_step_output(
-                    result["output"], trajectory_dir
-                )
+                    # Session persistence: track step, tokens, and log messages (US-OC-004)
+                    step_input = result["usage"].get("input_tokens", 0)
+                    step_output = result["usage"].get("output_tokens", 0)
+                    session_mgr.update_step_count(step)
+                    session_mgr.update_tokens(step_input, step_output)
 
-                if assistant_content:
-                    has_tools = any(
-                        b["type"] in ("function_call", "computer_call")
-                        for b in assistant_content
-                    )
-                    usage = {
-                        "input": step_input,
-                        "output": step_output,
-                        "total": step_input + step_output,
-                        "cost": result["usage"].get("response_cost", 0),
-                    }
-                    session_mgr.append_message(
-                        "assistant",
-                        assistant_content,
-                        usage=usage,
-                        stop_reason=result.get("stop_reason") or ("tool_use" if has_tools else None),
-                        api="openai-responses",
+                    # Group step output into logical turns and log to transcript
+                    assistant_content, tool_results = group_step_output(
+                        result["output"], trajectory_dir
                     )
 
-                if tool_results:
-                    session_mgr.append_message("tool", tool_results)
-
-                # Record agent step to tracer
-                if tracer:
-                    try:
-                        # Take screenshot
-                        screenshot = await session.screenshot()
-                        # Record the step with metadata
-                        tracer.record(
-                            "agent_step",
-                            {
-                                "step": step,
-                                "agent": self.name(),
-                                "model": self.model,
-                                "usage": result["usage"],
-                                "output": result["output"],
-                            },
-                            [screenshot],
+                    if assistant_content:
+                        has_tools = any(
+                            b["type"] in ("function_call", "computer_call")
+                            for b in assistant_content
                         )
-                    except Exception as e:
-                        print(f"Warning: Failed to record agent step to tracer: {e}")
+                        usage = {
+                            "input": step_input,
+                            "output": step_output,
+                            "total": step_input + step_output,
+                            "cost": result["usage"].get("response_cost", 0),
+                        }
+                        session_mgr.append_message(
+                            "assistant",
+                            assistant_content,
+                            usage=usage,
+                            stop_reason=result.get("stop_reason") or ("tool_use" if has_tools else None),
+                            api="openai-responses",
+                        )
 
-                # Proactive context overflow detection (US-OC-005)
-                if overflow_cb.needs_compaction:
-                    print(f"[ContextOverflow] Compaction needed at step {step}")
-                    # US-OC-006 will add: await compact(session_mgr, overflow_cb, ...)
+                    if tool_results:
+                        session_mgr.append_message("tool", tool_results)
 
-                # Check if we've reached max_steps
-                if step >= self.max_steps:
-                    print(f"\n[Max steps reached] Stopped at step {step}/{self.max_steps}")
+                    # Record agent step to tracer
+                    if tracer:
+                        try:
+                            screenshot = await session.screenshot()
+                            tracer.record(
+                                "agent_step",
+                                {
+                                    "step": step,
+                                    "agent": self.name(),
+                                    "model": self.model,
+                                    "usage": result["usage"],
+                                    "output": result["output"],
+                                },
+                                [screenshot],
+                            )
+                        except Exception as e:
+                            print(f"Warning: Failed to record agent step to tracer: {e}")
+
+                    # Proactive context overflow detection (US-OC-005 + US-OC-006)
+                    if overflow_cb.needs_compaction and compaction_count < max_compactions:
+                        print(f"[Compaction] Proactive trigger at step {step}")
+                        compaction_triggered = True
+                        break  # break async for → compact and restart
+
+                    # Check if we've reached max_steps
+                    if step >= self.max_steps:
+                        print(f"\n[Max steps reached] Stopped at step {step}/{self.max_steps}")
+                        break
+
+                    # Check if task is completed (agent returned done or similar)
+                    for item in result["output"]:
+                        if item["type"] == "message":
+                            if "DONE" in item["content"][0]["text"]:
+                                print(f"\n[Task completed] Agent indicated completion at step {step}")
+                                task_completed = True
+                                break
+
+                    if task_completed:
+                        break
+
+                if not compaction_triggered:
+                    # agent.run() ended normally (completed, max_steps, or DONE)
                     break
 
-                # Check if task is completed (agent returned done or similar)
-
-                for item in result["output"]:
-                    if item["type"] == "message":
-                        if "DONE" in item["content"][0]["text"]:
-                            print(f"\n[Task completed] Agent indicated completion at step {step}")
-                            task_completed = True
-                            break
+                # --- Stop-Compact-Resume (US-OC-006) ---
+                agent, instruction = await self._compact_and_rebuild(
+                    session_mgr=session_mgr,
+                    overflow_cb=overflow_cb,
+                    task_description=task_description,
+                    original_instructions=instructions,
+                    tools=tools,
+                    trajectory_dir=trajectory_dir,
+                    step=step,
+                    ComputerAgent=ComputerAgent,
+                )
+                compaction_count += 1
 
             print(f"\nTotal usage: {total_usage}")
             print(f"Steps completed: {step}/{self.max_steps}")
+            if compaction_count > 0:
+                print(f"Compactions performed: {compaction_count}")
 
             # Determine failure mode
             if task_completed:
@@ -341,17 +372,150 @@ class OpenClawAgent(BaseAgent):
                 failure_mode=failure_mode,
             )
         except Exception as e:
-            # Reactive context overflow detection (US-OC-005)
-            if is_context_overflow_error(str(e)):
+            # Reactive context overflow detection (US-OC-005 + US-OC-006)
+            if is_context_overflow_error(str(e)) and compaction_count < max_compactions:
                 overflow_cb.force_compaction()
-                print(f"[ContextOverflow] API rejected — overflow: {e}")
-                # US-OC-006 will add retry-after-compact logic
+                print(f"[ContextOverflow] API rejected — attempting reactive compaction: {e}")
+                try:
+                    agent, instruction = await self._compact_and_rebuild(
+                        session_mgr=session_mgr,
+                        overflow_cb=overflow_cb,
+                        task_description=task_description,
+                        original_instructions=instructions,
+                        tools=tools,
+                        trajectory_dir=trajectory_dir,
+                        step=step,
+                        ComputerAgent=ComputerAgent,
+                    )
+                    # One more attempt after reactive compaction
+                    async for result in agent.run(instruction):
+                        sys.stdout.flush()
+                        step += 1
+                        for k in total_usage:
+                            total_usage[k] += result["usage"].get(k, 0)
+                        if step >= self.max_steps:
+                            break
+                    return AgentResult(
+                        total_input_tokens=total_usage.get("input_tokens", 0),
+                        total_output_tokens=total_usage.get("output_tokens", 0),
+                        failure_mode=FailureMode.MAX_STEPS_EXCEEDED if step >= self.max_steps else FailureMode.NONE,
+                    )
+                except Exception as retry_e:
+                    print(f"[Compaction] Reactive retry also failed: {retry_e}")
+
             print(f"Agent execution failed: {e}")
             import traceback
 
             traceback.print_exc()
             return AgentResult(
-                total_input_tokens=0,
-                total_output_tokens=0,
+                total_input_tokens=total_usage.get("input_tokens", 0),
+                total_output_tokens=total_usage.get("output_tokens", 0),
                 failure_mode=FailureMode.UNKNOWN,
             )
+
+    async def _compact_and_rebuild(
+        self,
+        *,
+        session_mgr,
+        overflow_cb,
+        task_description: str,
+        original_instructions: str,
+        tools: list,
+        trajectory_dir: Path | None,
+        step: int,
+        ComputerAgent,
+    ):
+        """Run compaction on the transcript and rebuild the agent with compacted context.
+
+        Returns (new_agent, new_instruction) for the next run cycle.
+        """
+        from .openclaw import compact_messages
+
+        # Extract messages from the current run's transcript
+        messages = _extract_messages_for_compaction(session_mgr)
+
+        # Run the compaction pipeline
+        compaction_result = await compact_messages(
+            messages,
+            self.model,
+            overflow_cb.context_window,
+        )
+
+        # Find the first kept entry ID from the transcript
+        history = session_mgr.load_history()
+        msg_entries = [e for e in history if e.type == "message"]
+        if compaction_result.first_kept_message_index < len(msg_entries):
+            first_kept_id = msg_entries[compaction_result.first_kept_message_index].id
+        else:
+            first_kept_id = msg_entries[-1].id if msg_entries else "unknown"
+
+        # Persist the compaction entry
+        session_mgr.append_compaction(
+            compaction_result.summary,
+            first_kept_id,
+            compaction_result.tokens_before,
+        )
+
+        # Build new instruction with compaction context
+        instruction = _create_compacted_instruction(
+            task_description,
+            session_mgr.get_compaction_summaries(),
+        )
+
+        # Reset overflow callback and create new agent
+        overflow_cb.reset_after_compaction()
+
+        agent = ComputerAgent(
+            model=self.model,
+            tools=tools,
+            only_n_most_recent_images=3,
+            trajectory_dir=trajectory_dir,
+            instructions=original_instructions,
+            callbacks=[overflow_cb],
+        )
+        print(f"[Compaction] Agent rebuilt after compaction at step {step}")
+
+        return agent, instruction
+
+
+def _extract_messages_for_compaction(session_mgr) -> list[dict[str, Any]]:
+    """Extract message entries from the transcript as dicts for compaction.
+
+    Converts TranscriptEntry objects into the {role, content} format
+    expected by the compaction pipeline.
+    """
+    history = session_mgr.load_history()
+    messages: list[dict[str, Any]] = []
+    for entry in history:
+        if entry.type != "message":
+            continue
+        msg_data = entry.data.get("message", {})
+        messages.append({
+            "role": msg_data.get("role", "unknown"),
+            "content": msg_data.get("content", ""),
+        })
+    return messages
+
+
+def _create_compacted_instruction(
+    task_description: str,
+    compaction_summaries: list[str],
+) -> str:
+    """Build a new instruction string with compaction summaries prepended.
+
+    The agent receives the compacted history as context before the task instruction.
+    """
+    if not compaction_summaries:
+        return task_description
+
+    summary_text = "\n\n---\n\n".join(
+        f"### Compaction {i + 1}\n{s}" for i, s in enumerate(compaction_summaries)
+    )
+    return (
+        f"## Prior Context (Compacted)\n"
+        f"The following is a summary of earlier conversation history that was "
+        f"compacted to save context space. Use this to maintain continuity.\n\n"
+        f"{summary_text}\n\n"
+        f"---\n\n"
+        f"## Current Task\n{task_description}"
+    )

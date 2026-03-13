@@ -8,9 +8,15 @@ Components:
   - MemorySearchTool / MemoryGetTool / MemoryWriteTool: agent memory tools
   - SessionManager / SessionState / TokenUsage / TranscriptEntry: session persistence
   - ContextOverflowCallback / is_context_overflow_error: context overflow detection (US-OC-005)
+  - CompactionResult / compact_messages: compaction pipeline (US-OC-006)
 """
 
-from .context import ContextOverflowCallback, is_context_overflow_error
+from .context import (
+    CompactionResult,
+    ContextOverflowCallback,
+    compact_messages,
+    is_context_overflow_error,
+)
 from .memory import (
     MemoryGetTool,
     MemorySearchTool,
@@ -28,8 +34,10 @@ from .session import (
 )
 
 __all__ = [
+    "CompactionResult",
     "ContextFile",
     "ContextOverflowCallback",
+    "compact_messages",
     "MemoryGetTool",
     "MemorySearchTool",
     "MemoryStore",
