@@ -14,10 +14,89 @@ References:
 
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from . import register_agent
 from .base import AgentResult, BaseAgent, FailureMode
+
+
+def _find_latest_screenshot(trajectory_dir: Path | None) -> str:
+    """Find the most recently saved screenshot_after.png in trajectory_dir.
+
+    TrajectorySaverCallback saves one *_screenshot_after.png per computer action
+    into trajectories/<trajectory_id>/turn_NNN/. The newest file corresponds to
+    the action just completed.
+
+    Returns the absolute path string, or "image:trajectory" if not found.
+    """
+    if not trajectory_dir or not trajectory_dir.exists():
+        return "image:trajectory"
+    screenshots = list(trajectory_dir.rglob("*_screenshot_after.png"))
+    if not screenshots:
+        return "image:trajectory"
+    return str(max(screenshots, key=lambda p: p.stat().st_mtime))
+
+
+def group_step_output(
+    output_items: list[dict[str, Any]],
+    trajectory_dir: Path | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Group a step's output items into assistant content blocks and tool results.
+
+    CUA SDK yields multiple output items per step (text, function_call,
+    computer_call, their outputs). This function batches them into two lists:
+    - assistant_content: text + function_call + computer_call blocks (one assistant turn)
+    - tool_results: function_call_output + computer_call_output blocks (one tool turn)
+
+    Args:
+        output_items: The result["output"] list from a CUA agent step.
+        trajectory_dir: Path to trajectory directory for screenshot resolution.
+
+    Returns:
+        (assistant_content, tool_results) tuple of content block lists.
+    """
+    assistant_content: list[dict[str, Any]] = []
+    tool_results: list[dict[str, Any]] = []
+
+    for item in output_items:
+        item_type = item.get("type")
+        if item_type == "message":
+            for block in item.get("content", []):
+                if block.get("text"):
+                    assistant_content.append({"type": "text", "text": block["text"]})
+        elif item_type == "function_call":
+            assistant_content.append({
+                "type": "function_call",
+                "id": item.get("call_id", ""),
+                "name": item.get("name", ""),
+                "arguments": item.get("arguments", ""),
+            })
+        elif item_type == "computer_call":
+            assistant_content.append({
+                "type": "computer_call",
+                "id": item.get("call_id", ""),
+                "action": item.get("action", {}),
+            })
+        elif item_type == "function_call_output":
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": item.get("call_id", ""),
+                "content": item.get("output", ""),
+            })
+        elif item_type == "computer_call_output":
+            output = item.get("output", {})
+            call_id = item.get("call_id", "")
+            if isinstance(output, dict) and output.get("type") == "input_image":
+                content_str = _find_latest_screenshot(trajectory_dir)
+            else:
+                content_str = str(output)[:500]
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": call_id,
+                "content": content_str,
+            })
+
+    return assistant_content, tool_results
 
 if TYPE_CHECKING:
     from ..computers import DesktopSession
@@ -166,73 +245,32 @@ class OpenClawAgent(BaseAgent):
                 session_mgr.update_step_count(step)
                 session_mgr.update_tokens(step_input, step_output)
 
-                # Log all output to transcript (matching OpenClaw's content array format)
-                step_usage = {
-                    "input": step_input,
-                    "output": step_output,
-                    "cost": result["usage"].get("response_cost", 0),
-                }
-                for item in result["output"]:
-                    item_type = item.get("type")
-                    if item_type == "message":
-                        # Assistant text — build content array from SDK output
-                        content_blocks = []
-                        for block in item.get("content", []):
-                            content_blocks.append({
-                                "type": "text",
-                                "text": block.get("text", ""),
-                            })
-                        if content_blocks:
-                            session_mgr.append_message(
-                                "assistant", content_blocks,
-                                usage=step_usage,
-                                stop_reason=result.get("stop_reason"),
-                            )
-                    elif item_type == "function_call":
-                        # Tool call (memory_search, memory_get, etc.)
-                        session_mgr.append_message(
-                            "assistant",
-                            [{
-                                "type": "toolCall",
-                                "id": item.get("call_id", ""),
-                                "name": item.get("name", ""),
-                                "arguments": item.get("arguments", ""),
-                            }],
-                            stop_reason="tool_use",
-                        )
-                    elif item_type == "function_call_output":
-                        # Tool result
-                        session_mgr.append_message(
-                            "toolResult",
-                            [{"type": "text", "text": item.get("output", "")}],
-                        )
-                    elif item_type == "computer_call":
-                        # Computer action (screenshot, click, type, etc.)
-                        action = item.get("action", {})
-                        session_mgr.append_message(
-                            "assistant",
-                            [{
-                                "type": "computer_call",
-                                "id": item.get("call_id", ""),
-                                "action": action,
-                            }],
-                            stop_reason="tool_use",
-                        )
-                    elif item_type == "computer_call_output":
-                        # Computer result (screenshot image reference)
-                        # Store reference only — actual images live in trajectories
-                        output = item.get("output", {})
-                        output_type = output.get("type", "") if isinstance(output, dict) else ""
-                        if output_type == "input_image":
-                            session_mgr.append_message(
-                                "toolResult",
-                                [{"type": "image", "source": "trajectory"}],
-                            )
-                        else:
-                            session_mgr.append_message(
-                                "toolResult",
-                                [{"type": "text", "text": str(output)[:500]}],
-                            )
+                # Group step output into logical turns and log to transcript
+                assistant_content, tool_results = group_step_output(
+                    result["output"], trajectory_dir
+                )
+
+                if assistant_content:
+                    has_tools = any(
+                        b["type"] in ("function_call", "computer_call")
+                        for b in assistant_content
+                    )
+                    usage = {
+                        "input": step_input,
+                        "output": step_output,
+                        "total": step_input + step_output,
+                        "cost": result["usage"].get("response_cost", 0),
+                    }
+                    session_mgr.append_message(
+                        "assistant",
+                        assistant_content,
+                        usage=usage,
+                        stop_reason=result.get("stop_reason") or ("tool_use" if has_tools else None),
+                        api="openai-responses",
+                    )
+
+                if tool_results:
+                    session_mgr.append_message("tool", tool_results)
 
                 # Record agent step to tracer
                 if tracer:

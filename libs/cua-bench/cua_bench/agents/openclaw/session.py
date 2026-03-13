@@ -274,18 +274,20 @@ class SessionManager:
         content: str | list[dict[str, Any]],
         usage: dict[str, Any] | None = None,
         stop_reason: str | None = None,
+        api: str | None = None,
     ) -> TranscriptEntry:
         """Append a message entry to the transcript.
 
         Mirrors OpenClaw's transcript format where content is an array of typed blocks:
-        text, toolCall, toolResult, image, computer_call, etc.
+        text, function_call, tool_result, image, computer_call, etc.
 
         Args:
-            role: "user", "assistant", or "toolResult"
+            role: "user", "assistant", or "tool"
             content: Text string (auto-wrapped as [{type: "text", text: ...}])
                     or a content array of typed blocks
             usage: Optional dict with input/output/total/cost keys
             stop_reason: Optional stop reason (e.g. "tool_use", "end_turn")
+            api: Optional API identifier for observability (e.g. "openai-responses")
 
         Returns the created TranscriptEntry.
         """
@@ -299,6 +301,8 @@ class SessionManager:
             message_data["usage"] = usage
         if stop_reason is not None:
             message_data["stopReason"] = stop_reason
+        if api is not None:
+            message_data["api"] = api
 
         entry = TranscriptEntry(
             type="message",
