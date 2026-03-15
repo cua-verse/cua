@@ -162,6 +162,7 @@ class OpenClawAgent(BaseAgent):
             PromptBuilder,
             SessionManager,
             ToolLoggingCallback,
+            build_system_prompt_report,
             build_tools,
             get_tool_summaries,
             is_context_overflow_error,
@@ -177,6 +178,13 @@ class OpenClawAgent(BaseAgent):
         # Initialize session persistence (US-OC-004)
         session_mgr = SessionManager(task_id=task_id)
         session_mgr.init_session(model=self.model)
+
+        # Cross-run continuity (US-OC-008): load prior compaction summaries
+        # so the agent starts with context from previous runs.
+        prior_summaries = session_mgr.get_compaction_summaries()
+        if prior_summaries:
+            instruction = _create_compacted_instruction(task_description, prior_summaries)
+            print(f"[CrossRun] Loaded {len(prior_summaries)} prior compaction summaries")
 
         # Tool assembly (US-OC-007)
         tools = build_tools(session, memory_store)
@@ -200,6 +208,15 @@ class OpenClawAgent(BaseAgent):
             tool_summaries=tool_summaries,
             context_files=context_files,
         )
+
+        # System prompt report for observability (US-OC-008)
+        report = build_system_prompt_report(
+            system_prompt=instructions,
+            context_files=context_files,
+            tool_summaries=tool_summaries,
+            tools=tools,
+        )
+        session_mgr.set_system_prompt_report(report)
 
         # Context overflow detection (US-OC-005)
         # Allow env override for testing (e.g. CONTEXT_WINDOW_OVERRIDE=50000)
@@ -239,6 +256,7 @@ class OpenClawAgent(BaseAgent):
             }
 
             step = 0
+            step_offset = session_mgr.get_step_count()
             task_completed = False
             max_compactions = 3
             compaction_count = 0
@@ -257,7 +275,7 @@ class OpenClawAgent(BaseAgent):
                     # Session persistence: track step, tokens, and log messages (US-OC-004)
                     step_input = result["usage"].get("input_tokens", 0)
                     step_output = result["usage"].get("output_tokens", 0)
-                    session_mgr.update_step_count(step)
+                    session_mgr.update_step_count(step_offset + step)
                     session_mgr.update_tokens(step_input, step_output)
 
                     # Group step output into logical turns and log to transcript

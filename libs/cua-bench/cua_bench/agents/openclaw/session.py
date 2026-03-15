@@ -227,9 +227,9 @@ class SessionManager:
     def init_session(self, model: str = "") -> SessionState:
         """Initialize a new run session.
 
-        Loads existing state (if any), resets step_count, sets model,
-        preserves cumulative tokens and compaction summaries, and appends a
-        session header entry to transcript.jsonl.
+        Loads existing state (if any), preserves cumulative step_count and
+        tokens, sets model, and appends a session header entry to
+        transcript.jsonl.
 
         Run number is derived by counting existing session headers in the
         transcript rather than being stored in state.json.
@@ -241,7 +241,6 @@ class SessionManager:
 
         if existing is not None:
             self._state = existing
-            self._state.step_count = 0
             self._state.model = model
             self._state.updated_at = now
         else:
@@ -402,6 +401,12 @@ class SessionManager:
         if self._state is not None:
             self._state.total_tokens.accumulate(input_tokens, output_tokens)
             self.save_state()
+
+    def get_step_count(self) -> int:
+        """Return the current cumulative step count."""
+        if self._state is not None:
+            return self._state.step_count
+        return 0
 
     def update_step_count(self, step: int) -> None:
         """Update the current step count and persist."""
