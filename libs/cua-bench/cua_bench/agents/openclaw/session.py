@@ -86,6 +86,8 @@ class SessionState:
     compaction_summaries: list[str] = field(default_factory=list)
     model: str = ""
     system_prompt_report: dict[str, Any] | None = None
+    memory_flush_at: str | None = None
+    memory_flush_compaction_count: int | None = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -102,6 +104,10 @@ class SessionState:
         }
         if self.system_prompt_report is not None:
             d["system_prompt_report"] = self.system_prompt_report
+        if self.memory_flush_at is not None:
+            d["memory_flush_at"] = self.memory_flush_at
+        if self.memory_flush_compaction_count is not None:
+            d["memory_flush_compaction_count"] = self.memory_flush_compaction_count
         return d
 
     @classmethod
@@ -115,6 +121,8 @@ class SessionState:
             compaction_summaries=list(data.get("compaction_summaries", [])),
             model=data.get("model", ""),
             system_prompt_report=data.get("system_prompt_report"),
+            memory_flush_at=data.get("memory_flush_at"),
+            memory_flush_compaction_count=data.get("memory_flush_compaction_count"),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
         )
@@ -417,6 +425,21 @@ class SessionManager:
             return list(loaded.compaction_summaries)
         return []
 
+    def record_memory_flush(self) -> None:
+        """Record that a memory flush occurred at the current compaction count.
+
+        Sets memory_flush_at to now and memory_flush_compaction_count to the
+        current compaction_count, enforcing a one-flush-per-compaction-cycle
+        invariant via has_already_flushed_for_current_compaction().
+
+        Based on OpenClaw's memory flush tracking
+        (openclaw/src/auto-reply/reply/memory-flush.ts:176-182).
+        """
+        if self._state is not None:
+            self._state.memory_flush_at = _now_iso()
+            self._state.memory_flush_compaction_count = self._state.compaction_count
+            self.save_state()
+
     def set_system_prompt_report(self, report: dict[str, Any]) -> None:
         """Store a system prompt report in state.json."""
         if self._state is not None:
@@ -445,6 +468,70 @@ class SessionManager:
         self.task_dir.mkdir(parents=True, exist_ok=True)
         with open(self.transcript_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry.to_dict()) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Memory flush constants and guards
+# Based on OpenClaw's memory-flush.ts (openclaw/src/auto-reply/reply/memory-flush.ts)
+# ---------------------------------------------------------------------------
+
+SILENT_REPLY_TOKEN = "[!silent]"
+
+MEMORY_FLUSH_PROMPT = (
+    "Pre-compaction memory flush. "
+    "Store durable memories now (use the memory_write tool with target='session'). "
+    "IMPORTANT: Only store information that would be valuable for future runs — "
+    "key decisions, progress milestones, discovered patterns, or important state. "
+    f"If nothing to store, reply with {SILENT_REPLY_TOKEN}."
+)
+
+MEMORY_FLUSH_SYSTEM_PROMPT = (
+    "Pre-compaction memory flush turn. "
+    "The session is near auto-compaction; capture durable memories to disk. "
+    f"You may reply, but usually {SILENT_REPLY_TOKEN} is correct."
+)
+
+DEFAULT_MEMORY_FLUSH_SOFT_THRESHOLD_TOKENS = 4000
+
+
+def should_run_memory_flush(
+    state: SessionState,
+    *,
+    current_tokens: int,
+    context_window: int,
+    soft_threshold_tokens: int = DEFAULT_MEMORY_FLUSH_SOFT_THRESHOLD_TOKENS,
+    reserve_tokens: int = 0,
+) -> bool:
+    """Determine whether a pre-compaction memory flush should run.
+
+    The flush triggers when token usage exceeds (context_window - reserve - soft_threshold)
+    AND no flush has occurred in the current compaction cycle.
+
+    Based on OpenClaw's shouldRunMemoryFlush()
+    (openclaw/src/auto-reply/reply/memory-flush.ts:124-169).
+    """
+    if current_tokens <= 0:
+        return False
+    threshold = max(0, context_window - reserve_tokens - soft_threshold_tokens)
+    if threshold <= 0:
+        return False
+    if current_tokens < threshold:
+        return False
+    return not has_already_flushed_for_current_compaction(state)
+
+
+def has_already_flushed_for_current_compaction(state: SessionState) -> bool:
+    """Check whether a memory flush has already occurred in the current compaction cycle.
+
+    Returns True when the flush's compaction count matches the session's current
+    compaction count, preventing redundant flushes within the same cycle.
+
+    Based on OpenClaw's hasAlreadyFlushedForCurrentCompaction()
+    (openclaw/src/auto-reply/reply/memory-flush.ts:176-182).
+    """
+    if state.memory_flush_compaction_count is None:
+        return False
+    return state.memory_flush_compaction_count == state.compaction_count
 
 
 def build_system_prompt_report(

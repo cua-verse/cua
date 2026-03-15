@@ -153,6 +153,9 @@ class OpenClawAgent(BaseAgent):
 
         # Build structured system prompt via PromptBuilder (US-OC-001)
         from .openclaw import (
+            MEMORY_FLUSH_PROMPT,
+            MEMORY_FLUSH_SYSTEM_PROMPT,
+            SILENT_REPLY_TOKEN,
             ContextFile,
             ContextOverflowCallback,
             MemoryStore,
@@ -162,6 +165,7 @@ class OpenClawAgent(BaseAgent):
             build_tools,
             get_tool_summaries,
             is_context_overflow_error,
+            should_run_memory_flush,
         )
 
         # Initialize memory store (US-OC-002)
@@ -327,6 +331,20 @@ class OpenClawAgent(BaseAgent):
                     # agent.run() ended normally (completed, max_steps, or DONE)
                     break
 
+                # --- Pre-compaction memory flush (US-OC-005a) ---
+                if session_mgr._state is not None and should_run_memory_flush(
+                    session_mgr._state,
+                    current_tokens=overflow_cb.current_tokens,
+                    context_window=overflow_cb.context_window,
+                ):
+                    await self._run_memory_flush(
+                        session_mgr=session_mgr,
+                        memory_store=memory_store,
+                        flush_prompt=MEMORY_FLUSH_PROMPT,
+                        flush_system_prompt=MEMORY_FLUSH_SYSTEM_PROMPT,
+                        silent_token=SILENT_REPLY_TOKEN,
+                    )
+
                 # --- Stop-Compact-Resume (US-OC-006) ---
                 agent, instruction = await self._compact_and_rebuild(
                     session_mgr=session_mgr,
@@ -401,6 +419,112 @@ class OpenClawAgent(BaseAgent):
                 total_output_tokens=total_usage.get("output_tokens", 0),
                 failure_mode=FailureMode.UNKNOWN,
             )
+
+    async def _run_memory_flush(
+        self,
+        *,
+        session_mgr,
+        memory_store,
+        flush_prompt: str,
+        flush_system_prompt: str,
+        silent_token: str,
+    ) -> None:
+        """Run a pre-compaction memory flush turn via litellm.
+
+        Gives the model a single turn to persist durable memories before context
+        is compacted. The model can call the memory_write tool to store memories,
+        or reply with the silent token if nothing to persist.
+
+        Based on OpenClaw's memory flush mechanism
+        (openclaw/src/auto-reply/reply/memory-flush.ts).
+        """
+        import json as _json
+
+        import litellm
+
+        # Build memory_write tool schema for litellm
+        memory_write_tool = {
+            "type": "function",
+            "function": {
+                "name": "memory_write",
+                "description": (
+                    "Write content to task memory. "
+                    "Use target='session' to append to the session log."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "The text content to write.",
+                        },
+                        "target": {
+                            "type": "string",
+                            "enum": ["session", "task_memory"],
+                            "description": "Where to write: 'session' (append) or 'task_memory' (overwrite).",
+                        },
+                    },
+                    "required": ["content"],
+                },
+            },
+        }
+
+        messages = [
+            {"role": "system", "content": flush_system_prompt},
+            {"role": "user", "content": flush_prompt},
+        ]
+
+        print("[MemoryFlush] Running pre-compaction memory flush turn")
+        try:
+            response = await litellm.acompletion(
+                model=self.model,
+                messages=messages,
+                tools=[memory_write_tool],
+                max_tokens=1024,
+                temperature=0.3,
+            )
+
+            choice = response.choices[0]
+            reply_content = choice.message.content or ""
+
+            # Handle tool calls — the model may call memory_write
+            if choice.message.tool_calls:
+                for tool_call in choice.message.tool_calls:
+                    if tool_call.function.name == "memory_write":
+                        try:
+                            args = _json.loads(tool_call.function.arguments)
+                            content = args.get("content", "")
+                            target = args.get("target", "session")
+                            if content.strip():
+                                if target == "task_memory":
+                                    memory_store.write_task_memory(content)
+                                    print(f"[MemoryFlush] Wrote {len(content)} chars to TASK_MEMORY.md")
+                                else:
+                                    memory_store.append_to_session_log(content)
+                                    print(f"[MemoryFlush] Appended {len(content)} chars to session log")
+                        except (_json.JSONDecodeError, Exception) as e:
+                            print(f"[MemoryFlush] Tool call failed: {e}")
+
+                # Log flush turn to transcript
+                session_mgr.append_message("user", flush_prompt)
+                session_mgr.append_message("assistant", reply_content or "[memory flush — tool calls executed]")
+            elif silent_token in reply_content:
+                print("[MemoryFlush] Model replied silent — nothing to persist")
+                session_mgr.append_message("user", flush_prompt)
+                session_mgr.append_message("assistant", reply_content)
+            else:
+                # Model replied with text but no tool calls
+                print(f"[MemoryFlush] Model replied: {reply_content[:100]}")
+                session_mgr.append_message("user", flush_prompt)
+                session_mgr.append_message("assistant", reply_content)
+
+            session_mgr.record_memory_flush()
+            print("[MemoryFlush] Flush recorded")
+
+        except Exception as e:
+            print(f"[MemoryFlush] Failed (non-fatal): {e}")
+            # Record flush even on failure to prevent retry loops
+            session_mgr.record_memory_flush()
 
     async def _compact_and_rebuild(
         self,

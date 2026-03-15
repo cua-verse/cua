@@ -7,6 +7,8 @@ Components:
   - MemoryStore / SearchResult: task-workspace persistent memory storage
   - MemorySearchTool / MemoryGetTool / MemoryWriteTool: agent memory tools
   - SessionManager / SessionState / TokenUsage / TranscriptEntry: session persistence
+  - has_already_flushed_for_current_compaction / should_run_memory_flush: memory flush guards (US-OC-005a)
+  - MEMORY_FLUSH_PROMPT / MEMORY_FLUSH_SYSTEM_PROMPT / SILENT_REPLY_TOKEN: flush prompts
   - ContextOverflowCallback / is_context_overflow_error: context overflow detection (US-OC-005)
   - CompactionResult / compact_messages: compaction pipeline (US-OC-006)
   - build_tools / get_tool_summaries / ToolLoggingCallback: tool registry & logging (US-OC-007)
@@ -27,11 +29,16 @@ from .memory import (
 )
 from .prompt import ContextFile, PromptBuilder, PromptConfig, SectionConfig
 from .session import (
+    MEMORY_FLUSH_PROMPT,
+    MEMORY_FLUSH_SYSTEM_PROMPT,
+    SILENT_REPLY_TOKEN,
     SessionManager,
     SessionState,
     TokenUsage,
     TranscriptEntry,
     build_system_prompt_report,
+    has_already_flushed_for_current_compaction,
+    should_run_memory_flush,
 )
 from .tools import ToolLoggingCallback, build_tools, get_tool_summaries
 
@@ -56,5 +63,10 @@ __all__ = [
     "TokenUsage",
     "TranscriptEntry",
     "build_system_prompt_report",
+    "has_already_flushed_for_current_compaction",
     "is_context_overflow_error",
+    "MEMORY_FLUSH_PROMPT",
+    "MEMORY_FLUSH_SYSTEM_PROMPT",
+    "SILENT_REPLY_TOKEN",
+    "should_run_memory_flush",
 ]
