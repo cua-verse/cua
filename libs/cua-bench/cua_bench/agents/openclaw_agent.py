@@ -151,21 +151,16 @@ class OpenClawAgent(BaseAgent):
             trajectory_dir = logging_dir / "trajectories"
             trajectory_dir.mkdir(parents=True, exist_ok=True)
 
-        from agent.tools import MilestoneTool
-        from agent.tools.base import BaseTool
-
-        milestone_tool = MilestoneTool(session.interface)
-
         # Build structured system prompt via PromptBuilder (US-OC-001)
         from .openclaw import (
             ContextFile,
             ContextOverflowCallback,
-            MemoryGetTool,
-            MemorySearchTool,
             MemoryStore,
-            MemoryWriteTool,
             PromptBuilder,
             SessionManager,
+            ToolLoggingCallback,
+            build_tools,
+            get_tool_summaries,
             is_context_overflow_error,
         )
 
@@ -179,18 +174,9 @@ class OpenClawAgent(BaseAgent):
         session_mgr = SessionManager(task_id=task_id)
         session_mgr.init_session(model=self.model)
 
-        # Memory tools (US-OC-003)
-        memory_search = MemorySearchTool(memory_store)
-        memory_get = MemoryGetTool(memory_store)
-        memory_write = MemoryWriteTool(memory_store)
-
-        tools = [session._computer, milestone_tool, memory_search, memory_get, memory_write]
-        # Build tool summaries for prompt — only BaseTool instances have .name/.description
-        tool_summaries = {
-            tool.name: tool.description
-            for tool in tools
-            if isinstance(tool, BaseTool)
-        }
+        # Tool assembly (US-OC-007)
+        tools = build_tools(session, memory_store)
+        tool_summaries = get_tool_summaries(tools)
         agents_md = (Path(__file__).parent / "openclaw" / "AGENTS.md").read_text()
 
         # Build context files, injecting TASK_MEMORY.md if it exists
@@ -222,13 +208,14 @@ class OpenClawAgent(BaseAgent):
         )
 
         # Create agent with custom computer
+        tool_logging_cb = ToolLoggingCallback()
         agent = ComputerAgent(
             model=self.model,
             tools=tools,
             only_n_most_recent_images=3,
             trajectory_dir=trajectory_dir,
             instructions=instructions,
-            callbacks=[overflow_cb],
+            callbacks=[overflow_cb, tool_logging_cb],
         )
         print("OpenClaw Agent initialized with model:", self.model)
 
@@ -350,6 +337,7 @@ class OpenClawAgent(BaseAgent):
                     trajectory_dir=trajectory_dir,
                     step=step,
                     ComputerAgent=ComputerAgent,
+                    callbacks=[overflow_cb, tool_logging_cb],
                 )
                 compaction_count += 1
 
@@ -386,6 +374,7 @@ class OpenClawAgent(BaseAgent):
                         trajectory_dir=trajectory_dir,
                         step=step,
                         ComputerAgent=ComputerAgent,
+                        callbacks=[overflow_cb, tool_logging_cb],
                     )
                     # One more attempt after reactive compaction
                     async for result in agent.run(instruction):
@@ -424,6 +413,7 @@ class OpenClawAgent(BaseAgent):
         trajectory_dir: Path | None,
         step: int,
         ComputerAgent,
+        callbacks: list | None = None,
     ):
         """Run compaction on the transcript and rebuild the agent with compacted context.
 
@@ -471,7 +461,7 @@ class OpenClawAgent(BaseAgent):
             only_n_most_recent_images=3,
             trajectory_dir=trajectory_dir,
             instructions=original_instructions,
-            callbacks=[overflow_cb],
+            callbacks=callbacks or [overflow_cb],
         )
         print(f"[Compaction] Agent rebuilt after compaction at step {step}")
 

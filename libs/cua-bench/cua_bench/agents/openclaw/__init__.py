@@ -9,6 +9,7 @@ Components:
   - SessionManager / SessionState / TokenUsage / TranscriptEntry: session persistence
   - ContextOverflowCallback / is_context_overflow_error: context overflow detection (US-OC-005)
   - CompactionResult / compact_messages: compaction pipeline (US-OC-006)
+  - build_tools / get_tool_summaries / ToolLoggingCallback: tool registry & logging (US-OC-007)
 """
 
 from .context import (
@@ -32,12 +33,16 @@ from .session import (
     TranscriptEntry,
     build_system_prompt_report,
 )
+from .tools import ToolLoggingCallback, build_tools, get_tool_summaries
 
 __all__ = [
     "CompactionResult",
     "ContextFile",
     "ContextOverflowCallback",
+    "ToolLoggingCallback",
+    "build_tools",
     "compact_messages",
+    "get_tool_summaries",
     "MemoryGetTool",
     "MemorySearchTool",
     "MemoryStore",
