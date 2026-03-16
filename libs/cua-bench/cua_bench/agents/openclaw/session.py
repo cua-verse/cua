@@ -814,70 +814,234 @@ def limit_history_turns(
     return messages[cut_index:]
 
 
-def _is_openai_model(model: str) -> bool:
-    """Check if a model string refers to an OpenAI model."""
-    return model.startswith("openai/") or model.startswith("gpt-") or model.startswith("o1") or model.startswith("o3") or model.startswith("o4")
-
-
-# Mapping from Chat Completions content block types to OpenAI Responses API types
-_RESPONSES_API_TYPE_MAP = {
-    # Role-dependent: "text" → "input_text" (user/tool) or "output_text" (assistant)
-    "function_call": "function_call",
-    "computer_call": "computer_call",
-    "tool_result": "function_call_output",
-    "computer_call_output": "computer_call_output",
-}
-
-
-def convert_to_responses_api_format(
-    messages: list[dict[str, Any]], model: str
+def convert_to_responses_api_items(
+    messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Convert replay messages from Chat Completions format to OpenAI Responses API format.
+    """Convert replay messages from Chat Completions format to Responses API items.
 
-    OpenAI's Responses API uses different content block types than Chat Completions:
-    - "text" → "input_text" (for user/tool messages) or "output_text" (for assistant)
-    - "tool_result" → "function_call_output"
+    CUA SDK agent loops (anthropic.py, openai.py) dispatch on top-level ``type``
+    fields (Responses API item format), not on ``role`` with nested content blocks
+    (Chat Completions format).  Our transcript stores the latter, so replay
+    messages are silently mangled — the Anthropic loop joins only ``text`` from
+    content items (line 169), dropping all function_call / computer_call blocks,
+    and tool messages (``role: "tool"``) match no branch at all.
 
-    Only applies when the model is an OpenAI model. Returns messages unchanged otherwise.
+    This function unnests each Chat Completions message into one or more
+    flat Responses API items that the loops can dispatch correctly:
+
+    - User message → ``{type: "message", role: "user", content: [{type: "input_text", …}]}``
+    - Assistant text → ``{type: "message", role: "assistant", content: [{type: "output_text", …}]}``
+    - function_call block → ``{type: "function_call", call_id, name, arguments}``
+    - computer_call block → ``{type: "computer_call", call_id, action}``
+    - tool_result block → ``{type: "function_call_output", call_id, output}``
+
+    The ``id`` → ``call_id`` mapping matches what ``group_step_output`` stores
+    (``"id"`` key in transcript) versus what the Responses API expects
+    (``"call_id"`` key).
+
+    Applied as the LAST step in the replay pipeline (after sanitize_history +
+    limit_history_turns) so that orphaned-pair repair still works on the nested
+    format with ``id`` / ``tool_use_id`` fields.
+
+    US-OC-022: Replay Format Fix.
     """
-    if not _is_openai_model(model):
-        return messages
+    items: list[dict[str, Any]] = []
 
-    converted: list[dict[str, Any]] = []
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content", "")
 
+        # --- String content ---
         if isinstance(content, str):
-            # String content — wrap in the appropriate typed block
-            text_type = "output_text" if role == "assistant" else "input_text"
-            converted.append({
-                **msg,
-                "content": [{"type": text_type, "text": content}],
-            })
+            if role == "assistant":
+                items.append({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": content}],
+                })
+            else:
+                items.append({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": content}],
+                })
             continue
 
+        # --- List content (content blocks) ---
         if isinstance(content, list):
-            new_blocks: list[dict[str, Any]] = []
-            for block in content:
-                block_type = block.get("type", "")
-                if block_type == "text":
-                    # Map "text" based on role
-                    new_type = "output_text" if role == "assistant" else "input_text"
-                    new_blocks.append({**block, "type": new_type})
-                elif block_type in _RESPONSES_API_TYPE_MAP:
-                    mapped = _RESPONSES_API_TYPE_MAP[block_type]
-                    new_blocks.append({**block, "type": mapped})
+            if role == "assistant":
+                items.extend(_unnest_assistant_blocks(content))
+            elif role in ("tool", "user"):
+                # Check if this is a tool-result message (all blocks are tool_result)
+                has_tool_results = any(
+                    b.get("type") == "tool_result" for b in content if isinstance(b, dict)
+                )
+                if role == "tool" or (role == "user" and has_tool_results):
+                    items.extend(_unnest_tool_blocks(content))
                 else:
-                    # Keep unknown types as-is (already in correct format)
-                    new_blocks.append(block)
-            converted.append({**msg, "content": new_blocks})
+                    items.append(_wrap_user_content(content))
+            else:
+                # Unknown role — treat as user
+                items.append(_wrap_user_content(content))
             continue
 
-        # Fallback: keep as-is
-        converted.append(msg)
+        # --- Fallback: wrap as user ---
+        items.append({
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": str(content)}],
+        })
 
-    return converted
+    return _ensure_tool_adjacency(items)
+
+
+def _ensure_tool_adjacency(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reorder items so each tool call is immediately followed by its output.
+
+    Memory flush messages (user prompt + assistant reply) can be interleaved
+    in the transcript between a tool call and its result, because the flush
+    fires per-step while tool results may be logged in a later step.  The
+    Anthropic API requires ``tool_result`` immediately after ``tool_use``,
+    so we defer any non-output items that appear between a call and its
+    matching output, then flush them after the output.
+    """
+    result: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    pending_call_ids: set[str] = set()
+
+    for item in items:
+        t = item.get("type", "")
+
+        if t in ("function_call", "computer_call"):
+            pending_call_ids.add(item.get("call_id", ""))
+            result.append(item)
+        elif t in ("function_call_output", "computer_call_output"):
+            call_id = item.get("call_id", "")
+            pending_call_ids.discard(call_id)
+            result.append(item)
+            # All pending calls resolved → flush deferred items
+            if not pending_call_ids:
+                result.extend(deferred)
+                deferred = []
+        elif pending_call_ids:
+            # Non-tool item while tool calls are pending → defer
+            deferred.append(item)
+        else:
+            result.append(item)
+
+    # Flush any remaining deferred items
+    result.extend(deferred)
+    return result
+
+
+def _unnest_assistant_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Unnest an assistant message's content blocks into Responses API items.
+
+    Text blocks are collected into a single ``message`` item; structured blocks
+    (function_call, computer_call) become top-level items.  Text that precedes a
+    structured block is flushed as a separate message item so ordering is
+    preserved.
+    """
+    items: list[dict[str, Any]] = []
+    pending_text: list[dict[str, Any]] = []
+
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+
+        if btype == "text":
+            text = block.get("text", "")
+            if text:
+                pending_text.append({"type": "output_text", "text": text})
+
+        elif btype == "function_call":
+            # Flush pending text before emitting the structured item
+            if pending_text:
+                items.append({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": pending_text,
+                })
+                pending_text = []
+            items.append({
+                "type": "function_call",
+                "call_id": block.get("id", block.get("call_id", "")),
+                "name": block.get("name", ""),
+                "arguments": block.get("arguments", ""),
+            })
+
+        elif btype == "computer_call":
+            if pending_text:
+                items.append({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": pending_text,
+                })
+                pending_text = []
+            items.append({
+                "type": "computer_call",
+                "call_id": block.get("id", block.get("call_id", "")),
+                "action": block.get("action", {}),
+            })
+
+        else:
+            # Unknown block type — keep as text
+            pending_text.append({"type": "output_text", "text": str(block)})
+
+    # Flush remaining text
+    if pending_text:
+        items.append({
+            "type": "message",
+            "role": "assistant",
+            "content": pending_text,
+        })
+
+    return items
+
+
+def _unnest_tool_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert tool_result content blocks into top-level Responses API output items."""
+    items: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+        if btype == "tool_result":
+            items.append({
+                "type": "function_call_output",
+                "call_id": block.get("tool_use_id", block.get("call_id", "")),
+                "output": block.get("content", ""),
+            })
+        elif btype == "computer_call_output":
+            items.append({
+                "type": "computer_call_output",
+                "call_id": block.get("tool_use_id", block.get("call_id", "")),
+                "output": block.get("content", ""),
+            })
+        # else: skip non-tool blocks in tool messages
+    return items
+
+
+def _wrap_user_content(blocks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Wrap user content blocks into a Responses API message item."""
+    converted: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+        if btype == "text":
+            converted.append({"type": "input_text", "text": block.get("text", "")})
+        elif btype in ("input_text", "input_image"):
+            converted.append(block)  # already correct format
+        else:
+            # Unknown — convert to text
+            converted.append({"type": "input_text", "text": str(block)})
+    return {
+        "type": "message",
+        "role": "user",
+        "content": converted or [{"type": "input_text", "text": ""}],
+    }
 
 
 def build_system_prompt_report(

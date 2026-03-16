@@ -168,7 +168,7 @@ class OpenClawAgent(BaseAgent):
             build_replay_messages,
             build_system_prompt_report,
             build_tools,
-            convert_to_responses_api_format,
+            convert_to_responses_api_items,
             get_tool_summaries,
             is_context_overflow_error,
             limit_history_turns,
@@ -196,10 +196,10 @@ class OpenClawAgent(BaseAgent):
             replay_messages = limit_history_turns(replay_messages, self.max_history_turns)
             # Re-sanitize after truncation (may orphan tool results at cut point)
             replay_messages = sanitize_history(replay_messages)
-            # Convert content block types for OpenAI Responses API compatibility
-            replay_messages = convert_to_responses_api_format(replay_messages, self.model)
+            # Unnest Chat Completions messages into Responses API items (US-OC-022)
+            replay_messages = convert_to_responses_api_items(replay_messages)
             if replay_messages:
-                print(f"[Replay] Loaded {len(replay_messages)} messages from prior transcript")
+                print(f"[Replay] Loaded {len(replay_messages)} items from prior transcript")
 
         # Cross-run continuity (US-OC-008): load prior compaction summaries
         # so the agent starts with context from previous runs.
