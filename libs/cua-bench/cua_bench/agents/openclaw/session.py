@@ -244,6 +244,13 @@ class SessionManager:
             self._state = existing
             self._state.model = model
             self._state.updated_at = now
+            # Reset flush guard so each run gets a fresh flush opportunity.
+            # Without this, a flush from the previous run blocks the current
+            # run's first compaction cycle (memory_flush_compaction_count ==
+            # compaction_count persists across runs). OpenClaw resets on
+            # /new and /reset (session.ts:525-526).
+            self._state.memory_flush_compaction_count = None
+            self._state.memory_flush_at = None
         else:
             self._state = SessionState(
                 task_id=self.task_id,
@@ -498,6 +505,7 @@ MEMORY_FLUSH_SYSTEM_PROMPT = (
 )
 
 DEFAULT_MEMORY_FLUSH_SOFT_THRESHOLD_TOKENS = 4000
+DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR = 20_000
 
 
 def should_run_memory_flush(
@@ -506,7 +514,7 @@ def should_run_memory_flush(
     current_tokens: int,
     context_window: int,
     soft_threshold_tokens: int = DEFAULT_MEMORY_FLUSH_SOFT_THRESHOLD_TOKENS,
-    reserve_tokens: int = 0,
+    reserve_tokens: int = DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR,
 ) -> bool:
     """Determine whether a pre-compaction memory flush should run.
 

@@ -358,6 +358,25 @@ class OpenClawAgent(BaseAgent):
                         except Exception as e:
                             print(f"Warning: Failed to record agent step to tracer: {e}")
 
+                    # --- Per-step memory flush check (US-OC-025) ---
+                    # Check every step where we have fresh token data from on_llm_start.
+                    # Flush fires once per compaction cycle when tokens exceed threshold.
+                    # OpenClaw checks pre-turn (agent-runner.ts:221) with transcript-based
+                    # token estimates; we check per-step because CUA's agent.run() is opaque
+                    # and overflow_cb.current_tokens is only fresh inside this loop.
+                    if session_mgr._state is not None and should_run_memory_flush(
+                        session_mgr._state,
+                        current_tokens=overflow_cb.current_tokens,
+                        context_window=overflow_cb.context_window,
+                    ):
+                        await self._run_memory_flush(
+                            session_mgr=session_mgr,
+                            memory_store=memory_store,
+                            flush_prompt=MEMORY_FLUSH_PROMPT,
+                            flush_system_prompt=MEMORY_FLUSH_SYSTEM_PROMPT,
+                            silent_token=SILENT_REPLY_TOKEN,
+                        )
+
                     # Proactive context overflow detection (US-OC-005 + US-OC-006)
                     if overflow_cb.needs_compaction and compaction_count < max_compactions:
                         print(f"[Compaction] Proactive trigger at step {step}")
@@ -383,20 +402,6 @@ class OpenClawAgent(BaseAgent):
                 if not compaction_triggered:
                     # agent.run() ended normally (completed, max_steps, or DONE)
                     break
-
-                # --- Pre-compaction memory flush (US-OC-005a) ---
-                if session_mgr._state is not None and should_run_memory_flush(
-                    session_mgr._state,
-                    current_tokens=overflow_cb.current_tokens,
-                    context_window=overflow_cb.context_window,
-                ):
-                    await self._run_memory_flush(
-                        session_mgr=session_mgr,
-                        memory_store=memory_store,
-                        flush_prompt=MEMORY_FLUSH_PROMPT,
-                        flush_system_prompt=MEMORY_FLUSH_SYSTEM_PROMPT,
-                        silent_token=SILENT_REPLY_TOKEN,
-                    )
 
                 # --- Stop-Compact-Resume (US-OC-006) ---
                 agent, instruction = await self._compact_and_rebuild(
@@ -525,12 +530,25 @@ class OpenClawAgent(BaseAgent):
             },
         }
 
+        # Build context from transcript so the model knows what to flush.
+        # OpenClaw loads the full session file via SessionManager.open()
+        # (agent-runner-memory.ts → runEmbeddedPiAgent). We serialize the
+        # entire transcript as text in a single user message — can't pass
+        # raw CUA content blocks to litellm (tool_call_id pairing errors).
+        conversation_text = _serialize_flush_context(session_mgr)
+
+        flush_user_content = (
+            f"<conversation>\n{conversation_text}\n</conversation>\n\n{flush_prompt}"
+            if conversation_text
+            else flush_prompt
+        )
+
         messages = [
             {"role": "system", "content": flush_system_prompt},
-            {"role": "user", "content": flush_prompt},
+            {"role": "user", "content": flush_user_content},
         ]
 
-        print("[MemoryFlush] Running pre-compaction memory flush turn")
+        print(f"[MemoryFlush] Running pre-compaction memory flush turn ({len(conversation_text)} chars context)")
         try:
             response = await litellm.acompletion(
                 model=self.summary_model,
@@ -672,6 +690,74 @@ def _extract_messages_for_compaction(session_mgr) -> list[dict[str, Any]]:
             msg["stop_reason"] = stop_reason
         messages.append(msg)
     return messages
+
+
+def _serialize_flush_context(session_mgr) -> str:
+    """Serialize full transcript into a text summary for the flush model.
+
+    OpenClaw loads the full session file so the flush agent sees the entire
+    conversation (agent-runner-memory.ts → runEmbeddedPiAgent → SessionManager.open).
+    We can't pass raw transcript messages to litellm because they contain CUA-format
+    content blocks (computer_call, function_call, tool_result) that require tool_call_id
+    pairing. Instead, serialize the entire conversation as text so the flush model can
+    read it without format constraints.
+    """
+    history = session_mgr.load_history()
+    parts: list[str] = []
+    for entry in history:
+        if entry.type != "message":
+            continue
+        msg_data = entry.data.get("message", {})
+        role = msg_data.get("role", "unknown")
+        content = msg_data.get("content", "")
+        block_texts = _serialize_content_blocks(content)
+        if block_texts:
+            parts.append(f"[{role}] {block_texts}")
+    return "\n".join(parts)
+
+
+def _serialize_content_blocks(content: Any) -> str:
+    """Convert content (string or list of content blocks) to a text representation."""
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return str(content).strip()
+
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif not isinstance(block, dict):
+            continue
+        elif block.get("type") == "text":
+            parts.append(block.get("text", ""))
+        elif block.get("type") == "computer_call":
+            action = block.get("action", {})
+            action_type = action.get("type", "unknown")
+            detail = ""
+            if action_type == "click":
+                detail = f" at ({action.get('x')}, {action.get('y')})"
+            elif action_type == "keypress":
+                detail = f" {action.get('keys', [])}"
+            elif action_type == "type":
+                detail = f" \"{action.get('text', '')}\""
+            elif action_type == "scroll":
+                detail = f" ({action.get('x')}, {action.get('y')}) delta=({action.get('scroll_x', 0)}, {action.get('scroll_y', 0)})"
+            parts.append(f"[action: {action_type}{detail}]")
+        elif block.get("type") == "function_call":
+            name = block.get("name", "unknown")
+            args = block.get("arguments", "")
+            if isinstance(args, str) and len(args) > 200:
+                args = args[:200] + "..."
+            parts.append(f"[tool_call: {name}({args})]")
+        elif block.get("type") == "tool_result":
+            result_content = block.get("content", "")
+            if isinstance(result_content, str) and len(result_content) > 200:
+                result_content = result_content[:200] + "..."
+            parts.append(f"[tool_result: {result_content}]")
+        else:
+            parts.append(f"[{block.get('type', 'unknown')}]")
+    return " ".join(parts).strip()
 
 
 def _create_compacted_instruction(

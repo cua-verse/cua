@@ -35,6 +35,7 @@ from .memory import (
 )
 from .prompt import ContextFile, PromptBuilder, PromptConfig, SectionConfig
 from .session import (
+    DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR,
     MEMORY_FLUSH_PROMPT,
     MEMORY_FLUSH_SYSTEM_PROMPT,
     SILENT_REPLY_TOKEN,
@@ -55,6 +56,7 @@ from .tools import ToolLoggingCallback, build_tools, get_tool_summaries
 __all__ = [
     "CompactionResult",
     "ContextFile",
+    "DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR",
     "ContextOverflowCallback",
     "ToolLoggingCallback",
     "ToolPairingRepairReport",
