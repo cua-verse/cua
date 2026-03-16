@@ -384,23 +384,65 @@ IDENTIFIER_PRESERVATION_INSTRUCTIONS = (
 )
 
 SUMMARIZATION_SYSTEM_PROMPT = (
-    "You are a conversation summarizer. Produce a concise but complete summary "
-    "of the conversation history provided. Focus on actions taken, decisions made, "
-    "current state, and pending tasks. "
+    "You are a context summarization assistant. Your task is to read a conversation "
+    "between a user and an AI coding assistant, then produce a structured summary "
+    "following the exact format specified.\n\n"
+    "Do NOT continue the conversation. Do NOT respond to any questions in the "
+    "conversation. ONLY output the structured summary.\n\n"
     + IDENTIFIER_PRESERVATION_INSTRUCTIONS
 )
 
-MERGE_SUMMARIES_INSTRUCTIONS = (
-    "Merge these partial summaries into a single cohesive summary.\n\n"
-    "MUST PRESERVE:\n"
-    "- Active tasks and their current status (in-progress, blocked, pending)\n"
-    "- Batch operation progress (e.g., '5/17 items completed')\n"
-    "- The last thing the user requested and what was being done about it\n"
-    "- Decisions made and their rationale\n"
-    "- TODOs, open questions, and constraints\n"
-    "- Any commitments or follow-ups promised\n\n"
-    "PRIORITIZE recent context over older history."
-)
+SUMMARIZATION_PROMPT = """\
+The messages above are a conversation to summarize. Create a structured context \
+checkpoint summary that another LLM will use to continue the work.
+
+Use this EXACT format:
+
+## Goal
+[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
+
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned]
+- [Or "(none)" if none were mentioned]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+
+### In Progress
+- [ ] [Current work]
+
+### Blocked
+- [Issues preventing progress, if any]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [Ordered list of what should happen next]
+
+## Critical Context
+- [Any data, examples, or references needed to continue]
+- [Or "(none)" if not applicable]
+
+Keep each section concise. Preserve exact file paths, function names, identifiers, \
+and error messages.\
+"""
+
+UPDATE_SUMMARIZATION_PROMPT = """\
+The messages above are NEW conversation messages to incorporate into the existing \
+summary provided in <previous-summary> tags.
+
+Update the existing structured summary with new information. RULES:
+- PRESERVE all existing information from the previous summary
+- ADD new progress, decisions, and context from the new messages
+- UPDATE the Progress section: move items from "In Progress" to "Done" when completed
+- UPDATE "Next Steps" based on what was accomplished
+- PRESERVE exact file paths, function names, identifiers, and error messages
+- If something is no longer relevant, you may remove it
+
+Use the same structured format as the original summary.\
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -832,11 +874,16 @@ async def summarize_chunk(
     if custom_instructions:
         system_parts.append(custom_instructions)
 
+    conversation_text = serialize_messages_for_summary(messages)
+
     user_parts: list[str] = []
     if previous_summary:
-        user_parts.append(f"## Previous context summary\n{previous_summary}\n")
-    user_parts.append("## Conversation to summarize\n")
-    user_parts.append(serialize_messages_for_summary(messages))
+        user_parts.append(f"<previous-summary>\n{previous_summary}\n</previous-summary>\n")
+    user_parts.append(f"<conversation>\n{conversation_text}\n</conversation>\n")
+    if previous_summary:
+        user_parts.append(UPDATE_SUMMARIZATION_PROMPT)
+    else:
+        user_parts.append(SUMMARIZATION_PROMPT)
 
     llm_messages = [
         {"role": "system", "content": "\n\n".join(system_parts)},
@@ -889,31 +936,6 @@ async def summarize_chunks_iterative(
         )
 
     return summary or DEFAULT_SUMMARY_FALLBACK
-
-
-async def _merge_summaries(
-    summaries: list[str],
-    model: str,
-) -> str:
-    """Merge partial summaries into a single cohesive summary."""
-    import litellm
-
-    user_content = "\n\n---\n\n".join(
-        f"### Part {i + 1}\n{s}" for i, s in enumerate(summaries)
-    )
-    llm_messages = [
-        {"role": "system", "content": MERGE_SUMMARIES_INSTRUCTIONS + "\n\n" + IDENTIFIER_PRESERVATION_INSTRUCTIONS},
-        {"role": "user", "content": user_content},
-    ]
-
-    response = await litellm.acompletion(
-        model=model,
-        messages=llm_messages,
-        max_tokens=2048,
-        temperature=0.3,
-    )
-    content = response.choices[0].message.content
-    return content.strip() if content else DEFAULT_SUMMARY_FALLBACK
 
 
 def _is_oversized_for_summary(msg: dict[str, Any], context_window: int) -> bool:
