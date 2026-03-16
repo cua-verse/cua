@@ -5,6 +5,10 @@ memory recall, tool loop, session persistence) to CUA's constraints:
   - instructions= for persistent context (only content never truncated)
   - Trajectory-based observation (CUA reasoning in trajectory files, not conversation)
 
+US-OC-017: Uses OpenClawComputerAgent subclass for mid-loop compaction instead of
+the stop-compact-resume pattern. Compaction happens in-place inside run() — no
+agent rebuild needed.
+
 References:
   - docs/openclaw-source-analysis.md — OpenClaw source code analysis
   - docs/openclaw-context-flow.html — interactive visual pipeline
@@ -126,7 +130,10 @@ class OpenClawAgent(BaseAgent):
         tracer=None,
     ) -> AgentResult:
         """
-        Perform a task using the CUA Computer Agent.
+        Perform a task using the OpenClawComputerAgent with mid-loop compaction.
+
+        Uses OpenClawComputerAgent (US-OC-017) which handles compaction in-place
+        inside run() — no stop-compact-resume pattern needed.
 
         Args:
             task_description: The task description/instruction
@@ -138,7 +145,7 @@ class OpenClawAgent(BaseAgent):
             AgentResult with token counts and failure mode
         """
         try:
-            from agent import ComputerAgent
+            from agent import ComputerAgent  # noqa: F401 — validate package is installed
         except ImportError as e:
             raise RuntimeError(
                 "openclaw-agent requires the CUA `agent` package. "
@@ -162,6 +169,7 @@ class OpenClawAgent(BaseAgent):
             ContextFile,
             ContextOverflowCallback,
             MemoryStore,
+            OpenClawComputerAgent,
             PromptBuilder,
             SessionManager,
             ToolLoggingCallback,
@@ -170,7 +178,6 @@ class OpenClawAgent(BaseAgent):
             build_tools,
             convert_to_responses_api_items,
             get_tool_summaries,
-            is_context_overflow_error,
             limit_history_turns,
             sanitize_history,
             should_run_memory_flush,
@@ -200,13 +207,6 @@ class OpenClawAgent(BaseAgent):
             replay_messages = convert_to_responses_api_items(replay_messages)
             if replay_messages:
                 print(f"[Replay] Loaded {len(replay_messages)} items from prior transcript")
-
-        # Cross-run continuity (US-OC-008): load prior compaction summaries
-        # so the agent starts with context from previous runs.
-        prior_summaries = session_mgr.get_compaction_summaries()
-        if prior_summaries:
-            instruction = _create_compacted_instruction(task_description, prior_summaries)
-            print(f"[CrossRun] Loaded {len(prior_summaries)} prior compaction summaries")
 
         # Tool assembly (US-OC-007)
         tools = build_tools(session, memory_store)
@@ -250,27 +250,46 @@ class OpenClawAgent(BaseAgent):
             instructions_tokens=len(instructions) // 4,
         )
 
-        # Create agent with custom computer
+        # Memory flush callback — wired into OpenClawComputerAgent's on_memory_flush hook
+        async def _memory_flush_hook():
+            if session_mgr._state is not None and should_run_memory_flush(
+                session_mgr._state,
+                current_tokens=overflow_cb.current_tokens,
+                context_window=overflow_cb.context_window,
+            ):
+                await self._run_memory_flush(
+                    session_mgr=session_mgr,
+                    memory_store=memory_store,
+                    flush_prompt=MEMORY_FLUSH_PROMPT,
+                    flush_system_prompt=MEMORY_FLUSH_SYSTEM_PROMPT,
+                    silent_token=SILENT_REPLY_TOKEN,
+                )
+
+        # Create OpenClawComputerAgent with mid-loop compaction support (US-OC-017)
         tool_logging_cb = ToolLoggingCallback()
-        agent = ComputerAgent(
+        agent = OpenClawComputerAgent(
+            # ComputerAgent params
             model=self.model,
             tools=tools,
             only_n_most_recent_images=3,
             trajectory_dir=trajectory_dir,
             instructions=instructions,
             callbacks=[overflow_cb, tool_logging_cb],
+            # OpenClaw compaction params
+            overflow_cb=overflow_cb,
+            session_mgr=session_mgr,
+            memory_store=memory_store,
+            summary_model=self.summary_model,
+            on_memory_flush=_memory_flush_hook,
         )
         print("OpenClaw Agent initialized with model:", self.model)
         if self.summary_model != self.model:
             print("  Summary/flush model:", self.summary_model)
 
-        # Run the agent with stop-compact-resume pattern (US-OC-006)
-        # CUA SDK yields usage with input_tokens/output_tokens (OpenAI Responses API format)
-        #
-        # CUA's ComputerAgent.run() is an opaque async generator — we cannot inject
-        # compaction summaries mid-run. Instead: break out of the loop, compact the
-        # transcript, rebuild the instruction with the compaction summary, create a
-        # new agent, and resume.
+        # Single-loop execution (US-OC-017)
+        # Compaction happens in-place inside OpenClawComputerAgent.run() — no
+        # stop-compact-resume pattern needed. Reactive overflow is also handled
+        # inside the custom run() via try/except around predict_step().
         try:
             total_usage = {
                 "input_tokens": 0,
@@ -282,148 +301,110 @@ class OpenClawAgent(BaseAgent):
             step = 0
             step_offset = session_mgr.get_step_count()
             task_completed = False
-            max_compactions = 3
-            compaction_count = 0
-            compaction_triggered = False
 
-            while compaction_count <= max_compactions:
-                compaction_triggered = False
+            # Pass replay messages + instruction as the messages arg (US-OC-012).
+            # When no prior history, replay_messages is empty and this is
+            # equivalent to agent.run(instruction).
+            run_input = (
+                replay_messages + [{"role": "user", "content": instruction}]
+                if replay_messages
+                else instruction
+            )
 
-                # Pass replay messages + instruction as the messages arg (US-OC-012).
-                # When no prior history, replay_messages is empty and this is
-                # equivalent to agent.run(instruction). After first iteration
-                # (compaction rebuild), replay_messages is cleared since the
-                # compacted instruction already contains prior context.
-                run_input = (
-                    replay_messages + [{"role": "user", "content": instruction}]
-                    if replay_messages
-                    else instruction
+            async for result in agent.run(run_input):
+                sys.stdout.flush()  # Flush output
+
+                step += 1
+                for k in total_usage:
+                    total_usage[k] += result["usage"].get(k, 0)
+
+                # Session persistence: track step, tokens, and log messages (US-OC-004)
+                step_input = result["usage"].get("input_tokens", 0)
+                step_output = result["usage"].get("output_tokens", 0)
+                session_mgr.update_step_count(step_offset + step)
+                session_mgr.update_tokens(step_input, step_output)
+
+                # Group step output into logical turns and log to transcript
+                assistant_content, tool_results = group_step_output(
+                    result["output"], trajectory_dir
                 )
 
-                async for result in agent.run(run_input):
-                    sys.stdout.flush()  # Flush output
-
-                    step += 1
-                    for k in total_usage:
-                        total_usage[k] += result["usage"].get(k, 0)
-
-                    # Session persistence: track step, tokens, and log messages (US-OC-004)
-                    step_input = result["usage"].get("input_tokens", 0)
-                    step_output = result["usage"].get("output_tokens", 0)
-                    session_mgr.update_step_count(step_offset + step)
-                    session_mgr.update_tokens(step_input, step_output)
-
-                    # Group step output into logical turns and log to transcript
-                    assistant_content, tool_results = group_step_output(
-                        result["output"], trajectory_dir
+                if assistant_content:
+                    has_tools = any(
+                        b["type"] in ("function_call", "computer_call")
+                        for b in assistant_content
+                    )
+                    usage = {
+                        "input": step_input,
+                        "output": step_output,
+                        "total": step_input + step_output,
+                        "cost": result["usage"].get("response_cost", 0),
+                    }
+                    session_mgr.append_message(
+                        "assistant",
+                        assistant_content,
+                        usage=usage,
+                        stop_reason=result.get("stop_reason") or ("tool_use" if has_tools else None),
+                        api="openai-responses",
                     )
 
-                    if assistant_content:
-                        has_tools = any(
-                            b["type"] in ("function_call", "computer_call")
-                            for b in assistant_content
+                if tool_results:
+                    session_mgr.append_message("tool", tool_results)
+
+                # Record agent step to tracer
+                if tracer:
+                    try:
+                        screenshot = await session.screenshot()
+                        tracer.record(
+                            "agent_step",
+                            {
+                                "step": step,
+                                "agent": self.name(),
+                                "model": self.model,
+                                "usage": result["usage"],
+                                "output": result["output"],
+                            },
+                            [screenshot],
                         )
-                        usage = {
-                            "input": step_input,
-                            "output": step_output,
-                            "total": step_input + step_output,
-                            "cost": result["usage"].get("response_cost", 0),
-                        }
-                        session_mgr.append_message(
-                            "assistant",
-                            assistant_content,
-                            usage=usage,
-                            stop_reason=result.get("stop_reason") or ("tool_use" if has_tools else None),
-                            api="openai-responses",
-                        )
+                    except Exception as e:
+                        print(f"Warning: Failed to record agent step to tracer: {e}")
 
-                    if tool_results:
-                        session_mgr.append_message("tool", tool_results)
+                # --- Per-step memory flush check (US-OC-025) ---
+                # Check every step where we have fresh token data from on_llm_start.
+                # Flush fires once per compaction cycle when tokens exceed threshold.
+                if session_mgr._state is not None and should_run_memory_flush(
+                    session_mgr._state,
+                    current_tokens=overflow_cb.current_tokens,
+                    context_window=overflow_cb.context_window,
+                ):
+                    await self._run_memory_flush(
+                        session_mgr=session_mgr,
+                        memory_store=memory_store,
+                        flush_prompt=MEMORY_FLUSH_PROMPT,
+                        flush_system_prompt=MEMORY_FLUSH_SYSTEM_PROMPT,
+                        silent_token=SILENT_REPLY_TOKEN,
+                    )
 
-                    # Record agent step to tracer
-                    if tracer:
-                        try:
-                            screenshot = await session.screenshot()
-                            tracer.record(
-                                "agent_step",
-                                {
-                                    "step": step,
-                                    "agent": self.name(),
-                                    "model": self.model,
-                                    "usage": result["usage"],
-                                    "output": result["output"],
-                                },
-                                [screenshot],
-                            )
-                        except Exception as e:
-                            print(f"Warning: Failed to record agent step to tracer: {e}")
-
-                    # --- Per-step memory flush check (US-OC-025) ---
-                    # Check every step where we have fresh token data from on_llm_start.
-                    # Flush fires once per compaction cycle when tokens exceed threshold.
-                    # OpenClaw checks pre-turn (agent-runner.ts:221) with transcript-based
-                    # token estimates; we check per-step because CUA's agent.run() is opaque
-                    # and overflow_cb.current_tokens is only fresh inside this loop.
-                    if session_mgr._state is not None and should_run_memory_flush(
-                        session_mgr._state,
-                        current_tokens=overflow_cb.current_tokens,
-                        context_window=overflow_cb.context_window,
-                    ):
-                        await self._run_memory_flush(
-                            session_mgr=session_mgr,
-                            memory_store=memory_store,
-                            flush_prompt=MEMORY_FLUSH_PROMPT,
-                            flush_system_prompt=MEMORY_FLUSH_SYSTEM_PROMPT,
-                            silent_token=SILENT_REPLY_TOKEN,
-                        )
-
-                    # Proactive context overflow detection (US-OC-005 + US-OC-006)
-                    if overflow_cb.needs_compaction and compaction_count < max_compactions:
-                        print(f"[Compaction] Proactive trigger at step {step}")
-                        compaction_triggered = True
-                        break  # break async for → compact and restart
-
-                    # Check if we've reached max_steps
-                    if step >= self.max_steps:
-                        print(f"\n[Max steps reached] Stopped at step {step}/{self.max_steps}")
-                        break
-
-                    # Check if task is completed (agent returned done or similar)
-                    for item in result["output"]:
-                        if item["type"] == "message":
-                            if "DONE" in item["content"][0]["text"]:
-                                print(f"\n[Task completed] Agent indicated completion at step {step}")
-                                task_completed = True
-                                break
-
-                    if task_completed:
-                        break
-
-                if not compaction_triggered:
-                    # agent.run() ended normally (completed, max_steps, or DONE)
+                # Check if we've reached max_steps
+                if step >= self.max_steps:
+                    print(f"\n[Max steps reached] Stopped at step {step}/{self.max_steps}")
                     break
 
-                # --- Stop-Compact-Resume (US-OC-006) ---
-                agent, instruction = await self._compact_and_rebuild(
-                    session_mgr=session_mgr,
-                    overflow_cb=overflow_cb,
-                    task_description=task_description,
-                    original_instructions=instructions,
-                    tools=tools,
-                    trajectory_dir=trajectory_dir,
-                    step=step,
-                    ComputerAgent=ComputerAgent,
-                    callbacks=[overflow_cb, tool_logging_cb],
-                )
-                compaction_count += 1
-                # Clear replay messages after compaction — the compacted
-                # instruction already contains prior context (US-OC-012).
-                replay_messages = []
+                # Check if task is completed (agent returned done or similar)
+                for item in result["output"]:
+                    if item["type"] == "message":
+                        if "DONE" in item["content"][0]["text"]:
+                            print(f"\n[Task completed] Agent indicated completion at step {step}")
+                            task_completed = True
+                            break
+
+                if task_completed:
+                    break
 
             print(f"\nTotal usage: {total_usage}")
             print(f"Steps completed: {step}/{self.max_steps}")
-            if compaction_count > 0:
-                print(f"Compactions performed: {compaction_count}")
+            if agent.compaction_count > 0:
+                print(f"Compactions performed: {agent.compaction_count}")
 
             # Determine failure mode
             if task_completed:
@@ -439,38 +420,6 @@ class OpenClawAgent(BaseAgent):
                 failure_mode=failure_mode,
             )
         except Exception as e:
-            # Reactive context overflow detection (US-OC-005 + US-OC-006)
-            if is_context_overflow_error(str(e)) and compaction_count < max_compactions:
-                overflow_cb.force_compaction()
-                print(f"[ContextOverflow] API rejected — attempting reactive compaction: {e}")
-                try:
-                    agent, instruction = await self._compact_and_rebuild(
-                        session_mgr=session_mgr,
-                        overflow_cb=overflow_cb,
-                        task_description=task_description,
-                        original_instructions=instructions,
-                        tools=tools,
-                        trajectory_dir=trajectory_dir,
-                        step=step,
-                        ComputerAgent=ComputerAgent,
-                        callbacks=[overflow_cb, tool_logging_cb],
-                    )
-                    # One more attempt after reactive compaction
-                    async for result in agent.run(instruction):
-                        sys.stdout.flush()
-                        step += 1
-                        for k in total_usage:
-                            total_usage[k] += result["usage"].get(k, 0)
-                        if step >= self.max_steps:
-                            break
-                    return AgentResult(
-                        total_input_tokens=total_usage.get("input_tokens", 0),
-                        total_output_tokens=total_usage.get("output_tokens", 0),
-                        failure_mode=FailureMode.MAX_STEPS_EXCEEDED if step >= self.max_steps else FailureMode.NONE,
-                    )
-                except Exception as retry_e:
-                    print(f"[Compaction] Reactive retry also failed: {retry_e}")
-
             print(f"Agent execution failed: {e}")
             import traceback
 
@@ -531,10 +480,6 @@ class OpenClawAgent(BaseAgent):
         }
 
         # Build context from transcript so the model knows what to flush.
-        # OpenClaw loads the full session file via SessionManager.open()
-        # (agent-runner-memory.ts → runEmbeddedPiAgent). We serialize the
-        # entire transcript as text in a single user message — can't pass
-        # raw CUA content blocks to litellm (tool_call_id pairing errors).
         conversation_text = _serialize_flush_context(session_mgr)
 
         flush_user_content = (
@@ -599,97 +544,6 @@ class OpenClawAgent(BaseAgent):
             print(f"[MemoryFlush] Failed (non-fatal): {e}")
             # Record flush even on failure to prevent retry loops
             session_mgr.record_memory_flush()
-
-    async def _compact_and_rebuild(
-        self,
-        *,
-        session_mgr,
-        overflow_cb,
-        task_description: str,
-        original_instructions: str,
-        tools: list,
-        trajectory_dir: Path | None,
-        step: int,
-        ComputerAgent,
-        callbacks: list | None = None,
-    ):
-        """Run compaction on the transcript and rebuild the agent with compacted context.
-
-        Returns (new_agent, new_instruction) for the next run cycle.
-        """
-        from .openclaw import compact_messages
-
-        # Extract messages from the current run's transcript
-        messages = _extract_messages_for_compaction(session_mgr)
-
-        # Run the compaction pipeline (budget-aware, US-OC-013)
-        compaction_result = await compact_messages(
-            messages,
-            self.summary_model,
-            overflow_cb.context_window,
-            instructions_tokens=len(original_instructions) // 4,
-        )
-
-        # Find the first kept entry ID from the transcript
-        history = session_mgr.load_history()
-        msg_entries = [e for e in history if e.type == "message"]
-        if compaction_result.first_kept_message_index < len(msg_entries):
-            first_kept_id = msg_entries[compaction_result.first_kept_message_index].id
-        else:
-            first_kept_id = msg_entries[-1].id if msg_entries else "unknown"
-
-        # Persist the compaction entry
-        session_mgr.append_compaction(
-            compaction_result.summary,
-            first_kept_id,
-            compaction_result.tokens_before,
-        )
-
-        # Build new instruction with compaction context
-        instruction = _create_compacted_instruction(
-            task_description,
-            session_mgr.get_compaction_summaries(),
-        )
-
-        # Reset overflow callback and create new agent
-        overflow_cb.reset_after_compaction()
-
-        agent = ComputerAgent(
-            model=self.model,
-            tools=tools,
-            only_n_most_recent_images=3,
-            trajectory_dir=trajectory_dir,
-            instructions=original_instructions,
-            callbacks=callbacks or [overflow_cb],
-        )
-        print(f"[Compaction] Agent rebuilt after compaction at step {step}")
-
-        return agent, instruction
-
-
-def _extract_messages_for_compaction(session_mgr) -> list[dict[str, Any]]:
-    """Extract message entries from the transcript as dicts for compaction.
-
-    Converts TranscriptEntry objects into the {role, content, stop_reason} format
-    expected by the compaction pipeline. Propagates stop_reason from transcript
-    entries so repair_tool_use_result_pairing() can skip synthesis for
-    error/aborted turns (US-OC-013).
-    """
-    history = session_mgr.load_history()
-    messages: list[dict[str, Any]] = []
-    for entry in history:
-        if entry.type != "message":
-            continue
-        msg_data = entry.data.get("message", {})
-        msg: dict[str, Any] = {
-            "role": msg_data.get("role", "unknown"),
-            "content": msg_data.get("content", ""),
-        }
-        stop_reason = msg_data.get("stop_reason")
-        if stop_reason:
-            msg["stop_reason"] = stop_reason
-        messages.append(msg)
-    return messages
 
 
 def _serialize_flush_context(session_mgr) -> str:
@@ -758,27 +612,3 @@ def _serialize_content_blocks(content: Any) -> str:
         else:
             parts.append(f"[{block.get('type', 'unknown')}]")
     return " ".join(parts).strip()
-
-
-def _create_compacted_instruction(
-    task_description: str,
-    compaction_summaries: list[str],
-) -> str:
-    """Build a new instruction string with compaction summaries prepended.
-
-    The agent receives the compacted history as context before the task instruction.
-    """
-    if not compaction_summaries:
-        return task_description
-
-    summary_text = "\n\n---\n\n".join(
-        f"### Compaction {i + 1}\n{s}" for i, s in enumerate(compaction_summaries)
-    )
-    return (
-        f"## Prior Context (Compacted)\n"
-        f"The following is a summary of earlier conversation history that was "
-        f"compacted to save context space. Use this to maintain continuity.\n\n"
-        f"{summary_text}\n\n"
-        f"---\n\n"
-        f"## Current Task\n{task_description}"
-    )

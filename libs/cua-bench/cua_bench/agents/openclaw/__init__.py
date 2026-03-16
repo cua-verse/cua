@@ -1,6 +1,7 @@
 """OpenClaw agent modules — modular components for the OpenClaw agent harness.
 
 Components:
+  - OpenClawComputerAgent: ComputerAgent subclass with mid-loop compaction (US-OC-017)
   - PromptBuilder: assembles structured system instructions from composable sections
   - PromptConfig / SectionConfig: section toggle configuration
   - ContextFile: bootstrap file injection container
@@ -17,6 +18,7 @@ Components:
   - build_replay_messages / sanitize_history / limit_history_turns: transcript replay (US-OC-012)
 """
 
+from .agent_loop import OpenClawComputerAgent
 from .context import (
     CompactionResult,
     ContextOverflowCallback,
@@ -54,6 +56,7 @@ from .session import (
 from .tools import ToolLoggingCallback, build_tools, get_tool_summaries
 
 __all__ = [
+    "OpenClawComputerAgent",
     "CompactionResult",
     "ContextFile",
     "DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR",
