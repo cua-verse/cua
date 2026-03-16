@@ -109,6 +109,8 @@ class OpenClawAgent(BaseAgent):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model = kwargs.get("model", "anthropic/claude-sonnet-4-20250514")
+        # Separate model for summarization and memory flush (defaults to main model)
+        self.summary_model = kwargs.get("summary_model", None) or self.model
         self.max_steps = kwargs.get("max_steps", 100)
         self.max_history_turns = kwargs.get("max_history_turns", None)  # None = all
 
@@ -166,6 +168,7 @@ class OpenClawAgent(BaseAgent):
             build_replay_messages,
             build_system_prompt_report,
             build_tools,
+            convert_to_responses_api_format,
             get_tool_summaries,
             is_context_overflow_error,
             limit_history_turns,
@@ -193,6 +196,8 @@ class OpenClawAgent(BaseAgent):
             replay_messages = limit_history_turns(replay_messages, self.max_history_turns)
             # Re-sanitize after truncation (may orphan tool results at cut point)
             replay_messages = sanitize_history(replay_messages)
+            # Convert content block types for OpenAI Responses API compatibility
+            replay_messages = convert_to_responses_api_format(replay_messages, self.model)
             if replay_messages:
                 print(f"[Replay] Loaded {len(replay_messages)} messages from prior transcript")
 
@@ -256,6 +261,8 @@ class OpenClawAgent(BaseAgent):
             callbacks=[overflow_cb, tool_logging_cb],
         )
         print("OpenClaw Agent initialized with model:", self.model)
+        if self.summary_model != self.model:
+            print("  Summary/flush model:", self.summary_model)
 
         # Run the agent with stop-compact-resume pattern (US-OC-006)
         # CUA SDK yields usage with input_tokens/output_tokens (OpenAI Responses API format)
@@ -526,7 +533,7 @@ class OpenClawAgent(BaseAgent):
         print("[MemoryFlush] Running pre-compaction memory flush turn")
         try:
             response = await litellm.acompletion(
-                model=self.model,
+                model=self.summary_model,
                 messages=messages,
                 tools=[memory_write_tool],
                 max_tokens=1024,
@@ -600,7 +607,7 @@ class OpenClawAgent(BaseAgent):
         # Run the compaction pipeline (budget-aware, US-OC-013)
         compaction_result = await compact_messages(
             messages,
-            self.model,
+            self.summary_model,
             overflow_cb.context_window,
             instructions_tokens=len(original_instructions) // 4,
         )

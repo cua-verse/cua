@@ -137,6 +137,8 @@ def parse_args(argv: list[str]) -> dict:
             args["task_index"] = int(argv[i + 1])
         elif arg == "--output-dir" and i + 1 < len(argv):
             args["output_dir"] = argv[i + 1]
+        elif arg == "--summary-model" and i + 1 < len(argv):
+            args["summary_model"] = argv[i + 1]
 
     return args
 
@@ -258,6 +260,7 @@ def validate_args(args, logger):
         logger.error("  --filter <events>      Filter trace events")
         logger.error("  --task-index <n>       Override task index")
         logger.error("  --output-dir <path>    Output directory (default: /tmp/td_output)")
+        logger.error("  --summary-model <model> Model for summarization and memory flush (default: same as --model)")
         logger.error("")
         logger.error("Environment variables:")
         logger.error("  CUA_ENV_API_URL        Required. Golden env API URL")
@@ -520,6 +523,8 @@ def initialize_agent(args, agent_class):
         agent_kwargs["model"] = args["model"]
     if args["max_steps"] is not None:
         agent_kwargs["max_steps"] = args["max_steps"]
+    if args.get("summary_model"):
+        agent_kwargs["summary_model"] = args["summary_model"]
     return agent_class(**agent_kwargs)
 
 

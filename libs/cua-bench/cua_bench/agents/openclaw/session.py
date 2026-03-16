@@ -806,6 +806,72 @@ def limit_history_turns(
     return messages[cut_index:]
 
 
+def _is_openai_model(model: str) -> bool:
+    """Check if a model string refers to an OpenAI model."""
+    return model.startswith("openai/") or model.startswith("gpt-") or model.startswith("o1") or model.startswith("o3") or model.startswith("o4")
+
+
+# Mapping from Chat Completions content block types to OpenAI Responses API types
+_RESPONSES_API_TYPE_MAP = {
+    # Role-dependent: "text" → "input_text" (user/tool) or "output_text" (assistant)
+    "function_call": "function_call",
+    "computer_call": "computer_call",
+    "tool_result": "function_call_output",
+    "computer_call_output": "computer_call_output",
+}
+
+
+def convert_to_responses_api_format(
+    messages: list[dict[str, Any]], model: str
+) -> list[dict[str, Any]]:
+    """Convert replay messages from Chat Completions format to OpenAI Responses API format.
+
+    OpenAI's Responses API uses different content block types than Chat Completions:
+    - "text" → "input_text" (for user/tool messages) or "output_text" (for assistant)
+    - "tool_result" → "function_call_output"
+
+    Only applies when the model is an OpenAI model. Returns messages unchanged otherwise.
+    """
+    if not _is_openai_model(model):
+        return messages
+
+    converted: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+
+        if isinstance(content, str):
+            # String content — wrap in the appropriate typed block
+            text_type = "output_text" if role == "assistant" else "input_text"
+            converted.append({
+                **msg,
+                "content": [{"type": text_type, "text": content}],
+            })
+            continue
+
+        if isinstance(content, list):
+            new_blocks: list[dict[str, Any]] = []
+            for block in content:
+                block_type = block.get("type", "")
+                if block_type == "text":
+                    # Map "text" based on role
+                    new_type = "output_text" if role == "assistant" else "input_text"
+                    new_blocks.append({**block, "type": new_type})
+                elif block_type in _RESPONSES_API_TYPE_MAP:
+                    mapped = _RESPONSES_API_TYPE_MAP[block_type]
+                    new_blocks.append({**block, "type": mapped})
+                else:
+                    # Keep unknown types as-is (already in correct format)
+                    new_blocks.append(block)
+            converted.append({**msg, "content": new_blocks})
+            continue
+
+        # Fallback: keep as-is
+        converted.append(msg)
+
+    return converted
+
+
 def build_system_prompt_report(
     *,
     system_prompt: str,
