@@ -10,7 +10,9 @@ Components:
   - has_already_flushed_for_current_compaction / should_run_memory_flush: memory flush guards (US-OC-005a)
   - MEMORY_FLUSH_PROMPT / MEMORY_FLUSH_SYSTEM_PROMPT / SILENT_REPLY_TOKEN: flush prompts
   - ContextOverflowCallback / is_context_overflow_error: context overflow detection (US-OC-005)
-  - CompactionResult / compact_messages: compaction pipeline (US-OC-006)
+  - CompactionResult / compact_messages: compaction pipeline (US-OC-006, US-OC-013)
+  - ToolPairingRepairReport / repair_tool_use_result_pairing: tool pairing repair (US-OC-013)
+  - split_preserved_recent_turns: recent turns preservation (US-OC-013)
   - build_tools / get_tool_summaries / ToolLoggingCallback: tool registry & logging (US-OC-007)
   - build_replay_messages / sanitize_history / limit_history_turns: transcript replay (US-OC-012)
 """
@@ -18,8 +20,11 @@ Components:
 from .context import (
     CompactionResult,
     ContextOverflowCallback,
+    ToolPairingRepairReport,
     compact_messages,
     is_context_overflow_error,
+    repair_tool_use_result_pairing,
+    split_preserved_recent_turns,
 )
 from .memory import (
     MemoryGetTool,
@@ -51,6 +56,7 @@ __all__ = [
     "ContextFile",
     "ContextOverflowCallback",
     "ToolLoggingCallback",
+    "ToolPairingRepairReport",
     "build_replay_messages",
     "build_tools",
     "compact_messages",
@@ -72,6 +78,8 @@ __all__ = [
     "build_system_prompt_report",
     "has_already_flushed_for_current_compaction",
     "is_context_overflow_error",
+    "repair_tool_use_result_pairing",
+    "split_preserved_recent_turns",
     "MEMORY_FLUSH_PROMPT",
     "MEMORY_FLUSH_SYSTEM_PROMPT",
     "SILENT_REPLY_TOKEN",

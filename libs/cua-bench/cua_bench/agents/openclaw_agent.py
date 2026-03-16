@@ -597,11 +597,12 @@ class OpenClawAgent(BaseAgent):
         # Extract messages from the current run's transcript
         messages = _extract_messages_for_compaction(session_mgr)
 
-        # Run the compaction pipeline
+        # Run the compaction pipeline (budget-aware, US-OC-013)
         compaction_result = await compact_messages(
             messages,
             self.model,
             overflow_cb.context_window,
+            instructions_tokens=len(original_instructions) // 4,
         )
 
         # Find the first kept entry ID from the transcript
@@ -644,8 +645,10 @@ class OpenClawAgent(BaseAgent):
 def _extract_messages_for_compaction(session_mgr) -> list[dict[str, Any]]:
     """Extract message entries from the transcript as dicts for compaction.
 
-    Converts TranscriptEntry objects into the {role, content} format
-    expected by the compaction pipeline.
+    Converts TranscriptEntry objects into the {role, content, stop_reason} format
+    expected by the compaction pipeline. Propagates stop_reason from transcript
+    entries so repair_tool_use_result_pairing() can skip synthesis for
+    error/aborted turns (US-OC-013).
     """
     history = session_mgr.load_history()
     messages: list[dict[str, Any]] = []
@@ -653,10 +656,14 @@ def _extract_messages_for_compaction(session_mgr) -> list[dict[str, Any]]:
         if entry.type != "message":
             continue
         msg_data = entry.data.get("message", {})
-        messages.append({
+        msg: dict[str, Any] = {
             "role": msg_data.get("role", "unknown"),
             "content": msg_data.get("content", ""),
-        })
+        }
+        stop_reason = msg_data.get("stop_reason")
+        if stop_reason:
+            msg["stop_reason"] = stop_reason
+        messages.append(msg)
     return messages
 
 
