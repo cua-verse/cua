@@ -110,6 +110,7 @@ class OpenClawAgent(BaseAgent):
         super().__init__(**kwargs)
         self.model = kwargs.get("model", "anthropic/claude-sonnet-4-20250514")
         self.max_steps = kwargs.get("max_steps", 100)
+        self.max_history_turns = kwargs.get("max_history_turns", None)  # None = all
 
     @staticmethod
     def name() -> str:
@@ -162,10 +163,13 @@ class OpenClawAgent(BaseAgent):
             PromptBuilder,
             SessionManager,
             ToolLoggingCallback,
+            build_replay_messages,
             build_system_prompt_report,
             build_tools,
             get_tool_summaries,
             is_context_overflow_error,
+            limit_history_turns,
+            sanitize_history,
             should_run_memory_flush,
         )
 
@@ -178,6 +182,19 @@ class OpenClawAgent(BaseAgent):
         # Initialize session persistence (US-OC-004)
         session_mgr = SessionManager(task_id=task_id)
         session_mgr.init_session(model=self.model)
+
+        # Cross-run continuity (US-OC-012): replay prior transcript as messages
+        # so the agent sees actual conversation history from previous runs.
+        prior_entries = session_mgr.load_history()
+        replay_messages: list[dict[str, Any]] = []
+        if prior_entries:
+            replay_messages = build_replay_messages(prior_entries)
+            replay_messages = sanitize_history(replay_messages)
+            replay_messages = limit_history_turns(replay_messages, self.max_history_turns)
+            # Re-sanitize after truncation (may orphan tool results at cut point)
+            replay_messages = sanitize_history(replay_messages)
+            if replay_messages:
+                print(f"[Replay] Loaded {len(replay_messages)} messages from prior transcript")
 
         # Cross-run continuity (US-OC-008): load prior compaction summaries
         # so the agent starts with context from previous runs.
@@ -265,7 +282,18 @@ class OpenClawAgent(BaseAgent):
             while compaction_count <= max_compactions:
                 compaction_triggered = False
 
-                async for result in agent.run(instruction):
+                # Pass replay messages + instruction as the messages arg (US-OC-012).
+                # When no prior history, replay_messages is empty and this is
+                # equivalent to agent.run(instruction). After first iteration
+                # (compaction rebuild), replay_messages is cleared since the
+                # compacted instruction already contains prior context.
+                run_input = (
+                    replay_messages + [{"role": "user", "content": instruction}]
+                    if replay_messages
+                    else instruction
+                )
+
+                async for result in agent.run(run_input):
                     sys.stdout.flush()  # Flush output
 
                     step += 1
@@ -376,6 +404,9 @@ class OpenClawAgent(BaseAgent):
                     callbacks=[overflow_cb, tool_logging_cb],
                 )
                 compaction_count += 1
+                # Clear replay messages after compaction — the compacted
+                # instruction already contains prior context (US-OC-012).
+                replay_messages = []
 
             print(f"\nTotal usage: {total_usage}")
             print(f"Steps completed: {step}/{self.max_steps}")

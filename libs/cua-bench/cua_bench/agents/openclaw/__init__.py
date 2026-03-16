@@ -12,6 +12,7 @@ Components:
   - ContextOverflowCallback / is_context_overflow_error: context overflow detection (US-OC-005)
   - CompactionResult / compact_messages: compaction pipeline (US-OC-006)
   - build_tools / get_tool_summaries / ToolLoggingCallback: tool registry & logging (US-OC-007)
+  - build_replay_messages / sanitize_history / limit_history_turns: transcript replay (US-OC-012)
 """
 
 from .context import (
@@ -36,8 +37,11 @@ from .session import (
     SessionState,
     TokenUsage,
     TranscriptEntry,
+    build_replay_messages,
     build_system_prompt_report,
     has_already_flushed_for_current_compaction,
+    limit_history_turns,
+    sanitize_history,
     should_run_memory_flush,
 )
 from .tools import ToolLoggingCallback, build_tools, get_tool_summaries
@@ -47,15 +51,18 @@ __all__ = [
     "ContextFile",
     "ContextOverflowCallback",
     "ToolLoggingCallback",
+    "build_replay_messages",
     "build_tools",
     "compact_messages",
     "get_tool_summaries",
+    "limit_history_turns",
     "MemoryGetTool",
     "MemorySearchTool",
     "MemoryStore",
     "MemoryWriteTool",
     "PromptBuilder",
     "PromptConfig",
+    "sanitize_history",
     "SearchResult",
     "SectionConfig",
     "SessionManager",

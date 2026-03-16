@@ -13,6 +13,7 @@ Key differences from OpenClaw:
 """
 
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -537,6 +538,272 @@ def has_already_flushed_for_current_compaction(state: SessionState) -> bool:
     if state.memory_flush_compaction_count is None:
         return False
     return state.memory_flush_compaction_count == state.compaction_count
+
+
+# ---------------------------------------------------------------------------
+# Transcript Replay — Cross-run continuity (US-OC-012)
+# Converts transcript entries to API messages, sanitizes stale data,
+# and limits history to prevent context overflow.
+#
+# Based on OpenClaw's replay pipeline (pi-embedded-runner/sanitizeSessionHistory,
+# limitHistoryTurns, sanitizeToolUseResultPairing).
+# ---------------------------------------------------------------------------
+
+_THINKING_BLOCK_RE = re.compile(r"<THINKING>.*?</THINKING>", re.DOTALL)
+
+# Base64 data URL pattern (matches data:image/...;base64,...)
+_BASE64_IMAGE_RE = re.compile(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]{100,}")
+
+
+def build_replay_messages(entries: list[TranscriptEntry]) -> list[dict[str, Any]]:
+    """Convert transcript entries into API message dicts for replay.
+
+    Handles three entry types:
+    - message: extracts role/content from entry.data["message"], strips stale metadata
+    - compaction: replaces all messages before firstKeptEntryId with a single
+      assistant summary message
+    - session: skipped (run boundary markers, not API messages)
+
+    Based on OpenClaw's replaceMessages pipeline
+    (openclaw/pi-embedded-runner/sanitizeSessionHistory).
+    """
+    messages: list[dict[str, Any]] = []
+    # Map entry IDs to their index in the messages list for compaction lookups
+    entry_id_to_msg_index: dict[str, int] = {}
+
+    for entry in entries:
+        if entry.type == "session":
+            continue
+
+        if entry.type == "compaction":
+            summary = entry.data.get("summary", "")
+            first_kept_id = entry.data.get("firstKeptEntryId")
+
+            if first_kept_id and first_kept_id in entry_id_to_msg_index:
+                # Replace all messages before firstKeptEntryId with a summary
+                cut_index = entry_id_to_msg_index[first_kept_id]
+                kept = messages[cut_index:]
+                messages = [
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": f"[Compaction summary] {summary}"}],
+                    }
+                ] + kept
+                # Rebuild index since positions shifted
+                entry_id_to_msg_index = {}
+                # We can't easily remap, but subsequent compactions will
+                # reference entries added after this point
+            else:
+                # No matching entry found — just prepend the summary
+                messages.insert(0, {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"[Compaction summary] {summary}"}],
+                })
+            continue
+
+        if entry.type == "message":
+            msg_data = entry.data.get("message", {})
+            role = msg_data.get("role", "user")
+            content = msg_data.get("content", "")
+
+            # Map OpenClaw roles to standard API roles
+            if role == "toolResult":
+                role = "user"  # tool results are user messages in the API
+
+            # Strip stale metadata (usage, stopReason, api)
+            message: dict[str, Any] = {"role": role, "content": content}
+            entry_id_to_msg_index[entry.id] = len(messages)
+            messages.append(message)
+
+    return messages
+
+
+def sanitize_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sanitize replayed messages for API compatibility.
+
+    Five sanitization passes:
+    1. Strip base64 images (huge, stale screenshots from prior runs)
+    2. Strip thinking blocks (<THINKING>...</THINKING>) from assistant text
+    3. Repair orphaned tool results (drop tool_result without matching call, and vice versa)
+    4. Strip stale usage keys from all messages
+    5. Ensure user-first ordering (Gemini compatibility)
+
+    Based on OpenClaw's sanitizeSessionHistory and sanitizeToolUseResultPairing
+    (openclaw/pi-embedded-runner/).
+    """
+    result: list[dict[str, Any]] = []
+    for msg in messages:
+        sanitized = _sanitize_single_message(msg)
+        if sanitized is not None:
+            result.append(sanitized)
+
+    # Pass 3: Repair orphaned tool results / calls
+    result = _repair_orphaned_tool_pairs(result)
+
+    # Pass 5: Ensure user-first ordering
+    if result and result[0].get("role") != "user":
+        result.insert(0, {"role": "user", "content": "[session history follows]"})
+
+    return result
+
+
+def _sanitize_single_message(msg: dict[str, Any]) -> dict[str, Any] | None:
+    """Apply per-message sanitization (passes 1, 2, 4)."""
+    role = msg.get("role", "")
+    content = msg.get("content", "")
+
+    # Pass 4: Strip stale usage
+    sanitized: dict[str, Any] = {"role": role}
+    for k, v in msg.items():
+        if k not in ("usage", "stopReason", "api", "role", "content"):
+            sanitized[k] = v
+
+    if isinstance(content, str):
+        # Pass 1: Strip base64 images from text
+        content = _BASE64_IMAGE_RE.sub("[image removed]", content)
+        # Pass 2: Strip thinking blocks from assistant messages
+        if role == "assistant":
+            content = _THINKING_BLOCK_RE.sub("", content).strip()
+        sanitized["content"] = content
+        return sanitized if content else sanitized  # keep even if empty
+
+    if isinstance(content, list):
+        sanitized_blocks: list[dict[str, Any]] = []
+        for block in content:
+            block_type = block.get("type", "")
+
+            # Pass 1: Strip image blocks entirely
+            if block_type in ("image", "image_url"):
+                sanitized_blocks.append({
+                    "type": "text",
+                    "text": "[screenshot from prior run]",
+                })
+                continue
+
+            # Pass 1: Strip base64 from source blocks
+            if block_type == "image" or (
+                isinstance(block.get("source"), dict)
+                and block["source"].get("type") == "base64"
+            ):
+                sanitized_blocks.append({
+                    "type": "text",
+                    "text": "[screenshot from prior run]",
+                })
+                continue
+
+            # Pass 1: Strip base64 data URLs from text blocks
+            if block_type == "text":
+                text = block.get("text", "")
+                text = _BASE64_IMAGE_RE.sub("[image removed]", text)
+                # Pass 2: Strip thinking blocks
+                if role == "assistant":
+                    text = _THINKING_BLOCK_RE.sub("", text).strip()
+                sanitized_blocks.append({"type": "text", "text": text})
+                continue
+
+            # Keep other blocks as-is (function_call, computer_call, tool_result, etc.)
+            sanitized_blocks.append(block)
+
+        sanitized["content"] = sanitized_blocks
+        return sanitized
+
+    sanitized["content"] = content
+    return sanitized
+
+
+def _repair_orphaned_tool_pairs(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove orphaned tool results and tool calls without matching pairs.
+
+    For each tool_result content block, verify a matching function_call or
+    computer_call with the same ID exists in an earlier assistant message.
+    Drop orphaned results. Also drop function_call/computer_call blocks
+    with no matching result in a later message.
+
+    Based on OpenClaw's sanitizeToolUseResultPairing.
+    """
+    # Collect all tool call IDs from assistant messages
+    call_ids: set[str] = set()
+    result_ids: set[str] = set()
+
+    for msg in messages:
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            block_type = block.get("type", "")
+            if block_type in ("function_call", "computer_call"):
+                call_id = block.get("id", "")
+                if call_id:
+                    call_ids.add(call_id)
+            elif block_type == "tool_result":
+                tool_use_id = block.get("tool_use_id", "")
+                if tool_use_id:
+                    result_ids.add(tool_use_id)
+
+    # IDs that have both a call and a result
+    paired_ids = call_ids & result_ids
+
+    # Filter messages: remove orphaned blocks
+    cleaned: list[dict[str, Any]] = []
+    for msg in messages:
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            cleaned.append(msg)
+            continue
+
+        filtered_blocks: list[dict[str, Any]] = []
+        for block in content:
+            block_type = block.get("type", "")
+            if block_type in ("function_call", "computer_call"):
+                call_id = block.get("id", "")
+                if call_id in paired_ids:
+                    filtered_blocks.append(block)
+                # else: orphaned call — drop
+            elif block_type == "tool_result":
+                tool_use_id = block.get("tool_use_id", "")
+                if tool_use_id in paired_ids:
+                    filtered_blocks.append(block)
+                # else: orphaned result — drop
+            else:
+                filtered_blocks.append(block)
+
+        if filtered_blocks:
+            cleaned.append({**msg, "content": filtered_blocks})
+        # If all blocks were removed, skip the message entirely
+
+    return cleaned
+
+
+def limit_history_turns(
+    messages: list[dict[str, Any]], limit: int | None = None
+) -> list[dict[str, Any]]:
+    """Keep the last N user turns (and their associated responses).
+
+    Iterates backwards, counting role="user" messages. When the count exceeds
+    the limit, slices from that point forward.
+
+    Based on OpenClaw's limitHistoryTurns (pi-embedded-runner/).
+
+    Args:
+        messages: List of API message dicts
+        limit: Max number of user turns to keep. None or <= 0 means keep all.
+
+    Returns:
+        Sliced message list containing only the last `limit` user turns
+        and their associated assistant/tool responses.
+    """
+    if limit is None or limit <= 0:
+        return messages
+
+    # Find the indices of all user messages
+    user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+
+    if len(user_indices) <= limit:
+        return messages
+
+    # Keep from the (limit)th-from-last user message onward
+    cut_index = user_indices[-limit]
+    return messages[cut_index:]
 
 
 def build_system_prompt_report(
