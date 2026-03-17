@@ -250,6 +250,11 @@ class OpenClawAgent(BaseAgent):
             instructions_tokens=len(instructions) // 4,
         )
 
+        # Persist resolved context window in session state (matches OpenClaw's contextTokens)
+        if session_mgr._state is not None:
+            session_mgr._state.contextTokens = overflow_cb.context_window
+            session_mgr.save_state()
+
         # Memory flush callback — wired into OpenClawComputerAgent's on_memory_flush hook
         async def _memory_flush_hook():
             if session_mgr._state is not None and should_run_memory_flush(
