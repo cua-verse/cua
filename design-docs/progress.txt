@@ -1,0 +1,635 @@
+## Codebase Patterns
+- Source `.envrc` directly (`source "/path/.envrc"`) for reliable env var loading in Bash tool (NOT `direnv export bash`)
+- Use `uv sync --reinstall` if editable CUA packages fail to import (agent, cua_bench, etc.)
+- Solver exits with code 1 on MAX_STEPS_EXCEEDED — expected behavior, not an error
+- `CONTEXT_WINDOW_OVERRIDE=N` env var forces a small context window for testing overflow detection (e.g. `CONTEXT_WINDOW_OVERRIDE=8000 bash run_magic_tower.sh 15`)
+- BaseTool pattern: constructor takes domain object + optional cfg, calls `super().__init__(cfg)`; `@register_tool` sets `cls.name` and adds to `TOOL_REGISTRY`. `_verify_json_format_args` handles both dict and JSON string params.
+- CUA trajectory reasoning summaries: `turn_NNN/NNNN_agent_response.json → response.output[].summary[].text`
+- Turn count ≠ step count: each turn can contain multiple API calls (~2 steps/turn for openai/computer-use-preview)
+- Trajectory tool verification: `turn_000/0000_api_start.json → kwargs.tools[].name` for registered tools; `*_agent_response.json → response.output[] where type=="function_call"` for invocations
+
+---
+
+## 2026-03-10 - Prepare harness for OpenClaw reproduction
+- Set up `progress.txt` (this file) with Codebase Patterns
+- Fresh `prd.json` ready for OpenClaw reproduction stories
+- Updated CLAUDE.md Key Files table with OpenClaw golden references
+- Replaced `docs/openclaw-context-flow.md` with interactive HTML version
+- Created `docs/openclaw-source-analysis.md` as detailed OpenClaw source reference
+- Updated skills for openclaw-harness branch and OpenClaw references
+- Removed all TinyClaw naming — project now framed as OpenClaw reproduction for CUA
+- **Learnings for future iterations:**
+  - OpenClaw concept docs (`openclaw/docs/concepts/`) are the authoritative component-level references
+  - `docs/openclaw-context-flow.html` is the primary interactive reference for the full pipeline
+---
+
+## 2026-03-11 - PRD: OpenClaw reproduction stories (B1-B6 + post-eval)
+- Created 10 stories in `prd.json` covering B1-B6 components across 3 phases plus 2 post-evaluation stories
+- Phase 1 (P1-P4): System Prompt Builder, Memory Store, Memory Tools, Session Persistence
+- Phase 2 (P5-P7): Context Overflow Detection, Compaction Pipeline, Tool Registry + Hooks
+- Phase 3 (P8): Agent Loop Integration
+- Post-eval (P9-P10): Category C SDK audit, Category A skipped component review
+- Updated `.claude/skills/prd/SKILL.md` with "Reference brevity: pointers, not inventories" principle
+- **Learnings for future iterations:**
+  - PRD references should use directory pointers + entry points, not exhaustive file lists — the implementing agent can explore on its own
+  - Category C assumptions (CUA SDK reusability) need runtime verification, not just source analysis
+  - ComputerAgent vs Pi agent core equivalence is the highest-risk assumption — needs deep investigation in US-OC-009
+---
+
+## 2026-03-11 - Improve /ship and /judge skills with subagent delegation
+- Refactored `.claude/skills/judge/SKILL.md` to use subagent delegation model
+- Judge skill now spawns a single Sonnet general-purpose agent with fresh context
+- Cost reduction: ~3x less expensive than Opus, avoids expensive cache reads from bloated conversation
+- Cleaner execution model: skill handles coordination, agent does the rigorous auditing work
+- Cleaner documentation: separated skill coordination ("Execution" section) from agent prompt
+- Improved variable substitution: $TARGET replaces $ARGUMENTS for story targeting
+- **Learnings for future iterations:**
+  - Subagent delegation is effective for long-running, high-context audits (judge, post-eval reviews)
+  - Fresh context window prevents conversation bloat and reduces token costs during intensive verification
+  - Separating skill metadata (name, description, user-invocable) from prompt improves clarity
+---
+
+## 2026-03-11 - US-OC-001: Onboard skill revision
+- Revised `/onboard` skill to require **Design Rationale** section in all OpenClaw reproduction plans
+- Added structure guidance: What OpenClaw Does → What We Kept and Why → What We Dropped and Why → Key Differences
+- Created example design rationale at `docs/plan/US-OC-001-system-prompt-builder.md` for reference
+- **Files changed:** `.claude/skills/onboard/SKILL.md`, `docs/plan/US-OC-001-system-prompt-builder.md`, `docs/openclaw-reproduction-plan.md` (relocated)
+- **Learnings:** Design rationale structure forces explicit documentation of OpenClaw → CUA adaptations and avoids cargo-cult reproduction
+---
+## 2026-03-11 - US-OC-001: System Prompt Builder
+- Implemented PromptBuilder class in `agents/openclaw/prompt.py` with five major sections:
+  - **Identity**: agent name + CUA benchmark role
+  - **Tools**: registered tool names with descriptions (derived at runtime from tool_summaries dict)
+  - **Memory Recall**: search-first directive for memory_search + memory_get (conditionally included)
+  - **Project Context**: bootstrap injection of AGENTS.md + task.md files
+  - **Current Time**: intentionally dropped (agent reads VM clock; breaks cache stability)
+- Integrated PromptBuilder into `openclaw_agent.py`:
+  - tool_summaries derived from [session._computer, MilestoneTool] at runtime
+  - AGENTS.md read from `openclaw/AGENTS.md`, task description injected as task.md
+  - instructions= parameter passed to ComputerAgent (never truncated from context)
+- Updated acceptance criteria in `prd.json` to match final implementation
+- Updated design rationale in `docs/plan/US-OC-001-system-prompt-builder.md` with tool runtime derivation pattern
+- Revised `agents/openclaw/AGENTS.md` to clarify memory file layout and write mechanism dependencies (forward reference to US-OC-002 and US-OC-003)
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/prompt.py` (new)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (integrated PromptBuilder)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md` (clarified memory sections)
+  - `docs/plan/US-OC-001-system-prompt-builder.md` (updated design rationale)
+  - `tests/test_prompt_builder.py` (updated memory tests — memory_write no longer triggers Memory Recall)
+  - `prd.json` (updated acceptance criteria + notes)
+- **Learnings for future iterations:**
+  - Memory Recall section is triggered by memory_search OR memory_get presence, NOT memory_write (matches OpenClaw behavior)
+  - Tool summaries must be derived at runtime from actual registered tools, not hardcoded — enables flexible tool list for future stories
+  - AGENTS.md and task.md as ContextFile injections allow persistent, section-specific guidance without breaking cache stability
+  - Bootstrap injection via ContextFile avoids the "Current Time" section complexity (VM clock is reliable, hardcoded times break cache)
+  - Design rationale doc structure (OpenClaw → CUA → dropped → differences) is effective for capturing architectural decisions
+---
+
+## 2026-03-11 - US-OC-001: Test refinements (finalization)
+- Refined `tests/test_prompt_builder.py` to match final PromptBuilder implementation:
+  - Added `test_build_has_time_section()` to verify "## Current Date & Time" section presence
+  - Updated `test_full_build_has_all_sections_in_order()` to verify section ordering: Identity → Tools → Memory Recall → Current Time → Project Context
+  - Added `test_disable_time()` to verify time section can be disabled via config
+  - Updated `test_each_section_independently_disableable()` to include time section in the disablement matrix
+  - Updated context file header assertion from `## AGENTS.md` to `### AGENTS.md` (subsection under Project Context)
+  - Updated all context file header assertions and ordering tests to use `###` instead of `##`
+- All 28 tests passing (lint + pytest)
+- **Files changed:**
+  - `tests/test_prompt_builder.py` (test refinements for Current Time section + subsection headers)
+- **Learnings for future iterations:**
+  - Current Time section is intentionally kept in system prompt (contrary to earlier note) but is now included in section disablement config
+  - Project Context file headers use H3 (###) instead of H2 (##) to create proper subsection hierarchy
+---
+
+## 2026-03-11 - US-OC-001/002 revision
+- Removed duplicate task description injection: `task.md` was being injected as a ContextFile AND passed via `agent.run()`, causing duplication in the agent's context window
+- Added memory citation guidance to Memory Recall section in `prompt.py`: "Citations: include Source: <path#line> when referencing memory snippets." (matches OpenClaw's buildMemorySection pattern)
+- Removed redundant TASK_MEMORY.md reference from AGENTS.md Session Startup (it's already injected as a ContextFile by the agent harness, no need to tell the agent it's "already in your system prompt")
+- Updated tests (`test_openclaw_agent_prompt.py`, `test_prompt_builder.py`) to reflect no task.md injection and verify memory tool presence in prompt
+- Updated `prd.json` acceptance criteria and notes for US-OC-001 and US-OC-002 to match final implementation
+- Updated `docs/plan/US-OC-001-system-prompt-builder.md` design rationale (Project Context and Key Differences sections)
+- Added `planFile` field to US-OC-001 and US-OC-003 in `prd.json`
+- Revised `/judge` SKILL.md and `/onboard` SKILL.md (minor clarifications)
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (remove task.md ContextFile injection)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/prompt.py` (add citation line to Memory Recall)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md` (remove TASK_MEMORY.md note from Session Startup)
+  - `tests/test_openclaw_agent_prompt.py` (updated assertions)
+  - `tests/test_prompt_builder.py` (remove task.md references)
+  - `prd.json` (updated criteria, notes, planFile fields)
+  - `docs/plan/US-OC-001-system-prompt-builder.md` (design rationale update)
+  - `.claude/skills/judge/SKILL.md`, `.claude/skills/onboard/SKILL.md` (minor revisions)
+- **Learnings for future iterations:**
+  - Avoid injecting the task description as both a ContextFile and via agent.run() — ComputerAgent sends it as a user message; double injection wastes context
+  - AGENTS.md should describe agent behavior rules, not echo what the harness already does programmatically — keep it free of implementation details
+---
+
+## 2026-03-11 - US-OC-002: Memory Store
+- Implemented `MemoryStore` class + `SearchResult` dataclass in `agents/openclaw/memory.py`
+  - Task workspace layout: `tasks/<task_id>/TASK_MEMORY.md` + `memory/session-NNN.md`
+  - API: init_session, append_to_session_log, write/read_task_memory, read_file, search, list_session_files, get_bootstrap_context
+  - `DEFAULT_BASE_DIR = "openclaw_memory"` with runtime resolution (patchable in tests)
+- Wired MemoryStore into `openclaw_agent.py`:
+  - task_id derived from `logging_dir.parent.name`
+  - init_session() called on each run
+  - TASK_MEMORY.md injected as ContextFile if it exists (bootstrap injection)
+- Added "Current Date & Time" section to PromptBuilder (mirrors OpenClaw's system-prompt.ts)
+- Updated AGENTS.md: session startup reads two most recent session logs
+- Updated prompt.py Memory Recall to reference TASK_MEMORY.md + memory/session-*.md
+- Integration test (`test_openclaw_agent_prompt.py`) mocks CUA SDK and captures/prints full system prompt
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/memory.py` (new)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (exports)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/prompt.py` (time section, memory recall update, ### headers)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md` (task workspace layout)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (MemoryStore wiring)
+  - `tests/test_openclaw_memory_store.py` (new, 38 tests)
+  - `tests/test_openclaw_agent_prompt.py` (new, 4 integration tests)
+  - `docs/plan/US-OC-002-memory-store.md` (design doc with decisions)
+- **Learnings for future iterations:**
+  - Class-level `DEFAULT_BASE_DIR` as a default parameter is bound at class definition time — use `None` sentinel + `self.DEFAULT_BASE_DIR` for patchability
+  - `patch.object(MemoryStore, "DEFAULT_BASE_DIR", ...)` works when the default is resolved at call time via `self.`
+  - Integration tests that mock ComputerAgent constructor can capture `instructions=` to verify the full system prompt without a VM
+  - SearchResult as a dataclass (vs plain class in legacy store) is cleaner and gets __eq__ for free
+---
+
+## 2026-03-11 - US-OC-003: Memory Tools
+- Implemented three BaseTool subclasses in `agents/openclaw/memory.py`:
+  - **MemorySearchTool** (`memory_search`): keyword search via `query` or `keywords` params, returns formatted `[path:line] (score N) content` lines
+  - **MemoryGetTool** (`memory_get`): safe file read with `path`/`from`/`lines`, rejects path traversal and non-.md files
+  - **MemoryWriteTool** (`memory_write`): two targets — `session` (append) and `task_memory` (overwrite TASK_MEMORY.md)
+- Wired all three tools into `openclaw_agent.py` tool list
+- Fixed pre-existing `.name` AttributeError: `session._computer` (CUA Computer) lacks `.name`; filtered `tool_summaries` to `isinstance(tool, BaseTool)` only
+- Added `allow_overwrite=True` to legacy `memory/tools.py` decorators to prevent registration conflicts
+- Updated AGENTS.md: replaced "requires US-OC-003" caveat with tool usage instructions
+- VM test (50 steps): agent ran successfully, all 5 tools registered in API calls, system prompt includes tool descriptions and Memory Recall section
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/memory.py` (3 tool classes appended)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (exports)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md` (tool references)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (tool wiring + .name fix)
+  - `memory/tools.py` (allow_overwrite on legacy decorators)
+  - `tests/test_openclaw_memory_tools.py` (new, 34 tests)
+- **Learnings for future iterations:**
+  - `session._computer` is a CUA Computer object, not a BaseTool — always guard tool introspection with isinstance checks
+  - `allow_overwrite=True` needed on both old and new `@register_tool` calls when same names exist in different packages
+  - Agent doesn't use memory tools on first session with empty memory — expected; cross-session testing needed for behavioral verification
+  - Two write targets (session/task_memory) instead of three (legacy had "memory" for global MEMORY.md) — correct for task-scoped design
+---
+
+## 2026-03-11 - US-OC-003: Judge audit (PASS)
+- Judge audit confirmed all 4 acceptance criteria met
+- VM test (50 steps): agent ran successfully, all 5 tools registered, 4 memory tool invocations (1 search, 2 get, 1 write)
+- Agent autonomously searched prior session data, read files, and wrote game-relevant observations
+- Cross-session memory confirmed working: agent found and used data from sessions 9 and 10
+- Report: `docs/judges/judge_2026-03-11_1847_US-OC-003.md`
+- **Learnings for future iterations:**
+  - Agent uses memory tools most on first turn (startup recall), then focuses on task — memory writes during gameplay may need prompt tuning
+  - `session._computer` is a CUA Computer, not BaseTool — guard tool introspection with `isinstance(tool, BaseTool)` checks
+  - `allow_overwrite=True` needed on `@register_tool` when legacy and new packages register same tool names — prefer removing stale registration
+---
+
+## 2026-03-12 - PRD update: US-OC-004a, US-OC-005a, US-OC-011
+- Compared our state.json schema against OpenClaw's full SessionEntry type (openclaw/src/config/sessions/types.ts)
+- Created US-OC-004a (P4.1): Session State Schema Extension — remove run_number, add cache tokens, model, system_prompt_report
+- Created US-OC-005a (P5.1): Wire Memory Flush Tracking — placeholder for memory_flush_at/memory_flush_compaction_count discussion
+- Created US-OC-011 (P11): Abort/Resume Tracking — aborted_last_run + abort_cutoff_entry_id, post-integration
+- Updated US-OC-008 notes: memory flush fields come from US-OC-005a, not added in integration story
+- **Learnings for future iterations:**
+  - OpenClaw SessionEntry has ~60+ fields; ~90% are multi-channel routing, UI delivery, and gateway concerns irrelevant to CUA
+  - Relevant gaps for CUA: cache token tracking (cache_read, cache_write, context_tokens), model in state, system prompt size reporting, abort/resume state, memory flush tracking
+  - OpenClaw's systemPromptReport tracks char-level budget of every prompt component — useful for context window observability without needing to parse the prompt string
+---
+
+## 2026-03-12 - US-OC-004: Session Persistence
+- Implemented `SessionManager` + `SessionState` + `TokenUsage` + `TranscriptEntry` in `agents/openclaw/session.py`
+  - Storage layout: `openclaw_sessions/<task_id>/state.json` + `transcript.jsonl`
+  - State schema: task_id, run_number, step_count, total_tokens (input/output), compaction_count, compaction_summaries, created_at, updated_at
+  - JSONL format: parentId chain, 3 entry types (session header, message, compaction), typed content arrays matching OpenClaw format
+  - `init_session()` auto-increments run_number, resets step_count, preserves cumulative tokens + compaction summaries
+  - `load_history(run_number=N)` filters transcript to a single run; no run_number returns all
+- Wired SessionManager into `openclaw_agent.py`:
+  - Initialized after MemoryStore, before tool list
+  - Tracks step count and tokens per step via `update_step_count()` and `update_tokens()`
+  - Logs all output types to transcript: assistant messages, tool calls, tool results, computer calls, computer call outputs (image → trajectory reference)
+- Fixed token field names in `openclaw_agent.py`: `prompt_tokens`/`completion_tokens` → `input_tokens`/`output_tokens` to match CUA SDK (OpenAI Responses API format); fixed `AgentResult` extraction accordingly
+- Exported `SessionManager`, `SessionState`, `TokenUsage`, `TranscriptEntry` via `openclaw/__init__.py`
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py` (new)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (exports)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (wiring + token field fix)
+  - `tests/test_openclaw_session.py` (new, 42 tests)
+- **Learnings for future iterations:**
+  - CUA SDK yields `input_tokens`/`output_tokens` (OpenAI Responses API), NOT `prompt_tokens`/`completion_tokens` — check CUA source before assuming token key names
+  - Single JSONL file per task (vs per-run) keeps history traversable across all runs; session header entries mark run boundaries for filtering
+  - `None` sentinel pattern for `base_dir` defaulting (from MemoryStore) enables clean patching in tests without class-level mutation
+  - Computer call outputs contain image data — store only a trajectory reference in JSONL to avoid bloating the transcript file
+---
+
+## 2026-03-12 - US-OC-004a: Session State Schema Extension
+- Removed `run_number` from `SessionState` — run numbers are now derived by counting session header entries in the transcript (`_count_session_headers()`)
+- Added `cache_read`, `cache_write`, `context_tokens` fields to `TokenUsage` with matching `accumulate()` keyword args
+- Added `model` field to `SessionState` — set by `init_session(model=...)` and persisted to state.json
+- Added `system_prompt_report: dict | None` to `SessionState` — omitted from `to_dict()` when None; loaded via `set_system_prompt_report()`
+- Implemented `build_system_prompt_report()` — measures total/project/non-project chars, injected file sizes, tool schema chars and property counts
+- Exported `build_system_prompt_report` via `openclaw/__init__.py`
+- Updated all 42 existing tests + added 16 new tests (58 total); all pass
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py`
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py`
+  - `tests/test_openclaw_session.py`
+- **Learnings for future iterations:**
+  - Deriving run_number from transcript avoids state drift — count session headers before appending the new one
+  - `system_prompt_report` serialization: omit key entirely when None (not `"system_prompt_report": null`) to keep state.json clean and support backward compat
+  - Duck-typed tool schema extraction (`hasattr(tool, "parameters")`) avoids importing BaseTool, making `build_system_prompt_report` testable with plain Python objects
+---
+
+## 2026-03-13 - US-OC-005: Context Overflow Detection
+- Implemented `ContextOverflowCallback` in `agents/openclaw/context.py`
+  - `on_llm_start` estimates token usage (chars/4 heuristic with 1.2x safety margin + fixed 1200 tokens/image)
+  - Truncates oversized tool results (>25% of context window) with head+tail strategy (important tail detection)
+  - Sets `needs_compaction` flag at 80% of context window threshold; exposes `current_tokens`, `context_window`, `overflow_ratio`, `turn_count` properties
+  - `force_compaction()` for reactive overflow detection from API rejections
+- Implemented `is_context_overflow_error()` — classifies API error strings, excludes rate-limit false positives
+- Implemented `resolve_context_window()` — litellm model registry lookup with multi-candidate fallback
+- Wired `ContextOverflowCallback` into `openclaw_agent.py`:
+  - Initialized with `CONTEXT_WINDOW_OVERRIDE` env var support for testing
+  - Added proactive check (`overflow_cb.needs_compaction`) in step loop (US-OC-006 will do the actual compaction)
+  - Added reactive check (`is_context_overflow_error`) in the except block
+- Exported `ContextOverflowCallback` and `is_context_overflow_error` via `openclaw/__init__.py`
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py` (new)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (exports)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (wiring)
+  - `tests/test_openclaw_context.py` (new, 58 tests — all pass)
+  - `docs/plan/US-OC-005-context-overflow.md` (plan doc)
+- **Learnings for future iterations:**
+  - Image token estimation: strip base64 data from char count, add 1200 tokens flat per image (Anthropic billing) — avoids multi-million-token hallucinations for screenshot-heavy runs
+  - Head+tail truncation with "important tail detection" (error keywords, JSON closure, result/summary) preserves diagnostically useful info when truncating tool outputs
+  - `CONTEXT_WINDOW_OVERRIDE` env var enables testing overflow at any step count without a large run — add it to Codebase Patterns
+  - litellm's `get_model_info()` accepts multiple name formats (with/without provider prefix) — try both before falling back to default
+  - `on_llm_start` receives full message history per turn (not a delta) — this is what makes cumulative token estimation work correctly
+---
+
+## 2026-03-13 - US-OC-004b: Transcript JSONL Format Fixes
+- Fixed 5 transcript format problems found by comparing runtime transcript against golden reference (OpenClaw transcript.ts + sessions.test.ts)
+- **Fix 1 — Turn fragmentation**: Replaced per-item logging loop with `group_step_output()` helper that batches all output items into one assistant entry + one tool entry per step
+- **Fix 2 — Role correctness**: Changed `role: "toolResult"` → `role: "tool"` (standard OpenAI Responses API role)
+- **Fix 3 — usage.total**: Added `total = input + output` to every assistant usage dict
+- **Fix 4 — Content block type**: Changed `type: "toolCall"` → `type: "function_call"` (matches CUA SDK / OpenAI Responses API)
+- **Fix 5 — api field**: Added optional `api` parameter to `append_message()`; assistant messages now include `api: "openai-responses"`
+- Extracted `_find_latest_screenshot(trajectory_dir)` helper that resolves the newest `*_screenshot_after.png` from TrajectorySaverCallback output
+- `group_step_output()` exported as module-level function (testable without VM)
+- Added 2 tests to `test_openclaw_session.py` (api field presence/absence); added 13 new tests in `test_openclaw_transcript_format.py`; all 73 tests pass
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (group_step_output + _find_latest_screenshot helpers; rewired logging loop)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py` (api param on append_message)
+  - `tests/test_openclaw_session.py` (+2 api field tests)
+  - `tests/test_openclaw_transcript_format.py` (NEW — 13 tests)
+  - `docs/plan/US-OC-004b-transcript-format-fixes.md` (plan doc)
+- **Learnings for future iterations:**
+  - CUA SDK yields multiple output items per step (text + function_call + computer_call) — always group into logical turns before logging or replaying
+  - Extract grouping logic as a testable module-level function (`group_step_output`) rather than inline in the agent loop — makes format correctness testable without a VM
+  - `role: "tool"` is the standard OpenAI Responses API role for tool results; never use custom roles like "toolResult"
+  - `usage.total` saves downstream code (compaction token estimation) from having to recompute it — always include it
+---
+
+## 2026-03-13 - US-OC-006: Compaction Pipeline
+- Implemented compaction pipeline in `agents/openclaw/context.py` (appended below ContextOverflowCallback):
+  - `CompactionResult` dataclass: summary, tokens_before, tokens_after, first_kept_message_index, chunks_processed
+  - `chunk_messages_by_token_share(messages, parts)` — splits by token budget, not count
+  - `chunk_messages_by_max_tokens(messages, max_tokens)` — respects per-chunk token limit with SAFETY_MARGIN
+  - `compute_adaptive_chunk_ratio(messages, context_window)` — reduces ratio for large avg message size (BASE=0.4, MIN=0.15)
+  - `serialize_messages_for_summary(messages)` — converts message dicts to readable text, strips base64 images
+  - `summarize_chunk()` — single chunk summarization via litellm.acompletion with retry (3 attempts, exponential backoff)
+  - `summarize_chunks_iterative()` — rolling summarization: each chunk gets the previous summary as context
+  - `summarize_with_fallback()` — three-tier: full → exclude oversized → static fallback
+  - `compact_messages()` — main entry point: split in half, summarize older half, return CompactionResult
+  - Identifier preservation prompt injected at every summarization call
+  - `ContextOverflowCallback.reset_after_compaction()` for clean state after compaction cycle
+- Implemented stop-compact-resume pattern in `openclaw_agent.py`:
+  - While-loop with max_compactions=3 limit around `async for result in agent.run(instruction)`
+  - When `overflow_cb.needs_compaction`: break loop → compact transcript → rebuild agent → resume
+  - `_compact_and_rebuild()` method: extract messages, run compact_messages(), persist compaction entry, rebuild ComputerAgent
+  - `_extract_messages_for_compaction()` — loads transcript entries, extracts role/content dicts
+  - `_create_compacted_instruction()` — prepends compaction summaries to task description
+  - Reactive compaction: on API overflow error, attempt one compaction + retry
+- VM test (CONTEXT_WINDOW_OVERRIDE=5000, 15 steps): compaction triggered at step 13 (86% fill), 88 messages → 3 chunks summarized, tokens reduced 9159→5821, agent continued coherently post-compaction
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py` (CompactionResult + 9 functions)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (exports)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (stop-compact-resume loop)
+  - `tests/test_openclaw_compaction.py` (new, 47 tests)
+  - `docs/plan/US-OC-006-compaction-pipeline.md` (plan doc)
+- **Learnings for future iterations:**
+  - litellm is imported lazily inside async functions — must patch `litellm.acompletion` directly (not `module.litellm`) in tests
+  - CUA's ComputerAgent.run() is opaque — stop-compact-resume is the only viable compaction pattern; cannot inject mid-run
+  - Serializing messages for summarization: strip base64 entirely, truncate tool args to 200 chars — keeps the summarization prompt compact
+  - with `only_n_most_recent_images=3`, context grows slower — need CONTEXT_WINDOW_OVERRIDE≤5000 to trigger compaction in 15-step tests
+---
+
+## 2026-03-13 - US-OC-006 (Design Review)
+- Expanded plan doc with detailed rationale for 6 dropped OpenClaw features and 3 architectural differences
+- Added Known Gaps section with 4 groups (A–D) of future work, each linking to specific code locations
+- Added PRD stories US-OC-013 through US-OC-017 for all identified gaps (budget-aware split, transcript fidelity, safety timeout, multi-stage summarization, custom_loop exploration)
+- **Files changed:**
+  - `docs/plan/US-OC-006-compaction-pipeline.md` (design rationale + Known Gaps expanded)
+  - `prd.json` (US-OC-013–017 added)
+  - `.claude/skills/onboard/SKILL.md` (planning mode: stay for user feedback before writing plan)
+- **Learnings for future iterations:**
+  - Design review is best done before coding ends — gaps caught here (budget-aware split, pairing repair, replay fidelity) would have been bugs if discovered post-implementation
+  - Group related future items by coupling (Group A: budget+pairing+replay all need each other) — this shapes priority ordering in PRD
+  - CUA's on_llm_start callback output is discarded each turn — callback-based mid-run state injection is impossible; stop-compact-resume is architecturally necessary
+---
+
+## 2026-03-15 - US-OC-007: Tool Registry and Logging Hooks
+- Extracted inline tool assembly from `openclaw_agent.py` into `build_tools(session, memory_store)` in `agents/openclaw/tools.py`
+- Extracted `get_tool_summaries(tools)` to filter BaseTool instances and return `{name: description}` dict
+- Implemented `ToolLoggingCallback(AsyncCallbackHandler)` with four hooks:
+  - `on_function_call_start`: logs tool name + truncated args (200 char limit), records start time
+  - `on_function_call_end`: logs tool name + truncated result (100 char limit) + duration in ms
+  - `on_computer_call_start`: logs action type, records start time
+  - `on_computer_call_end`: logs action type + "done" + duration
+- Wired `ToolLoggingCallback` into `openclaw_agent.py` callbacks list and threaded through `_compact_and_rebuild()` so logging persists across compaction cycles
+- Updated `openclaw/__init__.py` to export all three new symbols
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py` (new)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (exports)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (wiring + callbacks threading)
+  - `tests/test_openclaw_tools.py` (new, 19 tests — all pass)
+  - `docs/plan/US-OC-007-tool-registry-logging.md` (plan doc)
+- **Learnings for future iterations:**
+  - CUA `AsyncCallbackHandler` hooks receive the full item dict — `call_id` is the correct key for timing correlation, not `id`
+  - `ToolLoggingCallback` must be re-passed to `_compact_and_rebuild()` so it survives agent reconstruction during compaction; the `callbacks` parameter defaults to `[overflow_cb]` for backward compat
+  - `_extract_result_summary` private helper is worth testing independently — it handles the variety of result list shapes that CUA tools return
+  - Tool logging adds no latency — only print() calls, no I/O or blocking operations
+---
+
+## 2026-03-15 - US-OC-008: Agent Loop Integration (Memory Flush Wiring)
+- Added `memory_flush_at` and `memory_flush_compaction_count` fields to `SessionState` (US-OC-005a schema)
+- Added `record_memory_flush()` to `SessionManager` — sets flush timestamp and compaction count, saves state
+- Implemented `should_run_memory_flush()` — triggers when tokens exceed `(context_window - soft_threshold)` and no flush has occurred in current compaction cycle
+- Implemented `has_already_flushed_for_current_compaction()` — compares flush compaction count to current count
+- Added constants: `SILENT_REPLY_TOKEN`, `MEMORY_FLUSH_PROMPT`, `MEMORY_FLUSH_SYSTEM_PROMPT`, `DEFAULT_MEMORY_FLUSH_SOFT_THRESHOLD_TOKENS=4000`
+- Implemented `_run_memory_flush()` async method in `OpenClawAgent` — single litellm turn with `memory_write` tool schema; handles tool calls (session/task_memory writes), silent token reply, and plain text reply; non-fatal error handling prevents retry loops
+- Wired memory flush trigger in the compaction loop: checks `should_run_memory_flush()` after overflow detection, before `_compact_and_rebuild()`
+- Exported all new symbols via `openclaw/__init__.py`
+- Added 24 unit tests in `test_openclaw_session.py` covering all new functions and constants (79 total, all pass)
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py` (SessionState fields, record_memory_flush, flush functions + constants)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (exports)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (_run_memory_flush method + wiring in compaction loop)
+  - `tests/test_openclaw_session.py` (+24 tests)
+- **Learnings for future iterations:**
+  - Memory flush is wired BEFORE compaction, not after — the agent persists memories to disk while they're still in context, then compaction reduces the context window
+  - `record_memory_flush()` must be called even on failure to prevent retry loops within the same compaction cycle
+  - Soft threshold (4000 tokens) leaves a safety buffer below the hard compaction threshold (20% of context window) so flush runs reliably before compaction
+  - Single litellm turn with `max_tokens=1024, temperature=0.3` is sufficient — the model either writes memories or replies silent; no long generation needed
+  - `_run_memory_flush()` uses session-level `self.model` (same model as the main agent) so flush behavior matches the agent's capabilities
+---
+
+## 2026-03-15 - US-OC-008: Agent Loop Integration (Cross-Run Continuity)
+- Wired cross-run continuity in `openclaw_agent.py`: `get_compaction_summaries()` loaded from prior session, injected via `_create_compacted_instruction()` so agent starts each run with prior session summaries
+- Wired `build_system_prompt_report()` into agent init: called after prompt build, stored via `session_mgr.set_system_prompt_report()` for observability
+- Fixed step count accumulation: `step_offset = session_mgr.get_step_count()` before loop, steps tracked as `step_offset + step` — cumulative across runs instead of reset per run
+- Removed `self._state.step_count = 0` from `init_session()` in `session.py` — step_count now preserved across runs (matches schema intent: cumulative progress tracker)
+- Added `get_step_count()` method to `SessionManager` for reading current step count before the run starts
+- Updated `test_preserves_step_count` (renamed from `test_resets_step_count`) to assert step count survives session re-init
+- Improved `/onboard` SKILL.md: extracted plan-saving as explicit "Step 9" with verification loop — prevents plan loss when exiting planning mode
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (cross-run summaries, system prompt report, step_offset)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py` (remove step reset from init_session, add get_step_count)
+  - `tests/test_openclaw_session.py` (test_preserves_step_count, 79 tests all pass)
+  - `.claude/skills/onboard/SKILL.md` (plan-save as explicit step 9)
+  - `docs/plan/US-OC-008-agent-loop-integration.md` (plan doc)
+- **Learnings for future iterations:**
+  - Step count must be read BEFORE calling init_session() — init_session() now preserves it, but if called before get_step_count(), you'd still get the right value since it no longer resets
+  - Cross-run summaries pattern: `get_compaction_summaries()` → check not empty → call `_create_compacted_instruction()` — this is the standard way to inject prior context at run start
+  - System prompt report should be stored immediately after building instructions, before the agent loop starts — it captures the initial state, not per-step state
+  - Plan documents written in planning mode exist only in ephemeral conversation context — always write to disk before exiting planning mode or implementing
+---
+
+## 2026-03-16 - US-OC-012: Transcript Replay for Cross-Run Continuity
+- Implemented transcript replay pipeline in `agents/openclaw/session.py`:
+  - `build_replay_messages(entries)` — converts TranscriptEntry list to API message dicts; handles message, compaction (collapse to summary), and session (skip) entry types
+  - `sanitize_history(messages)` — five passes: strip base64 images, strip thinking blocks, repair orphaned tool pairs, strip stale usage keys, ensure user-first ordering
+  - `limit_history_turns(messages, limit)` — keeps last N user turns (and their associated assistant/tool responses); None/0 returns all
+  - `_sanitize_single_message` / `_repair_orphaned_tool_pairs` as private helpers
+- Wired replay into `openclaw_agent.py`:
+  - At startup: `load_history()` → `build_replay_messages()` → `sanitize_history()` → `limit_history_turns()` → re-sanitize (repairs orphans created at truncation boundary)
+  - `replay_messages + [{"role": "user", "content": instruction}]` passed as `messages` arg to `agent.run()` (CUA SDK accepts message list as old_items)
+  - After compaction: `replay_messages = []` — compacted instruction already contains prior context
+  - `max_history_turns` kwarg on `OpenClawAgent` (default: None = all turns)
+- Exported `build_replay_messages`, `sanitize_history`, `limit_history_turns` via `openclaw/__init__.py`
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py` (build_replay_messages, sanitize_history, limit_history_turns + helpers)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (exports)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (replay wiring)
+  - `tests/test_openclaw_replay.py` (new, 34 tests — all pass)
+- **Learnings for future iterations:**
+  - Re-sanitize after limit_history_turns: truncation at a turn boundary can orphan tool results (e.g., a function_call was cut but its tool_result is still present). Double-sanitization is cheap and ensures correctness.
+  - CUA's `agent.run(messages)` accepts a message list as `old_items` — prepending replay messages to the instruction is the correct way to pass prior context; no SDK changes needed.
+  - After compaction, replay_messages must be cleared — the compacted instruction already embeds prior context via `_create_compacted_instruction()`, and leaving replay_messages would double-inject it.
+  - Compaction entries in the transcript collapse all prior messages to a single summary — `firstKeptEntryId` is the anchor; without it, prepend the summary to the front.
+---
+
+## 2026-03-16 - US-OC-011 (DROPPED)
+- Story dropped: Abort/Resume Tracking is not applicable to the CUA harness.
+- OpenClaw's abort cutoff is an inbound message queue gate for external channels (Telegram, Discord) — it skips queued messages received after a `/stop` command. CUA has no inbound message queue, no `/stop` command, and no concept of mid-session abort with queued external messages.
+- US-OC-012's `limit_history_turns` already bounds transcript replay, making this story redundant.
+- **Files changed:** `.current-story` (cleared), `prd.json` (unicode normalization only; `passes: true` was already set when story was dropped)
+- **Learnings for future iterations:**
+  - When dropping a story, document the rationale in `prd.json` notes + a dedicated plan doc (`docs/plan/US-OC-011-abort-resume-dropped.md`) so future engineers understand why it was skipped without needing to re-analyze the OpenClaw source.
+  - The SID/timestamp dual-track comparison in OpenClaw is Twilio-specific (Twilio message SIDs are globally ordered). Our UUID-based transcript entries have no analogous ordering property.
+---
+
+## 2026-03-16 - US-OC-013: Budget-Aware Compaction Split
+- Replaced naive half-split in `compact_messages()` with budget-aware splitting
+  - Budget formula: `context_window * max_history_share - instructions_tokens - SUMMARIZATION_OVERHEAD_TOKENS - preserved_tokens`
+  - Iterative pruning: while kept portion exceeds budget, split kept in half and move older half to compact
+  - Overflow fallback: when all messages land in preserved (CUA-style conversations) and still exceed budget, force half into pruneable
+- Added `split_preserved_recent_turns()` — splits out last N turns (counting assistant messages, not user messages) so they are never pruned or summarized
+  - Turn counting by assistant messages works for both chat-style (alternating user/assistant) and CUA-style (1 user + N assistant/tool pairs) conversations
+  - Capped at `MAX_RECENT_TURNS_PRESERVE = 12`
+- Added `repair_tool_use_result_pairing()` — three-pass repair for orphaned tool_use/tool_result pairs at split boundaries
+  - Pass 1: collect call IDs and result IDs
+  - Pass 2: drop orphaned results (no matching call) and duplicates (same ID seen twice)
+  - Pass 3: insert synthetic error results for calls with no matching result (skips if stop_reason is "error"/"aborted")
+- Updated `_extract_messages_for_compaction()` in `openclaw_agent.py` to propagate `stop_reason` from transcript entries (needed for repair to skip synthesis on aborted turns)
+- Wired `instructions_tokens` into `compact_messages()` call in agent loop (estimated as `len(original_instructions) // 4`)
+- Added `ToolPairingRepairReport` dataclass + exports in `__init__.py`
+- 74 unit tests — all pass
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py` (budget-aware compaction, repair, recent turns split)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (new exports)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (instructions_tokens, stop_reason propagation)
+  - `tests/test_openclaw_compaction.py` (27 new tests for US-OC-013 features)
+- **Learnings for future iterations:**
+  - CUA-style conversations have 1 user message + N assistant/tool pairs. Turn counting MUST use assistant messages (not user messages) or everything is preserved and compaction never runs.
+  - Overflow fallback is necessary when preserved set itself exceeds budget — can happen in tight budget scenarios even after capping preserve_count.
+  - `repair_tool_use_result_pairing` must run on both the iteratively-pruned `to_keep` and the final `final_kept` portions — split boundaries can create orphans at each stage.
+  - `stop_reason` must be propagated from TranscriptEntry through `_extract_messages_for_compaction` — repair skips synthesis for error/aborted turns, so losing stop_reason causes spurious synthetic results.
+---
+
+## 2026-03-16 - US-OC-018: Structured Summarization Format
+- Adopted OpenClaw's actual summarization prompts from `@mariozechner/pi-coding-agent` (SUMMARIZATION_SYSTEM_PROMPT, SUMMARIZATION_PROMPT, UPDATE_SUMMARIZATION_PROMPT)
+- Replaced freeform prose prompts with structured checkpoint format: Goal, Constraints & Preferences, Progress (Done/In Progress/Blocked), Key Decisions, Next Steps, Critical Context
+- Two distinct user-turn prompts: `SUMMARIZATION_PROMPT` for initial summaries, `UPDATE_SUMMARIZATION_PROMPT` for updates with explicit rules (preserve/add/move items)
+- Added `<conversation>` and `<previous-summary>` XML tag wrapping in user messages
+- Removed `MERGE_SUMMARIES_INSTRUCTIONS` and `_merge_summaries()` — no longer needed with structured format
+- `IDENTIFIER_PRESERVATION_INSTRUCTIONS` always appended to system prompt (OpenClaw conditionally includes it via identifierPolicy — we simplify)
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py` (prompt constants, summarize_chunk update)
+  - `tests/test_openclaw_compaction.py` (new tests for structured prompts, removed symbols)
+- **Learnings for future iterations:**
+  - Recommended VM test for memory/compaction stories: `CONTEXT_WINDOW_OVERRIDE=50000 bash run_magic_tower.sh 50` — triggers 1-2 compaction cycles, exercises memory tools, replay, and structured summarization in ~7 min / ~$2
+  - Structured summaries are dramatically more useful for cross-run continuity than freeform prose — the agent can parse Goal/Progress/Next Steps sections reliably
+  - `reasoning: "high"` intentionally skipped (cost concern) — consider as a config option in a future story
+---
+
+## 2026-03-16 - US-OC-025: Fix Memory Flush Timing (Pre-Turn Check)
+- Moved memory flush check from inside the `overflow_cb.needs_compaction` block to the per-step loop — runs on every step where `overflow_cb.current_tokens` is fresh, not only when compaction triggers
+- Added `DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR = 20_000` constant (matches OpenClaw's `DEFAULT_PI_COMPACTION_RESERVE_TOKENS_FLOOR`) and updated `should_run_memory_flush()` default from 0 → 20000
+- Added `_serialize_flush_context()` and `_serialize_content_blocks()` helpers to build full conversation text for the flush model (raw CUA content blocks can't be passed to litellm due to tool_call_id pairing errors)
+- Wired conversation context into `_run_memory_flush()` user message as `<conversation>...</conversation>` wrapper — flush model now sees the entire conversation history
+- Added flush guard reset in `SessionManager.init_session()` (when reusing an existing state): clears `memory_flush_compaction_count` and `memory_flush_at` so each run gets a fresh flush opportunity; matches OpenClaw's `/new`/`/reset` behavior
+- Exported `DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR` via `openclaw/__init__.py`; updated tests and constants test
+- Updated `docs/plan/US-OC-005a-memory-flush-tracking.md` with final rationale for per-step vs pre-turn check, reserve token default alignment, and future work (ratio-based threshold for large context windows)
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (flush moved to step loop, _serialize_flush_context, _serialize_content_blocks, _run_memory_flush context injection)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py` (DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR, reserve_tokens default, flush guard reset in init_session)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (export DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR)
+  - `tests/test_openclaw_session.py` (updated threshold comments, custom_soft_threshold reserve_tokens=0, new constant test)
+  - `docs/plan/US-OC-005a-memory-flush-tracking.md` (comparison table updates, per-step check rationale, future work section)
+- **Learnings for future iterations:**
+  - CUA's `agent.run()` is opaque — token data is only fresh inside the per-step loop via `overflow_cb.current_tokens` updated by `on_llm_start`. OpenClaw can check pre-turn because it controls the agent loop directly; CUA forces per-step checking.
+  - Raw CUA content blocks (computer_call, function_call, tool_result) cannot be passed to litellm as-is — they require tool_call_id pairing. Serialize them to text first when passing to a separate model (e.g., flush or summary model).
+  - Flush guard must be reset when re-entering a session — otherwise a flush recorded in a previous run blocks the first compaction cycle of the next run. OpenClaw does this on `/new`/`/reset`; we do it in `init_session()` when reusing state.
+  - `reserve_tokens` default of 0 (US-OC-008) was a bug — with default 20K reserve, flush threshold fires at `context_window - 20K - 4K` which correctly preempts the 80% compaction threshold for typical context windows.
+---
+
+## 2026-03-16 - US-OC-022: Replay Message Format: Unnest to Responses API Items
+- Replaced `convert_to_responses_api_format(messages, model)` (OpenAI-only, role-based transformation) with `convert_to_responses_api_items(messages)` (all backends, unnesting transformation)
+- The old function only remapped content block type strings; the new function unnests each Chat Completions message into top-level Responses API items so CUA SDK loop dispatchers can handle them correctly
+- Key transformation rules implemented:
+  - User string/array messages → `{type: "message", role: "user", content: [{type: "input_text", …}]}`
+  - Assistant string messages → `{type: "message", role: "assistant", content: [{type: "output_text", …}]}`
+  - Assistant content blocks: text → flush as message item; function_call → `{type: "function_call", call_id, name, arguments}`; computer_call → `{type: "computer_call", call_id, action}`
+  - Tool messages with tool_result blocks → `{type: "function_call_output", call_id, output}` items
+- Added `_ensure_tool_adjacency()` to reorder items when memory flush messages are interleaved between a tool call and its result in the transcript
+- Added `_unnest_assistant_blocks()`, `_unnest_tool_blocks()`, `_wrap_user_content()` as private helpers
+- Removed `_is_openai_model()` and the `_RESPONSES_API_TYPE_MAP` dict — the guard was the core bug (ALL backends need this conversion)
+- Updated openclaw_agent.py: remove model arg from call, updated log message
+- Renamed in `__init__.py` exports
+- Added 15 new unit tests in `tests/test_openclaw_replay.py` (`TestConvertToResponsesApiItems` class); 49 total tests — all pass
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py` (new convert_to_responses_api_items + helpers, removed old function + helpers)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (renamed export)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (updated call, log message)
+  - `tests/test_openclaw_replay.py` (15 new tests for US-OC-022)
+- **Learnings for future iterations:**
+  - Root cause of replay failures: CUA SDK loops (anthropic.py, openai.py) dispatch on TOP-LEVEL `type` field (Responses API), not on `role` with nested content blocks. Any Chat Completions format input is silently mangled — Anthropic loop joins only `text` items and drops function_call/computer_call; tool role messages match nothing.
+  - The `_is_openai_model` guard was the core architectural mistake — it implied only OpenAI needed format conversion. ALL backends need unnesting since ALL loops use Responses API dispatch internally.
+  - `_ensure_tool_adjacency` is needed because memory flush messages (user + assistant) are logged between a tool call and its result during the same step. The Anthropic API requires tool_result immediately after tool_use — deferred flush items must move past the output.
+  - `id` → `call_id` key rename must happen at this stage (not earlier, since `sanitize_history`'s orphan repair uses the `id` key for matching).
+---
+
+## 2026-03-16 - US-OC-017: Custom Loop Architecture: Replace Stop-Compact-Resume
+- Introduced `OpenClawComputerAgent` subclass in `openclaw/agent_loop.py` that overrides `ComputerAgent.run()` with a mutable items list + in-place compaction
+- Eliminates the stop-compact-resume pattern (breaking out of the generator, rebuilding the agent, restarting) in favor of a single continuous loop where `_compact_in_place()` rewrites the items list mid-loop
+- Moved `_extract_messages_for_compaction()` from `openclaw_agent.py` into `agent_loop.py` alongside the new class
+- Removed `_compact_and_rebuild()`, `_create_compacted_instruction()`, and all `max_compactions`/`compaction_triggered`/`compaction_count` loop variables from `openclaw_agent.py` (now tracked by `OpenClawComputerAgent._compaction_count`)
+- Removed reactive overflow try/except from the outer `openclaw_agent.py` loop — reactive overflow is now handled inside `OpenClawComputerAgent.run()` via try/except around `predict_step()`
+- Removed prior-run compaction summary pre-loading at session start (cross-run continuity via `_create_compacted_instruction`) — compaction is now in-loop only
+- Memory flush hook wired through `on_memory_flush` callback to `OpenClawComputerAgent._compact_in_place()`
+- `ComputerAgent` import in `openclaw_agent.py` retained only for package validation (noqa: F401); all agent instantiation uses `OpenClawComputerAgent`
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py` (new file — OpenClawComputerAgent + _extract_messages_for_compaction)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (add OpenClawComputerAgent export)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (simplified to single-loop, removed stop-compact-resume)
+  - `tests/test_openclaw_compaction.py` (update imports, remove TestCreateCompactedInstruction tests)
+- **Learnings for future iterations:**
+  - Overriding `ComputerAgent.run()` requires replicating the full lifecycle (callbacks, tool dispatch, `_on_run_start/end`, `_handle_item`). Check `agent/agent.py:658-808` line range before changing — parent implementation may shift across versions.
+  - `items` is mutated in-place via `items.clear(); items.extend(...)` rather than reassignment, because the outer `while` loop references the same list. Clear + extend instead of `items = new_list` to avoid stale reference bugs.
+  - The stop-compact-resume pattern forced clearing `replay_messages` after compaction (the compacted instruction contained prior context). The new approach builds the compacted items list directly from transcript entries and passes them forward — no separate instruction modification needed.
+  - Removing `_create_compacted_instruction` also removes cross-run compaction pre-loading. If cross-run context continuity is needed in future, it can be injected as an initial user message in `_build_compacted_items()` rather than as a modified instruction string.
+---
+
+## 2026-03-16 - US-OC-014: Transcript Fidelity: Capture on_llm_start Messages
+- Verified our session JSONL format against OpenClaw's golden reference (`docs/openclaw_ref/openclaw_session.jsonl`)
+- Confirmed our transcript already faithfully reproduces the bidirectional message logging pattern — no code changes needed
+- Golden reference has 5 entry types (`session`, `model_change`, `thinking_level_change`, `custom`, `message`) and 3 message roles (`user`, `assistant`, `toolResult`)
+- Our format differences are CUA naming conventions (function_call/computer_call vs toolCall; `tool` role vs `toolResult` role) and CUA-specific additions (compaction entries), not missing data
+- Full API payload logging (ImageRetentionCallback-preprocessed messages) is a SEPARATE mechanism in OpenClaw (`anthropic-payload.jsonl`, only when `OPENCLAW_ANTHROPIC_PAYLOAD_LOG=true`) — NOT part of the session JSONL. The PRD description was misleading; the acceptance criteria were revised post-investigation.
+- Documented format comparison in `docs/plan/US-OC-014-transcript-fidelity.md`
+- Added Session Store Entry (real example) to `docs/openclaw-source-analysis.md` from captured `docs/openclaw_ref/openclaw_state.json`
+- **Files changed:**
+  - `docs/plan/US-OC-014-transcript-fidelity.md` (new — design doc comparing our format against OpenClaw golden reference)
+  - `docs/openclaw_ref/openclaw_session.jsonl` (new — golden reference from real OpenClaw instance)
+  - `docs/openclaw_ref/openclaw_state.json` (new — captured session store state from live OpenClaw instance)
+  - `docs/openclaw-source-analysis.md` (added Session Store Entry section with real example)
+  - `docs/judges/judge_2026-03-16_1412_US-OC-014.md` (judge audit report)
+  - No source code changes to context.py, session.py, or openclaw_agent.py
+  - `submodules/cua/libs/cua-bench/uv.lock` (updated after uv sync --reinstall)
+- **Learnings for future iterations:**
+  - OpenClaw's session JSONL is ONLY bidirectional conversation messages — NOT the preprocessed API payload. Full API payload is a separate optional debug log (`anthropic-payload.jsonl`). Do NOT try to embed API payload in the session transcript.
+  - PRD story notes/descriptions can be misleading before investigation. Always verify against golden reference before implementing.
+  - Our `_unnest_tool_blocks()` (US-OC-022) handles the toolResult vs tool role difference for replay — this is by design.
+---
+
+## 2026-03-16 - US-OC-015: Summarization Safety Timeout
+- Added `SUMMARIZATION_TIMEOUT = 120` constant to `context.py` as explicit timeout for litellm.acompletion calls
+- Added `timeout: int = SUMMARIZATION_TIMEOUT` parameter to `summarize_chunk`, `summarize_chunks_iterative`, `summarize_with_fallback`, and `compact_messages` — timeout is threaded through all callers
+- Removed `context_tokens` from `TokenUsage` (moved to `SessionState.contextTokens` as top-level field matching OpenClaw's schema — this was part of US-OC-004a work bundled here)
+- Added `contextTokens: int = 0` to `SessionState` with serialization roundtrip support
+- Updated `docs/openclaw-source-analysis.md` (removed stale Session Store Entry that referenced deleted JSON files)
+- Updated golden reference paths in `docs/plan/US-OC-014-transcript-fidelity.md` and `progress.txt` to `docs/openclaw_ref/`
+- Updated `prd.json`: added `goldenReference` field to US-OC-004a story
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py` (SUMMARIZATION_TIMEOUT constant + timeout param on 4 functions)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py` (remove context_tokens from TokenUsage; add contextTokens to SessionState)
+  - `tests/test_openclaw_compaction.py` (3 new timeout tests; import SUMMARIZATION_TIMEOUT)
+  - `tests/test_openclaw_session.py` (remove context_tokens assertions; add contextTokens to SessionState tests)
+  - `docs/openclaw-source-analysis.md` (removed stale Session Store Entry section)
+  - `docs/plan/US-OC-014-transcript-fidelity.md` (updated path references)
+  - `prd.json` (goldenReference added; passes=true for US-OC-015)
+  - `docs/openclaw_ref/` (new dir — golden reference files moved from docs/ root)
+- **Learnings for future iterations:**
+  - When OpenClaw separates contextTokens (model capacity) from TokenUsage (API usage), keep them separate too. TokenUsage tracks cumulative API calls; contextTokens is a static model-capability field on the session.
+  - `SUMMARIZATION_TIMEOUT = 120` seconds is the right default — long enough for slow LLM calls, explicit enough to prevent indefinite hangs.
+  - Timeout in litellm is passed as a simple `timeout=N` kwarg to `acompletion`. Timeouts trigger exceptions that fall through the existing three-tier fallback to a static note.
+---
+
+## 2026-03-16 - US-OC-028: Agent Loop Refactor — Clean Separation of Concerns
+- Moved memory flush logic from `OpenClawAgent._run_memory_flush()` method into standalone `run_memory_flush()` in new `openclaw/memory_flush.py` module
+- Moved `group_step_output()` and `_find_latest_screenshot()` from `openclaw_agent.py` into new `openclaw/transcript.py` module
+- Moved transcript logging per-step from `perform_task()` into `OpenClawComputerAgent._log_step_to_transcript()` (called inside `run()`)
+- Moved memory flush check from dual locations (perform_task + _memory_flush_hook closure) into single `OpenClawComputerAgent._maybe_flush_memory()` (called pre-API in `run()`)
+- `overflow_cb` is now auto-injected into callbacks by `OpenClawComputerAgent.__init__()` — no longer passed twice
+- `perform_task()` async for loop body reduced to ~15 lines (usage tracking, max_steps check, tracer, DONE check)
+- Added `_record_tracer_step()` and `_check_done()` as standalone helpers at module level in `openclaw_agent.py`
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/memory_flush.py` (new — extracted from openclaw_agent.py)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/transcript.py` (new — extracted from openclaw_agent.py)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py` (added _maybe_flush_memory, _log_step_to_transcript, removed on_memory_flush hook, overflow_cb auto-inject)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (export run_memory_flush, group_step_output)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (removed ~350 lines, reduced loop body, added _record_tracer_step/_check_done)
+  - `prd.json` (passes=true for US-OC-028)
+- **Learnings for future iterations:**
+  - Moving logic INTO the agent loop (pre-API vs per-step-in-caller) is cleaner: avoids dual call sites and closure variable capture. Match OpenClaw's single-call-site pattern (runMemoryFlushIfNeeded before runAgentTurnWithFallback in agent-runner-memory.ts).
+  - Auto-injecting callbacks in the constructor (instead of the caller passing them) eliminates an entire category of wiring bugs. The agent owns its own dependencies.
+  - Extracting agent methods to standalone module-level functions improves testability — no class instantiation needed to test the logic.
+  - When multiple files import from each other (agent_loop imports from openclaw_agent), moving shared code into a third module (transcript.py, memory_flush.py) is the clean solution.
+---
+
+## 2026-03-16 - US-OC-028 (ship cleanup)
+- Fixed broken test imports after transcript.py refactor: test_openclaw_transcript_format.py imported `_find_latest_screenshot` and `group_step_output` from `openclaw_agent` (removed), updated to `openclaw.transcript`
+- Fixed test_openclaw_agent_prompt.py: after US-OC-028 refactor, `perform_task()` instantiates `OpenClawComputerAgent` directly (not base `ComputerAgent`); updated mock target from `agent.ComputerAgent` to `cua_bench.agents.openclaw.OpenClawComputerAgent`
+- Added PRD stories US-OC-029 through US-OC-032 (tool backlog and cross-model compatibility)
+- Added docs/judges/judge_2026-03-16_1821_US-OC-028.md and review doc
+- Added docs/rationale-openclaw-python-port.md (design rationale doc)
+- Files changed: tests/test_openclaw_transcript_format.py, tests/test_openclaw_agent_prompt.py, prd.json, progress.txt
+- **Learnings for future iterations:**
+  - When moving functions between modules (e.g., openclaw_agent.py → openclaw/transcript.py), also update all test files that import those functions — easy to miss.
+  - Patch the module where the name is **resolved at call time**, not where it's defined. For local imports inside function bodies (`from .openclaw import OpenClawComputerAgent`), patch the exporting package (`cua_bench.agents.openclaw.OpenClawComputerAgent`).
+---
