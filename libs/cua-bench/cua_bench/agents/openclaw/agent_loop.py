@@ -4,7 +4,7 @@ Overrides run() to manage a mutable message list, enabling in-place compaction
 without agent rebuild. Mirrors OpenClaw's session.agent.replaceMessages() pattern
 adapted for CUA's ComputerAgent lifecycle.
 
-Design rationale (US-OC-017):
+Design rationale (US-OC-017, US-OC-028):
   - OpenClaw compacts via replaceMessages() within a persistent session — messages
     are swapped in-place while the agent loop continues.
   - CUA's ComputerAgent.run() uses immutable old_items + new_items lists, requiring
@@ -13,10 +13,17 @@ Design rationale (US-OC-017):
     When overflow_cb.needs_compaction triggers, _compact_in_place() rewrites the list
     and the loop continues — no agent rebuild needed.
 
+US-OC-028 refactoring:
+  - Memory flush is called pre-API (before predict_step) via _maybe_flush_memory(),
+    matching OpenClaw's runMemoryFlushIfNeeded pattern in agent-runner-memory.ts.
+  - Transcript logging moved into run() via _log_step_to_transcript().
+  - overflow_cb auto-injected into callbacks.
+
 Reference:
   - agent/agent.py:658-808 — parent run() lifecycle
   - openclaw/src/agents/pi-embedded-runner/compact.ts — OpenClaw compaction orchestration
   - openclaw/src/agents/compaction.ts — chunk splitting, summarization
+  - openclaw/src/auto-reply/reply/agent-runner-memory.ts — memory flush pattern
 """
 
 from __future__ import annotations
@@ -29,7 +36,14 @@ from litellm.responses.utils import Usage
 
 from .context import ContextOverflowCallback, compact_messages, is_context_overflow_error
 from .memory import MemoryStore
-from .session import SessionManager
+from .memory_flush import run_memory_flush
+from .session import (
+    MEMORY_FLUSH_PROMPT,
+    MEMORY_FLUSH_SYSTEM_PROMPT,
+    SILENT_REPLY_TOKEN,
+    SessionManager,
+    should_run_memory_flush,
+)
 
 
 class OpenClawComputerAgent(ComputerAgent):
@@ -38,6 +52,10 @@ class OpenClawComputerAgent(ComputerAgent):
     Overrides run() to manage a mutable message list, enabling in-place
     compaction without agent rebuild. Mirrors OpenClaw's session.agent.replaceMessages()
     pattern adapted for CUA.
+
+    Memory flush runs pre-API (before predict_step) via _maybe_flush_memory(),
+    matching OpenClaw's single-call-site pattern (runMemoryFlushIfNeeded before
+    runAgentTurnWithFallback).
     """
 
     def __init__(
@@ -49,9 +67,14 @@ class OpenClawComputerAgent(ComputerAgent):
         summary_model: str,
         max_compactions: int = 3,
         on_compaction: Callable | None = None,
-        on_memory_flush: Callable | None = None,
         **kwargs,  # Pass through to ComputerAgent
     ):
+        # Auto-inject overflow_cb into callbacks (US-OC-028)
+        callbacks = kwargs.get("callbacks", []) or []
+        if overflow_cb not in callbacks:
+            callbacks = [overflow_cb] + list(callbacks)
+        kwargs["callbacks"] = callbacks
+
         super().__init__(**kwargs)
         self.overflow_cb = overflow_cb
         self.session_mgr = session_mgr
@@ -60,7 +83,6 @@ class OpenClawComputerAgent(ComputerAgent):
         self.max_compactions = max_compactions
         self._compaction_count = 0
         self._on_compaction = on_compaction
-        self._on_memory_flush = on_memory_flush
 
     @property
     def compaction_count(self) -> int:
@@ -81,8 +103,15 @@ class OpenClawComputerAgent(ComputerAgent):
         but manages items in a mutable list. When overflow_cb.needs_compaction
         triggers, compacts messages in-place and continues — no agent rebuild.
 
-        Skips agent_config_info check since we always have a valid agent loop
-        (inherited from ComputerAgent.__init__).
+        Per-step flow (US-OC-028):
+          should_continue check
+          preprocessed = _on_llm_start()  <- updates current_tokens
+          _maybe_flush_memory()            <- PRE-API: uses fresh current_tokens
+          predict_step()                   <- API call
+          yield result
+          _log_step_to_transcript()        <- transcript logging
+          _handle_item()
+          compaction check
         """
         # Same initialization as parent run()
         if not self.agent_config_info:
@@ -126,6 +155,11 @@ class OpenClawComputerAgent(ComputerAgent):
             combined = replace_failed_computer_calls_with_function_calls(combined)
             preprocessed = await self._on_llm_start(combined)
 
+            # PRE-API memory flush (US-OC-028) — runs after _on_llm_start updates
+            # current_tokens, before predict_step. Matches OpenClaw's single call
+            # site: runMemoryFlushIfNeeded before runAgentTurnWithFallback.
+            await self._maybe_flush_memory()
+
             loop_kwargs = {
                 "messages": preprocessed,
                 "model": self.model,
@@ -165,6 +199,9 @@ class OpenClawComputerAgent(ComputerAgent):
 
             yield result
 
+            # Log step to transcript (US-OC-028 — moved from perform_task)
+            self._log_step_to_transcript(result)
+
             new_items += result.get("output", [])
             output_call_ids = get_output_call_ids(result.get("output", []))
 
@@ -196,6 +233,66 @@ class OpenClawComputerAgent(ComputerAgent):
 
         await self._on_run_end(loop_kwargs, items, new_items)
 
+    async def _maybe_flush_memory(self) -> None:
+        """Run memory flush if token threshold is exceeded.
+
+        Single call site for memory flush — called pre-API in run().
+        Matches OpenClaw's runMemoryFlushIfNeeded pattern.
+        """
+        if self.session_mgr._state is None:
+            return
+        if not should_run_memory_flush(
+            self.session_mgr._state,
+            current_tokens=self.overflow_cb.current_tokens,
+            context_window=self.overflow_cb.context_window,
+        ):
+            return
+        await run_memory_flush(
+            summary_model=self.summary_model,
+            session_mgr=self.session_mgr,
+            memory_store=self.memory_store,
+            flush_prompt=MEMORY_FLUSH_PROMPT,
+            flush_system_prompt=MEMORY_FLUSH_SYSTEM_PROMPT,
+            silent_token=SILENT_REPLY_TOKEN,
+        )
+
+    def _log_step_to_transcript(self, result: Dict[str, Any]) -> None:
+        """Log a step's output to the session transcript.
+
+        Groups output into assistant/tool turns and appends to transcript.
+        Moved from perform_task() to run() (US-OC-028).
+        """
+        from .transcript import group_step_output
+
+        step_input = result["usage"].get("input_tokens", 0)
+        step_output = result["usage"].get("output_tokens", 0)
+
+        assistant_content, tool_results = group_step_output(
+            result["output"], self.trajectory_dir
+        )
+
+        if assistant_content:
+            has_tools = any(
+                b["type"] in ("function_call", "computer_call")
+                for b in assistant_content
+            )
+            usage = {
+                "input": step_input,
+                "output": step_output,
+                "total": step_input + step_output,
+                "cost": result["usage"].get("response_cost", 0),
+            }
+            self.session_mgr.append_message(
+                "assistant",
+                assistant_content,
+                usage=usage,
+                stop_reason=result.get("stop_reason") or ("tool_use" if has_tools else None),
+                api="openai-responses",
+            )
+
+        if tool_results:
+            self.session_mgr.append_message("tool", tool_results)
+
     async def _compact_in_place(
         self,
         items: List[Dict[str, Any]],
@@ -205,12 +302,19 @@ class OpenClawComputerAgent(ComputerAgent):
 
         Modifies items/new_items to contain only the compaction summary
         + kept messages. Persists compaction entry to session transcript.
-        """
-        # 1. Memory flush if needed
-        if self._on_memory_flush:
-            await self._on_memory_flush()
 
-        # 2. Extract messages from transcript and run compaction pipeline
+        Memory flush runs pre-API via _maybe_flush_memory(), not here.
+        If compaction fires without a prior flush, log a warning (edge case
+        where token estimation missed the threshold).
+        """
+        # Warn if no flush preceded this compaction (token estimation edge case)
+        from .session import has_already_flushed_for_current_compaction
+        if self.session_mgr._state is not None and not has_already_flushed_for_current_compaction(
+            self.session_mgr._state
+        ):
+            print("[Compaction] Warning: compaction running without prior memory flush")
+
+        # Extract messages from transcript and run compaction pipeline
         all_messages = _extract_messages_for_compaction(self.session_mgr)
         compaction_result = await compact_messages(
             all_messages,
@@ -219,7 +323,7 @@ class OpenClawComputerAgent(ComputerAgent):
             instructions_tokens=len(self.instructions or "") // 4,
         )
 
-        # 3. Persist compaction entry with firstKeptEntryId
+        # Persist compaction entry with firstKeptEntryId
         history = self.session_mgr.load_history()
         msg_entries = [e for e in history if e.type == "message"]
         if compaction_result.first_kept_message_index < len(msg_entries):
@@ -233,9 +337,7 @@ class OpenClawComputerAgent(ComputerAgent):
             compaction_result.tokens_before,
         )
 
-        # 4. Rebuild items from compacted state
-        # The summary becomes a user message (context), kept messages follow.
-        # This matches what build_replay_messages() would produce for a resumed session.
+        # Rebuild items from compacted state
         kept_messages = all_messages[compaction_result.first_kept_message_index:]
         compacted_items = self._build_compacted_items(
             compaction_result.summary, kept_messages
@@ -244,7 +346,7 @@ class OpenClawComputerAgent(ComputerAgent):
         items.extend(compacted_items)
         new_items.clear()
 
-        # 5. Reset and track
+        # Reset and track
         self.overflow_cb.reset_after_compaction()
         self._compaction_count += 1
 
@@ -253,7 +355,7 @@ class OpenClawComputerAgent(ComputerAgent):
 
         print(
             f"[Compaction] In-place compaction #{self._compaction_count} complete "
-            f"({compaction_result.tokens_before}→~{len(compacted_items)} items)"
+            f"({compaction_result.tokens_before}->~{len(compacted_items)} items)"
         )
 
     def _build_compacted_items(

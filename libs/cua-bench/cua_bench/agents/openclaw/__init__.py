@@ -16,6 +16,7 @@ Components:
   - split_preserved_recent_turns: recent turns preservation (US-OC-013)
   - build_tools / get_tool_summaries / ToolLoggingCallback: tool registry & logging (US-OC-007)
   - build_replay_messages / sanitize_history / limit_history_turns: transcript replay (US-OC-012)
+  - run_memory_flush: standalone memory flush module (US-OC-028)
 """
 
 from .agent_loop import OpenClawComputerAgent
@@ -35,6 +36,7 @@ from .memory import (
     MemoryWriteTool,
     SearchResult,
 )
+from .memory_flush import run_memory_flush
 from .prompt import ContextFile, PromptBuilder, PromptConfig, SectionConfig
 from .session import (
     DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR,
@@ -54,6 +56,7 @@ from .session import (
     should_run_memory_flush,
 )
 from .tools import ToolLoggingCallback, build_tools, get_tool_summaries
+from .transcript import group_step_output
 
 __all__ = [
     "OpenClawComputerAgent",
@@ -86,9 +89,11 @@ __all__ = [
     "has_already_flushed_for_current_compaction",
     "is_context_overflow_error",
     "repair_tool_use_result_pairing",
+    "run_memory_flush",
     "split_preserved_recent_turns",
     "MEMORY_FLUSH_PROMPT",
     "MEMORY_FLUSH_SYSTEM_PROMPT",
     "SILENT_REPLY_TOKEN",
     "should_run_memory_flush",
+    "group_step_output",
 ]

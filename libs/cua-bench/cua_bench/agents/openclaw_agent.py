@@ -24,84 +24,6 @@ from . import register_agent
 from .base import AgentResult, BaseAgent, FailureMode
 
 
-def _find_latest_screenshot(trajectory_dir: Path | None) -> str:
-    """Find the most recently saved screenshot_after.png in trajectory_dir.
-
-    TrajectorySaverCallback saves one *_screenshot_after.png per computer action
-    into trajectories/<trajectory_id>/turn_NNN/. The newest file corresponds to
-    the action just completed.
-
-    Returns the absolute path string, or "image:trajectory" if not found.
-    """
-    if not trajectory_dir or not trajectory_dir.exists():
-        return "image:trajectory"
-    screenshots = list(trajectory_dir.rglob("*_screenshot_after.png"))
-    if not screenshots:
-        return "image:trajectory"
-    return str(max(screenshots, key=lambda p: p.stat().st_mtime))
-
-
-def group_step_output(
-    output_items: list[dict[str, Any]],
-    trajectory_dir: Path | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Group a step's output items into assistant content blocks and tool results.
-
-    CUA SDK yields multiple output items per step (text, function_call,
-    computer_call, their outputs). This function batches them into two lists:
-    - assistant_content: text + function_call + computer_call blocks (one assistant turn)
-    - tool_results: function_call_output + computer_call_output blocks (one tool turn)
-
-    Args:
-        output_items: The result["output"] list from a CUA agent step.
-        trajectory_dir: Path to trajectory directory for screenshot resolution.
-
-    Returns:
-        (assistant_content, tool_results) tuple of content block lists.
-    """
-    assistant_content: list[dict[str, Any]] = []
-    tool_results: list[dict[str, Any]] = []
-
-    for item in output_items:
-        item_type = item.get("type")
-        if item_type == "message":
-            for block in item.get("content", []):
-                if block.get("text"):
-                    assistant_content.append({"type": "text", "text": block["text"]})
-        elif item_type == "function_call":
-            assistant_content.append({
-                "type": "function_call",
-                "id": item.get("call_id", ""),
-                "name": item.get("name", ""),
-                "arguments": item.get("arguments", ""),
-            })
-        elif item_type == "computer_call":
-            assistant_content.append({
-                "type": "computer_call",
-                "id": item.get("call_id", ""),
-                "action": item.get("action", {}),
-            })
-        elif item_type == "function_call_output":
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": item.get("call_id", ""),
-                "content": item.get("output", ""),
-            })
-        elif item_type == "computer_call_output":
-            output = item.get("output", {})
-            call_id = item.get("call_id", "")
-            if isinstance(output, dict) and output.get("type") == "input_image":
-                content_str = _find_latest_screenshot(trajectory_dir)
-            else:
-                content_str = str(output)[:500]
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": call_id,
-                "content": content_str,
-            })
-
-    return assistant_content, tool_results
-
 if TYPE_CHECKING:
     from ..computers import DesktopSession
 
@@ -163,9 +85,6 @@ class OpenClawAgent(BaseAgent):
 
         # Build structured system prompt via PromptBuilder (US-OC-001)
         from .openclaw import (
-            MEMORY_FLUSH_PROMPT,
-            MEMORY_FLUSH_SYSTEM_PROMPT,
-            SILENT_REPLY_TOKEN,
             ContextFile,
             ContextOverflowCallback,
             MemoryStore,
@@ -180,7 +99,6 @@ class OpenClawAgent(BaseAgent):
             get_tool_summaries,
             limit_history_turns,
             sanitize_history,
-            should_run_memory_flush,
         )
 
         # Initialize memory store (US-OC-002)
@@ -255,22 +173,8 @@ class OpenClawAgent(BaseAgent):
             session_mgr._state.contextTokens = overflow_cb.context_window
             session_mgr.save_state()
 
-        # Memory flush callback — wired into OpenClawComputerAgent's on_memory_flush hook
-        async def _memory_flush_hook():
-            if session_mgr._state is not None and should_run_memory_flush(
-                session_mgr._state,
-                current_tokens=overflow_cb.current_tokens,
-                context_window=overflow_cb.context_window,
-            ):
-                await self._run_memory_flush(
-                    session_mgr=session_mgr,
-                    memory_store=memory_store,
-                    flush_prompt=MEMORY_FLUSH_PROMPT,
-                    flush_system_prompt=MEMORY_FLUSH_SYSTEM_PROMPT,
-                    silent_token=SILENT_REPLY_TOKEN,
-                )
-
         # Create OpenClawComputerAgent with mid-loop compaction support (US-OC-017)
+        # overflow_cb is auto-injected into callbacks by OpenClawComputerAgent (US-OC-028)
         tool_logging_cb = ToolLoggingCallback()
         agent = OpenClawComputerAgent(
             # ComputerAgent params
@@ -279,13 +183,12 @@ class OpenClawAgent(BaseAgent):
             only_n_most_recent_images=3,
             trajectory_dir=trajectory_dir,
             instructions=instructions,
-            callbacks=[overflow_cb, tool_logging_cb],
+            callbacks=[tool_logging_cb],
             # OpenClaw compaction params
             overflow_cb=overflow_cb,
             session_mgr=session_mgr,
             memory_store=memory_store,
             summary_model=self.summary_model,
-            on_memory_flush=_memory_flush_hook,
         )
         print("OpenClaw Agent initialized with model:", self.model)
         if self.summary_model != self.model:
@@ -317,93 +220,28 @@ class OpenClawAgent(BaseAgent):
             )
 
             async for result in agent.run(run_input):
-                sys.stdout.flush()  # Flush output
-
+                sys.stdout.flush()
                 step += 1
                 for k in total_usage:
                     total_usage[k] += result["usage"].get(k, 0)
 
-                # Session persistence: track step, tokens, and log messages (US-OC-004)
+                # Session persistence tracking (US-OC-004)
                 step_input = result["usage"].get("input_tokens", 0)
                 step_output = result["usage"].get("output_tokens", 0)
                 session_mgr.update_step_count(step_offset + step)
                 session_mgr.update_tokens(step_input, step_output)
 
-                # Group step output into logical turns and log to transcript
-                assistant_content, tool_results = group_step_output(
-                    result["output"], trajectory_dir
-                )
-
-                if assistant_content:
-                    has_tools = any(
-                        b["type"] in ("function_call", "computer_call")
-                        for b in assistant_content
-                    )
-                    usage = {
-                        "input": step_input,
-                        "output": step_output,
-                        "total": step_input + step_output,
-                        "cost": result["usage"].get("response_cost", 0),
-                    }
-                    session_mgr.append_message(
-                        "assistant",
-                        assistant_content,
-                        usage=usage,
-                        stop_reason=result.get("stop_reason") or ("tool_use" if has_tools else None),
-                        api="openai-responses",
-                    )
-
-                if tool_results:
-                    session_mgr.append_message("tool", tool_results)
-
-                # Record agent step to tracer
+                # Tracer recording (optional)
                 if tracer:
-                    try:
-                        screenshot = await session.screenshot()
-                        tracer.record(
-                            "agent_step",
-                            {
-                                "step": step,
-                                "agent": self.name(),
-                                "model": self.model,
-                                "usage": result["usage"],
-                                "output": result["output"],
-                            },
-                            [screenshot],
-                        )
-                    except Exception as e:
-                        print(f"Warning: Failed to record agent step to tracer: {e}")
+                    await _record_tracer_step(tracer, session, step, self.model, result)
 
-                # --- Per-step memory flush check (US-OC-025) ---
-                # Check every step where we have fresh token data from on_llm_start.
-                # Flush fires once per compaction cycle when tokens exceed threshold.
-                if session_mgr._state is not None and should_run_memory_flush(
-                    session_mgr._state,
-                    current_tokens=overflow_cb.current_tokens,
-                    context_window=overflow_cb.context_window,
-                ):
-                    await self._run_memory_flush(
-                        session_mgr=session_mgr,
-                        memory_store=memory_store,
-                        flush_prompt=MEMORY_FLUSH_PROMPT,
-                        flush_system_prompt=MEMORY_FLUSH_SYSTEM_PROMPT,
-                        silent_token=SILENT_REPLY_TOKEN,
-                    )
-
-                # Check if we've reached max_steps
                 if step >= self.max_steps:
                     print(f"\n[Max steps reached] Stopped at step {step}/{self.max_steps}")
                     break
 
-                # Check if task is completed (agent returned done or similar)
-                for item in result["output"]:
-                    if item["type"] == "message":
-                        if "DONE" in item["content"][0]["text"]:
-                            print(f"\n[Task completed] Agent indicated completion at step {step}")
-                            task_completed = True
-                            break
-
+                task_completed = _check_done(result)
                 if task_completed:
+                    print(f"\n[Task completed] Agent indicated completion at step {step}")
                     break
 
             print(f"\nTotal usage: {total_usage}")
@@ -435,185 +273,31 @@ class OpenClawAgent(BaseAgent):
                 failure_mode=FailureMode.UNKNOWN,
             )
 
-    async def _run_memory_flush(
-        self,
-        *,
-        session_mgr,
-        memory_store,
-        flush_prompt: str,
-        flush_system_prompt: str,
-        silent_token: str,
-    ) -> None:
-        """Run a pre-compaction memory flush turn via litellm.
 
-        Gives the model a single turn to persist durable memories before context
-        is compacted. The model can call the memory_write tool to store memories,
-        or reply with the silent token if nothing to persist.
 
-        Based on OpenClaw's memory flush mechanism
-        (openclaw/src/auto-reply/reply/memory-flush.ts).
-        """
-        import json as _json
-
-        import litellm
-
-        # Build memory_write tool schema for litellm
-        memory_write_tool = {
-            "type": "function",
-            "function": {
-                "name": "memory_write",
-                "description": (
-                    "Write content to task memory. "
-                    "Use target='session' to append to the session log."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "content": {
-                            "type": "string",
-                            "description": "The text content to write.",
-                        },
-                        "target": {
-                            "type": "string",
-                            "enum": ["session", "task_memory"],
-                            "description": "Where to write: 'session' (append) or 'task_memory' (overwrite).",
-                        },
-                    },
-                    "required": ["content"],
-                },
+async def _record_tracer_step(tracer, session, step: int, model: str, result: dict) -> None:
+    """Record an agent step to the tracer (optional observability)."""
+    try:
+        screenshot = await session.screenshot()
+        tracer.record(
+            "agent_step",
+            {
+                "step": step,
+                "agent": "openclaw-agent",
+                "model": model,
+                "usage": result["usage"],
+                "output": result["output"],
             },
-        }
-
-        # Build context from transcript so the model knows what to flush.
-        conversation_text = _serialize_flush_context(session_mgr)
-
-        flush_user_content = (
-            f"<conversation>\n{conversation_text}\n</conversation>\n\n{flush_prompt}"
-            if conversation_text
-            else flush_prompt
+            [screenshot],
         )
-
-        messages = [
-            {"role": "system", "content": flush_system_prompt},
-            {"role": "user", "content": flush_user_content},
-        ]
-
-        print(f"[MemoryFlush] Running pre-compaction memory flush turn ({len(conversation_text)} chars context)")
-        try:
-            response = await litellm.acompletion(
-                model=self.summary_model,
-                messages=messages,
-                tools=[memory_write_tool],
-                max_tokens=1024,
-                temperature=0.3,
-            )
-
-            choice = response.choices[0]
-            reply_content = choice.message.content or ""
-
-            # Handle tool calls — the model may call memory_write
-            if choice.message.tool_calls:
-                for tool_call in choice.message.tool_calls:
-                    if tool_call.function.name == "memory_write":
-                        try:
-                            args = _json.loads(tool_call.function.arguments)
-                            content = args.get("content", "")
-                            target = args.get("target", "session")
-                            if content.strip():
-                                if target == "task_memory":
-                                    memory_store.write_task_memory(content)
-                                    print(f"[MemoryFlush] Wrote {len(content)} chars to TASK_MEMORY.md")
-                                else:
-                                    memory_store.append_to_session_log(content)
-                                    print(f"[MemoryFlush] Appended {len(content)} chars to session log")
-                        except (_json.JSONDecodeError, Exception) as e:
-                            print(f"[MemoryFlush] Tool call failed: {e}")
-
-                # Log flush turn to transcript
-                session_mgr.append_message("user", flush_prompt)
-                session_mgr.append_message("assistant", reply_content or "[memory flush — tool calls executed]")
-            elif silent_token in reply_content:
-                print("[MemoryFlush] Model replied silent — nothing to persist")
-                session_mgr.append_message("user", flush_prompt)
-                session_mgr.append_message("assistant", reply_content)
-            else:
-                # Model replied with text but no tool calls
-                print(f"[MemoryFlush] Model replied: {reply_content[:100]}")
-                session_mgr.append_message("user", flush_prompt)
-                session_mgr.append_message("assistant", reply_content)
-
-            session_mgr.record_memory_flush()
-            print("[MemoryFlush] Flush recorded")
-
-        except Exception as e:
-            print(f"[MemoryFlush] Failed (non-fatal): {e}")
-            # Record flush even on failure to prevent retry loops
-            session_mgr.record_memory_flush()
+    except Exception as e:
+        print(f"Warning: Failed to record agent step to tracer: {e}")
 
 
-def _serialize_flush_context(session_mgr) -> str:
-    """Serialize full transcript into a text summary for the flush model.
-
-    OpenClaw loads the full session file so the flush agent sees the entire
-    conversation (agent-runner-memory.ts → runEmbeddedPiAgent → SessionManager.open).
-    We can't pass raw transcript messages to litellm because they contain CUA-format
-    content blocks (computer_call, function_call, tool_result) that require tool_call_id
-    pairing. Instead, serialize the entire conversation as text so the flush model can
-    read it without format constraints.
-    """
-    history = session_mgr.load_history()
-    parts: list[str] = []
-    for entry in history:
-        if entry.type != "message":
-            continue
-        msg_data = entry.data.get("message", {})
-        role = msg_data.get("role", "unknown")
-        content = msg_data.get("content", "")
-        block_texts = _serialize_content_blocks(content)
-        if block_texts:
-            parts.append(f"[{role}] {block_texts}")
-    return "\n".join(parts)
-
-
-def _serialize_content_blocks(content: Any) -> str:
-    """Convert content (string or list of content blocks) to a text representation."""
-    if isinstance(content, str):
-        return content.strip()
-    if not isinstance(content, list):
-        return str(content).strip()
-
-    parts: list[str] = []
-    for block in content:
-        if isinstance(block, str):
-            parts.append(block)
-        elif not isinstance(block, dict):
-            continue
-        elif block.get("type") == "text":
-            parts.append(block.get("text", ""))
-        elif block.get("type") == "computer_call":
-            action = block.get("action", {})
-            action_type = action.get("type", "unknown")
-            detail = ""
-            if action_type == "click":
-                detail = f" at ({action.get('x')}, {action.get('y')})"
-            elif action_type == "keypress":
-                detail = f" {action.get('keys', [])}"
-            elif action_type == "type":
-                detail = f" \"{action.get('text', '')}\""
-            elif action_type == "scroll":
-                detail = f" ({action.get('x')}, {action.get('y')}) delta=({action.get('scroll_x', 0)}, {action.get('scroll_y', 0)})"
-            parts.append(f"[action: {action_type}{detail}]")
-        elif block.get("type") == "function_call":
-            name = block.get("name", "unknown")
-            args = block.get("arguments", "")
-            if isinstance(args, str) and len(args) > 200:
-                args = args[:200] + "..."
-            parts.append(f"[tool_call: {name}({args})]")
-        elif block.get("type") == "tool_result":
-            result_content = block.get("content", "")
-            if isinstance(result_content, str) and len(result_content) > 200:
-                result_content = result_content[:200] + "..."
-            parts.append(f"[tool_result: {result_content}]")
-        else:
-            parts.append(f"[{block.get('type', 'unknown')}]")
-    return " ".join(parts).strip()
+def _check_done(result: dict) -> bool:
+    """Check if the agent indicated task completion (DONE signal)."""
+    for item in result["output"]:
+        if item["type"] == "message":
+            if "DONE" in item["content"][0]["text"]:
+                return True
+    return False
