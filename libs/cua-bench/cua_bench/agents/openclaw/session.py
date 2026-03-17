@@ -30,13 +30,15 @@ class TokenUsage:
 
     Uses input_tokens/output_tokens naming to match CUA SDK (OpenAI Responses API format).
     Cache token fields track Anthropic prompt caching usage.
+
+    Note: context window size (model capacity) is stored on SessionState.context_tokens,
+    NOT here. This class tracks cumulative API usage only.
     """
 
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read: int = 0
     cache_write: int = 0
-    context_tokens: int = 0
 
     def accumulate(
         self,
@@ -45,13 +47,11 @@ class TokenUsage:
         *,
         cache_read: int = 0,
         cache_write: int = 0,
-        context_tokens: int = 0,
     ) -> None:
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
         self.cache_read += cache_read
         self.cache_write += cache_write
-        self.context_tokens += context_tokens
 
     def to_dict(self) -> dict[str, int]:
         return {
@@ -59,7 +59,6 @@ class TokenUsage:
             "output_tokens": self.output_tokens,
             "cache_read": self.cache_read,
             "cache_write": self.cache_write,
-            "context_tokens": self.context_tokens,
         }
 
     @classmethod
@@ -69,7 +68,6 @@ class TokenUsage:
             output_tokens=data.get("output_tokens", 0),
             cache_read=data.get("cache_read", 0),
             cache_write=data.get("cache_write", 0),
-            context_tokens=data.get("context_tokens", 0),
         )
 
 
@@ -86,6 +84,7 @@ class SessionState:
     compaction_count: int = 0
     compaction_summaries: list[str] = field(default_factory=list)
     model: str = ""
+    contextTokens: int = 0  # Context window size (model capacity), NOT usage. Matches OpenClaw's top-level contextTokens.
     system_prompt_report: dict[str, Any] | None = None
     memory_flush_at: str | None = None
     memory_flush_compaction_count: int | None = None
@@ -100,6 +99,7 @@ class SessionState:
             "compaction_count": self.compaction_count,
             "compaction_summaries": self.compaction_summaries,
             "model": self.model,
+            "contextTokens": self.contextTokens,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -121,6 +121,7 @@ class SessionState:
             compaction_count=data.get("compaction_count", 0),
             compaction_summaries=list(data.get("compaction_summaries", [])),
             model=data.get("model", ""),
+            contextTokens=data.get("contextTokens", 0),
             system_prompt_report=data.get("system_prompt_report"),
             memory_flush_at=data.get("memory_flush_at"),
             memory_flush_compaction_count=data.get("memory_flush_compaction_count"),

@@ -373,6 +373,9 @@ DEFAULT_SUMMARY_FALLBACK = "No prior history."
 MAX_SUMMARIZATION_RETRIES = 3
 """Number of retry attempts for LLM summarization calls."""
 
+SUMMARIZATION_TIMEOUT = 120
+"""Timeout in seconds for each litellm.acompletion summarization call."""
+
 # ---------------------------------------------------------------------------
 # Compaction prompts (from OpenClaw compaction.ts)
 # ---------------------------------------------------------------------------
@@ -856,6 +859,7 @@ async def summarize_chunk(
     *,
     previous_summary: str | None = None,
     custom_instructions: str | None = None,
+    timeout: int = SUMMARIZATION_TIMEOUT,
 ) -> str:
     """Summarize a chunk of messages via litellm.acompletion.
 
@@ -898,6 +902,7 @@ async def summarize_chunk(
                 messages=llm_messages,
                 max_tokens=2048,
                 temperature=0.3,
+                timeout=timeout,
             )
             content = response.choices[0].message.content
             return content.strip() if content else DEFAULT_SUMMARY_FALLBACK
@@ -917,6 +922,7 @@ async def summarize_chunks_iterative(
     model: str,
     *,
     custom_instructions: str | None = None,
+    timeout: int = SUMMARIZATION_TIMEOUT,
 ) -> str:
     """Iteratively summarize chunks, feeding each summary as context to the next.
 
@@ -933,6 +939,7 @@ async def summarize_chunks_iterative(
             model,
             previous_summary=summary,
             custom_instructions=custom_instructions,
+            timeout=timeout,
         )
 
     return summary or DEFAULT_SUMMARY_FALLBACK
@@ -950,6 +957,7 @@ async def summarize_with_fallback(
     max_chunk_tokens: int,
     *,
     custom_instructions: str | None = None,
+    timeout: int = SUMMARIZATION_TIMEOUT,
 ) -> str:
     """Three-tier summarization with progressive fallback.
 
@@ -962,7 +970,8 @@ async def summarize_with_fallback(
         chunks = chunk_messages_by_max_tokens(messages, max_chunk_tokens)
         if chunks:
             return await summarize_chunks_iterative(
-                chunks, model, custom_instructions=custom_instructions
+                chunks, model, custom_instructions=custom_instructions,
+                timeout=timeout,
             )
     except Exception as e:
         print(f"[Compaction] Tier 1 (full) failed: {e}")
@@ -975,7 +984,8 @@ async def summarize_with_fallback(
             chunks = chunk_messages_by_max_tokens(filtered, max_chunk_tokens)
             if chunks:
                 summary = await summarize_chunks_iterative(
-                    chunks, model, custom_instructions=custom_instructions
+                    chunks, model, custom_instructions=custom_instructions,
+                    timeout=timeout,
                 )
                 if oversized_count > 0:
                     summary += f"\n\n[Note: {oversized_count} oversized message(s) excluded from summary]"
@@ -1003,6 +1013,7 @@ async def compact_messages(
     max_history_share: float = 0.5,
     recent_turns_preserve: int = 3,
     custom_instructions: str | None = None,
+    timeout: int = SUMMARIZATION_TIMEOUT,
 ) -> CompactionResult:
     """Compact older conversation messages into a summary with budget-aware splitting.
 
@@ -1132,6 +1143,7 @@ async def compact_messages(
             context_window,
             max_chunk_tokens,
             custom_instructions=custom_instructions,
+            timeout=timeout,
         )
     else:
         summary = DEFAULT_SUMMARY_FALLBACK
