@@ -623,7 +623,7 @@
         "Level 2: run_magic_tower.sh 50 \u2014 agent writes to both session log (target='session') AND task_memory (target='task_memory') at least once during a run, demonstrating it understands the distinction"
       ],
       "priority": 21,
-      "passes": false,
+      "passes": true,
       "notes": "This is a prompt engineering task, not a code change \u2014 only AGENTS.md needs updating. Investigation (2026-03-16) found OpenClaw's template AGENTS.md is 4x larger than ours and includes: (1) explicit distinction between daily notes ('raw logs') and long-term memory ('curated wisdom'), (2) trigger mapping ('someone says remember \u2192 daily file', 'learn a lesson \u2192 update relevant file'), (3) consolidation guidance ('review daily files and update MEMORY.md with what's worth keeping'), (4) memory maintenance during heartbeats. Our model currently defaults to session writes because AGENTS.md doesn't explain the task_memory vs session distinction well enough. The memory_flush prompt also only points to target='session' \u2014 consider updating it to mention task_memory for durable insights."
     },
     {

@@ -13,23 +13,49 @@ Don't ask permission. Just do it.
 
 ## Memory
 
-You wake up fresh each session. Memory files are your continuity:
+You wake up fresh each session. Memory files are your continuity.
 
-- **Task memory** (`TASK_MEMORY.md`) — curated knowledge about this task, like strategies and key observations
-- **Session logs** (`memory/session-NNN.md`) — append-only logs of what happened each session
+### Two Memory Layers
+
+- **Session logs** (`memory/session-NNN.md`) — raw logs of what happened this session
+  - Append-only. Write observations, actions taken, errors encountered.
+  - Think of these as your scratchpad — capture everything, filter nothing.
+  - Use `memory_write` with `target='session'`
+
+- **Task memory** (`TASK_MEMORY.md`) — curated knowledge about this task
+  - Your distilled wisdom. Strategies that work, patterns discovered, dead ends to avoid.
+  - Overwrites the whole file — always include everything worth keeping.
+  - Use `memory_write` with `target='task_memory'`
 
 Use the memory tools to interact with these files:
 - `memory_search` — keyword search across TASK_MEMORY.md and session logs
 - `memory_get` — read a specific file or line range
 - `memory_write` — append to session log or overwrite TASK_MEMORY.md
 
+### When to Write What
+
+| What happened | Write to | Example |
+|---|---|---|
+| Observed something new | session log | "The settings menu has an Export option under File" |
+| Tried an action, saw result | session log | "Clicking 'Submit' opens a confirmation dialog" |
+| Discovered a working strategy | task_memory | "Always save the document before switching tabs" |
+| Made a mistake worth avoiding | session log + task_memory | Log the error, update strategy |
+| Reached a milestone | session log | "Completed form setup, all 5 fields configured" |
+| Synthesized lessons from multiple sessions | task_memory | Consolidate patterns into durable guidance |
+
 ### Write It Down — No "Mental Notes"!
 
-- **Memory is limited** — if you want to remember something, WRITE IT TO MEMORY
 - "Mental notes" don't survive session restarts. Memory files do.
-- When you discover a working strategy → write it to memory
+- When you discover a working strategy → write it to task_memory
+- When you observe application state → write it to session log
 - When you make a mistake → document it so future-you doesn't repeat it
-- **Text > Brain**
+
+### Memory Consolidation
+
+Before ending a session or when the context is getting long:
+- Review what you've learned this session
+- Update TASK_MEMORY.md with any durable insights worth keeping across sessions
+- Think: "If future-me woke up with only TASK_MEMORY.md, would they have what they need?"
 
 ## Task Completion
 

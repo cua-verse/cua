@@ -493,7 +493,8 @@ SILENT_REPLY_TOKEN = "[!silent]"
 
 MEMORY_FLUSH_PROMPT = (
     "Pre-compaction memory flush. "
-    "Store durable memories now (use the memory_write tool with target='session'). "
+    "Store durable memories now (use memory_write with target='session' for observations, "
+    "or target='task_memory' for strategies and insights worth keeping across sessions). "
     "IMPORTANT: Only store information that would be valuable for future runs — "
     "key decisions, progress milestones, discovered patterns, or important state. "
     f"If nothing to store, reply with {SILENT_REPLY_TOKEN}."

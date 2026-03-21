@@ -633,3 +633,21 @@
   - When moving functions between modules (e.g., openclaw_agent.py → openclaw/transcript.py), also update all test files that import those functions — easy to miss.
   - Patch the module where the name is **resolved at call time**, not where it's defined. For local imports inside function bodies (`from .openclaw import OpenClawComputerAgent`), patch the exporting package (`cua_bench.agents.openclaw.OpenClawComputerAgent`).
 ---
+
+## 2026-03-20 - US-OC-024
+- Enriched AGENTS.md memory section to match OpenClaw template quality
+- Added explicit two-tier memory distinction (session logs = raw/append-only, task_memory = curated/overwrite)
+- Added "When to Write What" trigger table with 6 rows covering observe/try/discover/mistake/milestone/synthesis scenarios
+- Added "Write It Down — No Mental Notes!" urgency callout with 3 concrete examples
+- Added "Memory Consolidation" guidance: review session logs before ending, update TASK_MEMORY.md with durable insights
+- Updated MEMORY_FLUSH_PROMPT in session.py to mention both `target='session'` and `target='task_memory'`
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md` (expanded memory section from ~15 to ~46 lines)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py` (MEMORY_FLUSH_PROMPT now mentions task_memory)
+  - `docs/plan/US-OC-024-agents-md-memory-guidance.md` (updated status to Implemented)
+  - `prd.json` (passes=true for US-OC-024)
+- **Learnings for future iterations:**
+  - Prompt engineering stories (AGENTS.md changes) are cheap to implement but high-leverage: the trigger table pattern (what happened → write to → example) directly maps to model decision-making in the loop.
+  - The MEMORY_FLUSH_PROMPT is a second place where memory guidance lives — always check session.py when updating AGENTS.md memory guidance so both are consistent.
+  - The untracked `test_transcript_fidelity.py` file is a pre-existing test from an earlier story (US-OC-014); include it when committing submodule so it doesn't stay orphaned.
+---
