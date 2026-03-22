@@ -688,3 +688,23 @@
   - litellm must be imported at module level (not inside async methods) for unittest.mock.patch to work
   - Tool description should stay general (like OpenClaw's) — task-specific prompt examples in AGENTS.md make it less portable across task types
 ---
+
+## 2026-03-21 - Operational: Run Analysis + US-OC-035 Story + Loop Model Switch
+- Analyzed 10-attempt loop run (100 steps each, sonnet-4, clean memory) — best score 1/3 (floor 1 only)
+- Root cause: API auth failure after 4 real attempts; agent reached floor 2 in best run but took damage from premature combat
+- Switched loop model to `anthropic/claude-haiku-4-5-20251001` for cost efficiency
+- Added US-OC-035 story: MilestoneVerificationCallback (Pre-Completion VLM Check)
+- Added review judge for US-OC-034 documenting open issues and action plan
+- Added `scripts/verify_planner.py` and `scripts/verify_task_storage.py` (Level 2 verification helpers)
+- **Files changed:**
+  - MOD: run_magic_tower_loop.sh (model → haiku-4-5)
+  - MOD: logs/loop_run/report.md (run analysis appended)
+  - MOD: prd.json (US-OC-035 added)
+  - NEW: docs/review-judges/review_2026-03-21_1900_US-OC-034.md
+  - NEW: scripts/verify_planner.py
+  - NEW: scripts/verify_task_storage.py
+- **Learnings for future iterations:**
+  - Loop runs with `anthropic/claude-sonnet-4-20250514` at 100 steps hit API auth failure after ~4 attempts; haiku-4-5 is more economical for extended loop testing
+  - Agent consistently reaches floor 2 but fights prematurely — floor-by-floor item collection strategy needs reinforcement in system prompt or via MilestoneVerificationCallback (US-OC-035)
+  - VLM-based milestone gate (US-OC-035) is the key missing piece to prevent false DONE signals
+---

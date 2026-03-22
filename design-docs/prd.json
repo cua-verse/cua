@@ -848,6 +848,36 @@
       "priority": 34,
       "passes": true,
       "notes": "Currently, computer_call_output returns {\"type\": \"input_image\", \"image_url\": \"data:image/png;base64,...\"} — just the raw image, no file path. TrajectorySaverCallback saves the same screenshot to disk (turn_NNN/NNNN_screenshot_after.png) via on_screenshot callback, but this path is never communicated back to the agent. \n\nImplementation approaches (choose one):\n1. **Callback approach**: Create a new callback (or extend ToolLoggingCallback) that tracks the last screenshot path from on_screenshot, then on on_computer_call_end injects metadata into the result. Pro: no CUA core changes. Con: callback ordering matters — must run after TrajectorySaverCallback.\n2. **Override approach**: Override _handle_item in OpenClawComputerAgent to append the path after the parent builds call_output. Pro: explicit control. Con: tighter coupling to parent internals.\n3. **Modify TrajectorySaverCallback**: Make it store the last saved screenshot path as an attribute, then read it from the agent loop after _handle_item returns. Pro: simple. Con: modifies CUA code.\n\nRecommended: Approach 1 (callback). Create a ScreenshotPathCallback that:\n- on_screenshot: records the artifact path that TrajectorySaverCallback just saved\n- on_computer_call_end: appends a text note to the result like \"[Screenshot saved to: /local/path/turn_005/0003_screenshot_after.png]\"\n\nThe path should be injected as text metadata, NOT by modifying the image_url field. This way the agent sees both the image (for immediate use) and the path (for later analyze_image calls). After compaction removes the base64 image from context, the text path remains in the summary, allowing the agent to re-examine old screenshots via analyze_image(image=\"/local/path/...\")."
+    },
+    {
+      "id": "US-OC-035",
+      "title": "Callback: Milestone Verification Gate (Pre-Completion VLM Check)",
+      "description": "As the benchmark operator, I want a callback that intercepts the agent's DONE signal and runs VLM evaluation on saved milestone screenshots against reference images before accepting completion, so that the agent self-corrects false completions within a single run instead of requiring external eval-and-retry loops.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (_check_done function — current DONE detection logic; perform_task main loop)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (OpenClawComputerAgent — callback registration and on_llm_end chain)",
+          "submodules/cua/libs/python/agent/agent/callbacks/base.py (AsyncCallbackHandler — base class with on_llm_end hook)",
+          "utils/evaluation.py (evaluate_milestone_mode, compare_screenshots_game, llm_vision_judge — existing VLM comparison logic)",
+          "tasks/game/mota_24_easy/main.py (query_milestone — task-specific comparison function, example of how tasks define evaluation)"
+        ],
+        "depends": "US-OC-033 (analyze_image tool provides VLM calling pattern via litellm)",
+        "reference": "submodules/cua/libs/python/agent/agent/callbacks/ (explore existing callbacks for lifecycle patterns); utils/evaluation.py (VLM judge logic to reuse or adapt)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: MilestoneVerificationCallback extends AsyncCallbackHandler with on_llm_end hook",
+        "Level 1: Constructor accepts session, reference_path, output_path, and comparison_fn (Option A — generic, task wires config)",
+        "Level 1: When DONE detected in agent output: downloads milestone screenshots from remote output_path, compares each against reference_path using comparison_fn, computes pass/fail",
+        "Level 1: On verification PASS: returns output unchanged (DONE signal preserved)",
+        "Level 1: On verification FAIL: strips DONE from output, injects feedback message listing which milestones failed and why, so agent continues working",
+        "Level 1: Unit tests — mock session and comparison_fn, verify DONE is stripped on failure and preserved on success",
+        "Level 2: run_magic_tower.sh 100 — trajectory shows agent attempted DONE, got rejected with feedback, then continued navigating",
+        "Level 2: Agent's post-rejection behavior references the verification feedback (e.g., re-navigates to correct floor)"
+      ],
+      "priority": 35,
+      "passes": false,
+      "notes": "Motivated by analysis in logs/loop_run/report.md: agent claims DONE with wrong milestones (off-by-one floor counting, hallucinated completion). Current mitigation is external eval-then-retry loop (run_magic_tower_loop.sh), which wastes full runs on false completions and suffers from cross-run memory poisoning.\n\nDesign (Option A — generic callback):\n- MilestoneVerificationCallback(session, reference_path, output_path, comparison_fn)\n- Task provides comparison_fn (e.g., query_milestone from mota_24_easy/main.py)\n- Callback is registered alongside other callbacks in openclaw_agent.py\n- Hook point: on_llm_end — intercepts agent output before _check_done() runs\n- On DONE detection: runs VLM evaluation (same logic as utils/evaluation.py)\n- On fail: mutates output to remove DONE text, appends a user-style message like 'Verification failed: milestone 2.png does not match reference (floor mismatch). Continue navigating.'\n- On pass: output unchanged, _check_done() sees DONE and exits cleanly\n\nKey design decisions:\n- Callback needs async access to remote VM (session.interface) to download screenshots\n- comparison_fn signature matches existing pattern: (target_bytes, reference_bytes, identifier) -> dict with score/vlm_response\n- VLM model for verification should use summary_model (cheaper) not main agent model\n- Consider rate-limiting: if agent spams DONE, don't run VLM every time (cooldown or max retries)"
     }
   ]
 }
