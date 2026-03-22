@@ -878,6 +878,28 @@
       "priority": 35,
       "passes": false,
       "notes": "Motivated by analysis in logs/loop_run/report.md: agent claims DONE with wrong milestones (off-by-one floor counting, hallucinated completion). Current mitigation is external eval-then-retry loop (run_magic_tower_loop.sh), which wastes full runs on false completions and suffers from cross-run memory poisoning.\n\nDesign (Option A — generic callback):\n- MilestoneVerificationCallback(session, reference_path, output_path, comparison_fn)\n- Task provides comparison_fn (e.g., query_milestone from mota_24_easy/main.py)\n- Callback is registered alongside other callbacks in openclaw_agent.py\n- Hook point: on_llm_end — intercepts agent output before _check_done() runs\n- On DONE detection: runs VLM evaluation (same logic as utils/evaluation.py)\n- On fail: mutates output to remove DONE text, appends a user-style message like 'Verification failed: milestone 2.png does not match reference (floor mismatch). Continue navigating.'\n- On pass: output unchanged, _check_done() sees DONE and exits cleanly\n\nKey design decisions:\n- Callback needs async access to remote VM (session.interface) to download screenshots\n- comparison_fn signature matches existing pattern: (target_bytes, reference_bytes, identifier) -> dict with score/vlm_response\n- VLM model for verification should use summary_model (cheaper) not main agent model\n- Consider rate-limiting: if agent spams DONE, don't run VLM every time (cooldown or max retries)"
+    },
+    {
+      "id": "US-OC-036",
+      "title": "Post-Compaction Message Ordering: Ensure User Message Tail for Non-Prefill Models",
+      "description": "As the agent harness, I want the post-compaction message list to always end with a user message (or tool result), so that models like Opus 4.6 that do not support assistant message prefill can continue after compaction without API errors.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (_compact_in_place — reconstructs items after compaction)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (compact_messages — produces CompactionResult with summary + kept messages)",
+          "submodules/cua/libs/python/agent/agent/callbacks/image_retention.py (removes old screenshot pairs — can leave trailing assistant messages)",
+          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (_convert_responses_items_to_completion_messages — final message format)"
+        ],
+        "depends": "US-OC-023 must be done first (fixes tool_use pairing that previously masked this issue)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: After compaction, the completion messages sent to the API never end with role=assistant",
+        "Level 1: Unit test: post-compaction message list with trailing assistant messages gets a user message appended",
+        "Level 2: CONTEXT_WINDOW_OVERRIDE=35000 bash run_magic_tower.sh 50 anthropic/claude-opus-4-6 — completes all 50 steps including compaction without 'assistant message prefill' errors"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "Discovered 2026-03-22: after fixing US-OC-023 (ImageRetentionCallback tool pairing), the agent runs past the original crash point but hits a new error after compaction: 'This model does not support assistant message prefill. The conversation must end with a user message.' Root cause: ImageRetentionCallback removes old computer_call + computer_call_output pairs from the kept messages, leaving only assistant text. After compaction, the reconstructed message list can end with role=assistant (msg[30] in the failing trace). Opus 4.6 rejects this because it doesn't support prefill. Fix options: (a) append a synthetic user message after compaction if the last message is assistant, (b) ensure _compact_in_place always adds a continuation prompt, or (c) fix in the Anthropic loop's predict_step before calling the API."
     }
   ]
 }

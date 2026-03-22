@@ -444,6 +444,16 @@ class OpenClawComputerAgent(ComputerAgent):
         if kept_messages:
             items.extend(kept_messages)
 
+        # Ensure items don't end with role=assistant — models like Opus 4.6
+        # don't support assistant message prefill and will reject the API call.
+        # This can happen when kept_messages ends with the model's last response,
+        # or after ImageRetentionCallback strips trailing screenshot pairs.
+        if items and items[-1].get("role") == "assistant":
+            items.append({
+                "role": "user",
+                "content": "[Continue from where you left off.]",
+            })
+
         return items
 
 

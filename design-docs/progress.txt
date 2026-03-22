@@ -708,3 +708,23 @@
   - Agent consistently reaches floor 2 but fights prematurely — floor-by-floor item collection strategy needs reinforcement in system prompt or via MilestoneVerificationCallback (US-OC-035)
   - VLM-based milestone gate (US-OC-035) is the key missing piece to prevent false DONE signals
 ---
+
+## 2026-03-22 - US-OC-036: Post-Compaction Message Ordering
+- Added trailing-assistant guard in `_build_compacted_items()` in `agent_loop.py`:
+  after reconstructing `[user(summary), ...kept_messages]`, if the last item has `role=assistant`,
+  a synthetic `{"role": "user", "content": "[Continue from where you left off.]"}` is appended.
+- Updated `run_magic_tower_loop.sh` to accept optional `[model] [summary_model]` CLI args (positional 3/4);
+  hardcoded model defaults moved to script-level argument defaulting; log filename now includes model short name.
+- Added unit tests (5 cases): trailing assistant → user appended, trailing user → no change,
+  trailing tool → no change, empty kept → no change, single assistant in kept → user appended.
+- Created `docs/plan/US-OC-036-message-ordering.md` as design rationale doc.
+- **Files changed:**
+  - MOD: `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py` (trailing-assistant guard in `_build_compacted_items`)
+  - MOD: `run_magic_tower_loop.sh` (model/summary_model CLI args + model-tagged log filename)
+  - NEW: `tests/test_message_ordering.py` (5 unit tests)
+  - NEW: `docs/plan/US-OC-036-message-ordering.md` (design rationale)
+- **Learnings for future iterations:**
+  - After ImageRetentionCallback runs, kept_messages can end with `role=assistant` (text blocks only, tool pairs stripped). This causes API errors for Opus 4.6 (no prefill support). Always guard the tail of the compacted item list.
+  - The guard belongs in `_build_compacted_items` (the single reconstruction point) rather than the Anthropic loop or predict_step — closer to the source, more explicit.
+  - Standalone test helpers that mirror the production function (without instantiating the full async agent) are effective for pure logic coverage without a VM.
+---
