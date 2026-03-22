@@ -1,7 +1,7 @@
 {
   "project": "OpenClaw Agent Reproduction for CUA",
   "branchName": "openclaw-harness",
-  "description": "Faithful reproduction of OpenClaw's agent-side architecture for CUA. Six components (B1-B6) across three phases: Phase 1 builds independent modules (prompt builder, memory, session persistence), Phase 2 adds context management and tool wiring, Phase 3 integrates everything into the agent loop. IMPORTANT: Category C components (CUA SDK callbacks like ImageRetentionCallback, TrajectorySaverCallback, BudgetManagerCallback, PromptInstructionsCallback) are assumed directly reusable from the CUA SDK without modification. This assumption may be wrong \u2014 these callbacks may have undocumented constraints, incompatible hook signatures, ordering dependencies, or behavioral quirks when combined with our custom callbacks. Every story that uses a Category C component must verify it works as expected during integration, not just assume it. If a CUA callback doesn't behave as needed, file an issue and implement a workaround or replacement in agents/openclaw/ rather than patching the CUA SDK.",
+  "description": "Faithful reproduction of OpenClaw's agent-side architecture for CUA. Six components (B1-B6) across three phases: Phase 1 builds independent modules (prompt builder, memory, session persistence), Phase 2 adds context management and tool wiring, Phase 3 integrates everything into the agent loop. IMPORTANT: Category C components (CUA SDK callbacks like ImageRetentionCallback, TrajectorySaverCallback, BudgetManagerCallback, PromptInstructionsCallback) are assumed directly reusable from the CUA SDK without modification. This assumption may be wrong — these callbacks may have undocumented constraints, incompatible hook signatures, ordering dependencies, or behavioral quirks when combined with our custom callbacks. Every story that uses a Category C component must verify it works as expected during integration, not just assume it. If a CUA callback doesn't behave as needed, file an issue and implement a workaround or replacement in agents/openclaw/ rather than patching the CUA SDK.",
   "userStories": [
     {
       "id": "US-OC-001",
@@ -10,24 +10,24 @@
       "context": {
         "existingFiles": [
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (current hardcoded instructions string)",
-          "submodules/cua/libs/python/agent/agent/callbacks/prompt_instructions.py (PromptInstructionsCallback \u2014 how instructions are injected)"
+          "submodules/cua/libs/python/agent/agent/callbacks/prompt_instructions.py (PromptInstructionsCallback — how instructions are injected)"
         ],
         "designDoc": "openclaw/docs/concepts/system-prompt.md (section structure, prompt modes, workspace bootstrap injection, time handling)",
-        "reference": "openclaw/src/agents/system-prompt.ts (start here \u2014 buildAgentSystemPrompt); also explore openclaw/src/agents/pi-embedded-helpers/bootstrap.ts for context file injection",
+        "reference": "openclaw/src/agents/system-prompt.ts (start here — buildAgentSystemPrompt); also explore openclaw/src/agents/pi-embedded-helpers/bootstrap.ts for context file injection",
         "planFile": "docs/plan/US-OC-001-system-prompt-builder.md"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/ tests/test_prompt_builder.py)",
-        "Level 1: Unit tests pass \u2014 PromptBuilder assembles sections in correct order, omits empty sections, includes tool names; Memory Recall section conditionally included only when memory tools (memory_search, memory_get) are registered",
+        "Level 1: Unit tests pass — PromptBuilder assembles sections in correct order, omits empty sections, includes tool names; Memory Recall section conditionally included only when memory tools (memory_search, memory_get) are registered",
         "Level 1: PromptBuilder.build() returns a single string with labeled sections (## Identity, ## Tools, ## Memory Recall, # Project Context); Current Time intentionally dropped (agent reads VM clock; breaks cache stability)",
-        "Level 1: Sections are configurable \u2014 each can be enabled/disabled; disabled sections produce no output",
-        "Level 1: Project Context injects context files (AGENTS.md, optionally TASK_MEMORY.md) with per-file headers, following OpenClaw's contextFiles bootstrap pattern. Task description is NOT injected \u2014 it's passed via agent.run() to avoid duplication",
-        "Level 1: PromptBuilder.build() is wired into openclaw_agent.py \u2014 tool_summaries derived from registered tools, AGENTS.md injected as ContextFile, output passed as instructions= to ComputerAgent",
-        "Level 2: run_magic_tower.sh 50 \u2014 agent follows structured instructions (e.g., uses DONE signal, references tool names from prompt)"
+        "Level 1: Sections are configurable — each can be enabled/disabled; disabled sections produce no output",
+        "Level 1: Project Context injects context files (AGENTS.md, optionally TASK_MEMORY.md) with per-file headers, following OpenClaw's contextFiles bootstrap pattern. Task description is NOT injected — it's passed via agent.run() to avoid duplication",
+        "Level 1: PromptBuilder.build() is wired into openclaw_agent.py — tool_summaries derived from registered tools, AGENTS.md injected as ContextFile, output passed as instructions= to ComputerAgent",
+        "Level 2: run_magic_tower.sh 50 — agent follows structured instructions (e.g., uses DONE signal, references tool names from prompt)"
       ],
       "priority": 1,
       "passes": true,
-      "notes": "File: agents/openclaw/prompt.py. Sections: identity (agent name + role), tools (registered tool names with descriptions), memory recall (when/how to use memory_search \u2014 conditional on memory tools), project context (AGENTS.md via bootstrap injection, optionally TASK_MEMORY.md). Task description is passed via agent.run(instruction), NOT injected as a context file \u2014 avoids duplication since ComputerAgent sends it as a separate user message. Integrated into openclaw_agent.py via instructions= parameter. Skip OpenClaw-specific sections: skills, messaging, reply tags, voice/TTS, reactions, heartbeats, sandbox, documentation paths, OpenClaw self-update."
+      "notes": "File: agents/openclaw/prompt.py. Sections: identity (agent name + role), tools (registered tool names with descriptions), memory recall (when/how to use memory_search — conditional on memory tools), project context (AGENTS.md via bootstrap injection, optionally TASK_MEMORY.md). Task description is passed via agent.run(instruction), NOT injected as a context file — avoids duplication since ComputerAgent sends it as a separate user message. Integrated into openclaw_agent.py via instructions= parameter. Skip OpenClaw-specific sections: skills, messaging, reply tags, voice/TTS, reactions, heartbeats, sandbox, documentation paths, OpenClaw self-update."
     },
     {
       "id": "US-OC-002",
@@ -35,7 +35,7 @@
       "description": "As the agent harness, I want a task-scoped memory storage layer inside the CUA submodule that manages TASK_MEMORY.md (curated knowledge) and memory/session-NNN.md (session logs) with keyword search, so that memory tools have a data backend and the agent starts each session with accumulated knowledge via bootstrap injection.",
       "context": {
         "existingFiles": [
-          "memory/store.py (legacy MemoryStore \u2014 reference for API shape, DO NOT import from it)",
+          "memory/store.py (legacy MemoryStore — reference for API shape, DO NOT import from it)",
           "tests/test_memory_store.py (test structure and coverage level to match)",
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/prompt.py (Memory Recall section to update)",
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md (Memory section to revise)"
@@ -46,7 +46,7 @@
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/memory.py tests/test_openclaw_memory_store.py)",
-        "Level 1: Unit tests pass \u2014 MemoryStore search returns results sorted by keyword match count, read_file handles line ranges, session log appends are timestamped",
+        "Level 1: Unit tests pass — MemoryStore search returns results sorted by keyword match count, read_file handles line ranges, session log appends are timestamped",
         "Level 1: MemoryStore initializes session files at memory/session-NNN.md with auto-incrementing numbers",
         "Level 1: Search covers TASK_MEMORY.md + memory/session-*.md (task-scoped only, no global memory)",
         "Level 1: get_bootstrap_context() returns TASK_MEMORY.md content for ContextFile injection (empty string if missing)",
@@ -55,7 +55,7 @@
       ],
       "priority": 2,
       "passes": true,
-      "notes": "File: agents/openclaw/memory.py (MemoryStore class only \u2014 tools are US-OC-003). Task workspace layout: tasks/<task_id>/TASK_MEMORY.md + tasks/<task_id>/memory/session-NNN.md. Simplified from OpenClaw: no global memory (MEMORY.md, daily logs), no SQLite/vector search, no file watching/chunking/temporal decay (may revisit in future PRD). TASK_MEMORY.md is bootstrap-injected into system prompt as ContextFile, mirroring OpenClaw's MEMORY.md injection pattern."
+      "notes": "File: agents/openclaw/memory.py (MemoryStore class only — tools are US-OC-003). Task workspace layout: tasks/<task_id>/TASK_MEMORY.md + tasks/<task_id>/memory/session-NNN.md. Simplified from OpenClaw: no global memory (MEMORY.md, daily logs), no SQLite/vector search, no file watching/chunking/temporal decay (may revisit in future PRD). TASK_MEMORY.md is bootstrap-injected into system prompt as ContextFile, mirroring OpenClaw's MEMORY.md injection pattern."
     },
     {
       "id": "US-OC-003",
@@ -63,7 +63,7 @@
       "description": "As the agent, I want memory_search, memory_get, and memory_write tools registered as CUA BaseTool subclasses, so that I can search, read, and write memory files during task execution.",
       "context": {
         "existingFiles": [
-          "memory/tools.py (legacy memory tools \u2014 reference for BaseTool pattern, DO NOT import)",
+          "memory/tools.py (legacy memory tools — reference for BaseTool pattern, DO NOT import)",
           "submodules/cua/libs/python/agent/agent/tools/base.py (BaseTool ABC, @register_tool decorator)",
           "tests/test_memory_tools.py (test patterns to match)"
         ],
@@ -73,13 +73,13 @@
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 MemorySearchTool accepts both query (string) and keywords (list), MemoryGetTool rejects path traversal and non-.md files, MemoryWriteTool writes to session/memory/task_memory targets",
+        "Level 1: Unit tests pass — MemorySearchTool accepts both query (string) and keywords (list), MemoryGetTool rejects path traversal and non-.md files, MemoryWriteTool writes to session/memory/task_memory targets",
         "Level 1: All three tools use @register_tool and extend BaseTool with proper description/parameters/call methods",
         "Level 1: Tools handle missing files gracefully (empty string, not exception)"
       ],
       "priority": 3,
       "passes": true,
-      "notes": "File: agents/openclaw/memory.py (append below MemoryStore from US-OC-002). Three BaseTool subclasses wrapping MemoryStore. Read memory/tools.py for the pattern \u2014 it's already well-aligned with OpenClaw's schemas. Key deviation: we accept both query and keywords on search. NOTE: OpenClaw has only memory_search + memory_get as dedicated tools \u2014 agents write via generic write/edit file tools. Decide whether to add a dedicated memory_write tool (simpler for CUA where no generic file tools exist) or reuse another mechanism. After finalizing tool names, revise agents/openclaw/AGENTS.md to reference the correct write tool/mechanism."
+      "notes": "File: agents/openclaw/memory.py (append below MemoryStore from US-OC-002). Three BaseTool subclasses wrapping MemoryStore. Read memory/tools.py for the pattern — it's already well-aligned with OpenClaw's schemas. Key deviation: we accept both query and keywords on search. NOTE: OpenClaw has only memory_search + memory_get as dedicated tools — agents write via generic write/edit file tools. Decide whether to add a dedicated memory_write tool (simpler for CUA where no generic file tools exist) or reuse another mechanism. After finalizing tool names, revise agents/openclaw/AGENTS.md to reference the correct write tool/mechanism."
     },
     {
       "id": "US-OC-004",
@@ -87,22 +87,22 @@
       "description": "As the agent harness, I want session state and transcript persistence so that the agent can resume tasks across multiple runs with full history, carrying forward compaction summaries and token metrics.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (perform_task \u2014 currently no persistence)"
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (perform_task — currently no persistence)"
         ],
         "designDoc": "openclaw/docs/concepts/session.md (session state, JSONL transcripts, reset policy, lifecycle)",
-        "reference": "openclaw/src/sessions/ (explore for session state patterns \u2014 start from session-key-utils.ts); openclaw/docs/concepts/session.md and compaction.md for design intent",
+        "reference": "openclaw/src/sessions/ (explore for session state patterns — start from session-key-utils.ts); openclaw/docs/concepts/session.md and compaction.md for design intent",
         "planFile": "docs/plan/US-OC-004-session-persistence.md"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 SessionManager creates/loads state JSON with correct fields, saves/loads JSONL transcripts, auto-increments run numbers, carries forward compaction summaries",
+        "Level 1: Unit tests pass — SessionManager creates/loads state JSON with correct fields, saves/loads JSONL transcripts, auto-increments run numbers, carries forward compaction summaries",
         "Level 1: State JSON schema includes: task_id, run_number, step_count, total_tokens (prompt + completion), compaction_count, compaction_summaries list, created_at, updated_at",
         "Level 1: JSONL format stores one message per line with role, content, timestamp, and optional metadata (tool calls, usage)",
         "Level 1: load_history() returns previous run's messages; save_history() appends current run"
       ],
       "priority": 4,
       "passes": true,
-      "notes": "File: agents/openclaw/session.py. SessionManager with state JSON + JSONL transcripts. Storage layout: sessions_dir/task_id/state.json + run-NNN.jsonl. Design the JSONL format to support future cross-task indexing \u2014 include task_id and timestamps per entry. Compaction summaries stored as a list in state.json for injection into future runs."
+      "notes": "File: agents/openclaw/session.py. SessionManager with state JSON + JSONL transcripts. Storage layout: sessions_dir/task_id/state.json + run-NNN.jsonl. Design the JSONL format to support future cross-task indexing — include task_id and timestamps per entry. Compaction summaries stored as a list in state.json for injection into future runs."
     },
     {
       "id": "US-OC-004a",
@@ -114,21 +114,21 @@
           "tests/test_openclaw_session.py (42 existing tests to update)"
         ],
         "depends": "US-OC-004 must be done first (extends the session schema it created)",
-        "reference": "openclaw/src/config/sessions/types.ts (SessionEntry \u2014 token fields, systemPromptReport type); openclaw/src/agents/system-prompt-report.ts (buildSystemPromptReport \u2014 CUA adaptation reference)",
-        "goldenReference": "docs/openclaw_ref/openclaw_state.json (real session state dump from a live OpenClaw instance \u2014 shows full SessionEntry structure including token usage, skillsSnapshot, systemPromptReport, routing metadata, and lifecycle flags)",
+        "reference": "openclaw/src/config/sessions/types.ts (SessionEntry — token fields, systemPromptReport type); openclaw/src/agents/system-prompt-report.ts (buildSystemPromptReport — CUA adaptation reference)",
+        "goldenReference": "docs/openclaw_ref/openclaw_state.json (real session state dump from a live OpenClaw instance — shows full SessionEntry structure including token usage, skillsSnapshot, systemPromptReport, routing metadata, and lifecycle flags)",
         "planFile": "docs/plan/US-OC-004a-session-state-extension.md"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 run_number removed from SessionState; TokenUsage includes cache_read, cache_write; SessionState includes model and contextTokens (context window size) fields; system_prompt_report stored and loaded correctly",
+        "Level 1: Unit tests pass — run_number removed from SessionState; TokenUsage includes cache_read, cache_write; SessionState includes model and contextTokens (context window size) fields; system_prompt_report stored and loaded correctly",
         "Level 1: SessionState.to_dict()/from_dict() round-trips all new fields correctly",
         "Level 1: system_prompt_report schema includes: system_prompt (chars, project_context_chars, non_project_context_chars), injected_files (name, raw_chars, injected_chars, truncated), tools (name, summary_chars, schema_chars, properties_count)",
         "Level 1: init_session() no longer uses run_number; session boundaries are tracked only via JSONL session header entries",
-        "Level 1: Existing tests updated \u2014 no references to run_number; new tests cover cache tokens, model, and system_prompt_report"
+        "Level 1: Existing tests updated — no references to run_number; new tests cover cache tokens, model, and system_prompt_report"
       ],
       "priority": 4.1,
       "passes": true,
-      "notes": "File: agents/openclaw/session.py. Four changes: (1) Remove run_number from SessionState \u2014 JSONL session headers already mark run boundaries; load_history() filtering must be updated to not rely on run_number. (2) Add cache_read, cache_write, context_tokens to TokenUsage \u2014 needed for US-OC-005 context overflow detection. (3) Add model to SessionState \u2014 currently only in transcript session header. (4) Add system_prompt_report dict to SessionState \u2014 CUA-adapted from OpenClaw's SessionSystemPromptReport. Drop OpenClaw-specific fields: skills (no skill system), sandbox (no sandbox), bootstrapTruncation warnings (no truncation budget system). Keep: systemPrompt char breakdown, injectedFiles sizes, tools schema sizes. The report is generated by PromptBuilder (US-OC-001) and stored by SessionManager \u2014 wiring happens in US-OC-008."
+      "notes": "File: agents/openclaw/session.py. Four changes: (1) Remove run_number from SessionState — JSONL session headers already mark run boundaries; load_history() filtering must be updated to not rely on run_number. (2) Add cache_read, cache_write, context_tokens to TokenUsage — needed for US-OC-005 context overflow detection. (3) Add model to SessionState — currently only in transcript session header. (4) Add system_prompt_report dict to SessionState — CUA-adapted from OpenClaw's SessionSystemPromptReport. Drop OpenClaw-specific fields: skills (no skill system), sandbox (no sandbox), bootstrapTruncation warnings (no truncation budget system). Keep: systemPrompt char breakdown, injectedFiles sizes, tools schema sizes. The report is generated by PromptBuilder (US-OC-001) and stored by SessionManager — wiring happens in US-OC-008."
     },
     {
       "id": "US-OC-004b",
@@ -144,13 +144,13 @@
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 group_step_output batches text+tool_call into one assistant entry; tool results use role:\"tool\" not role:\"toolResult\"; usage.total present; content blocks use type:\"function_call\" not \"toolCall\"",
+        "Level 1: Unit tests pass — group_step_output batches text+tool_call into one assistant entry; tool results use role:\"tool\" not role:\"toolResult\"; usage.total present; content blocks use type:\"function_call\" not \"toolCall\"",
         "Level 1: append_message() accepts optional api= parameter; api field present in serialized message when supplied, absent when not",
         "Level 1: No two consecutive assistant entries in transcript (enforced by grouping logic)"
       ],
       "priority": 4.2,
       "passes": true,
-      "notes": "Five format fixes: (1) Turn fragmentation \u2014 group_step_output() batches per-step output into one assistant entry + one tool entry. (2) role:\"toolResult\" \u2192 role:\"tool\". (3) usage.total = input+output added. (4) type:\"toolCall\" \u2192 type:\"function_call\". (5) api:\"openai-responses\" added to assistant messages. _find_latest_screenshot() resolves actual PNG path from TrajectorySaverCallback output for computer_call_output entries."
+      "notes": "Five format fixes: (1) Turn fragmentation — group_step_output() batches per-step output into one assistant entry + one tool entry. (2) role:\"toolResult\" → role:\"tool\". (3) usage.total = input+output added. (4) type:\"toolCall\" → type:\"function_call\". (5) api:\"openai-responses\" added to assistant messages. _find_latest_screenshot() resolves actual PNG path from TrajectorySaverCallback output for computer_call_output entries."
     },
     {
       "id": "US-OC-005",
@@ -158,8 +158,8 @@
       "description": "As the agent harness, I want a CUA callback that estimates token usage per turn and detects when the context window is approaching overflow, so that compaction can be triggered before the model hits its limit.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/python/agent/agent/callbacks/base.py (AsyncCallbackHandler \u2014 on_llm_start hook)",
-          "submodules/cua/libs/python/agent/agent/callbacks/budget_manager.py (BudgetManagerCallback \u2014 reference for usage tracking pattern)"
+          "submodules/cua/libs/python/agent/agent/callbacks/base.py (AsyncCallbackHandler — on_llm_start hook)",
+          "submodules/cua/libs/python/agent/agent/callbacks/budget_manager.py (BudgetManagerCallback — reference for usage tracking pattern)"
         ],
         "depends": "US-OC-004 must be done first (needs session history to track cumulative tokens)",
         "designDoc": "openclaw/docs/concepts/compaction.md (auto-compaction trigger, context window source, compaction vs pruning)",
@@ -168,14 +168,14 @@
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 token estimation (chars/4) matches expected values, overflow detection triggers at configurable threshold (default 80% of context window), callback correctly counts tokens across messages",
+        "Level 1: Unit tests pass — token estimation (chars/4) matches expected values, overflow detection triggers at configurable threshold (default 80% of context window), callback correctly counts tokens across messages",
         "Level 1: ContextOverflowCallback implements on_llm_start to estimate tokens and set a needs_compaction flag",
         "Level 1: Callback tracks cumulative token estimates and exposes current_tokens, context_window, and needs_compaction properties",
-        "Level 2: run_magic_tower.sh 50 \u2014 callback logs token estimates per turn (visible in agent output), estimates are within 2x of actual usage reported by API"
+        "Level 2: run_magic_tower.sh 50 — callback logs token estimates per turn (visible in agent output), estimates are within 2x of actual usage reported by API"
       ],
       "priority": 5,
       "passes": true,
-      "notes": "File: agents/openclaw/context.py. ContextOverflowCallback(AsyncCallbackHandler) \u2014 estimates tokens via chars/4 in on_llm_start, sets needs_compaction flag when threshold exceeded. Also truncates oversized tool results (>25% of context window). Does NOT perform compaction \u2014 only detects the need (US-OC-006 does the actual compaction). IMPORTANT: Before implementing, read ComputerAgent's run loop to verify on_llm_start receives the full message history, not just a delta \u2014 this assumption is critical for token estimation."
+      "notes": "File: agents/openclaw/context.py. ContextOverflowCallback(AsyncCallbackHandler) — estimates tokens via chars/4 in on_llm_start, sets needs_compaction flag when threshold exceeded. Also truncates oversized tool results (>25% of context window). Does NOT perform compaction — only detects the need (US-OC-006 does the actual compaction). IMPORTANT: Before implementing, read ComputerAgent's run loop to verify on_llm_start receives the full message history, not just a delta — this assumption is critical for token estimation."
     },
     {
       "id": "US-OC-005a",
@@ -191,7 +191,7 @@
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 memory_flush_at and memory_flush_compaction_count fields added to SessionState, round-trip correctly via to_dict/from_dict",
+        "Level 1: Unit tests pass — memory_flush_at and memory_flush_compaction_count fields added to SessionState, round-trip correctly via to_dict/from_dict",
         "Level 1: SessionManager exposes record_memory_flush() that sets memory_flush_at=now and memory_flush_compaction_count=current compaction_count"
       ],
       "priority": 5.1,
@@ -208,19 +208,19 @@
         ],
         "depends": "US-OC-005 must be done first (needs overflow detection to trigger compaction); US-OC-004 for persisting compaction summaries",
         "designDoc": "openclaw/docs/concepts/compaction.md (what compaction is, auto-compaction, compaction vs pruning)",
-        "reference": "openclaw/src/agents/compaction.ts (summarization logic \u2014 start here); openclaw/src/agents/pi-embedded-runner/compact.ts (orchestration flow); explore pi-embedded-runner/ for related files like run.overflow-compaction tests",
+        "reference": "openclaw/src/agents/compaction.ts (summarization logic — start here); openclaw/src/agents/pi-embedded-runner/compact.ts (orchestration flow); explore pi-embedded-runner/ for related files like run.overflow-compaction tests",
         "planFile": "docs/plan/US-OC-006-compaction-pipeline.md"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 compact_messages splits history into chunks by token estimate, summarize_chunk produces a summary string, merge_summaries combines chunk summaries, identifier preservation regex matches UUIDs/URLs/file paths in test input",
+        "Level 1: Unit tests pass — compact_messages splits history into chunks by token estimate, summarize_chunk produces a summary string, merge_summaries combines chunk summaries, identifier preservation regex matches UUIDs/URLs/file paths in test input",
         "Level 1: compact() returns CompactionResult with summary string, tokens_before, tokens_after, and first_kept_message_index",
         "Level 1: Compaction preserves messages after the compaction point unchanged",
-        "Level 2: run_magic_tower.sh 100 \u2014 if compaction triggers, trajectory logs show the compaction summary injected into subsequent turns and agent continues coherently (does not repeat actions from before compaction)"
+        "Level 2: run_magic_tower.sh 100 — if compaction triggers, trajectory logs show the compaction summary injected into subsequent turns and agent continues coherently (does not repeat actions from before compaction)"
       ],
       "priority": 6,
       "passes": true,
-      "notes": "File: agents/openclaw/context.py (CompactionResult + 9 functions). Stop-compact-resume pattern in openclaw_agent.py: break out of agent.run() loop \u2192 compact transcript \u2192 rebuild agent \u2192 resume. Uses litellm.acompletion for summarization with identifier preservation. Adaptive chunk ratio (BASE=0.4, MIN=0.15), three-tier fallback, iterative rolling summarization. VM tested: CONTEXT_WINDOW_OVERRIDE=5000, compaction triggered at 86% fill, 3 chunks summarized, agent continued coherently. Plan: docs/plan/US-OC-006-compaction-pipeline.md"
+      "notes": "File: agents/openclaw/context.py (CompactionResult + 9 functions). Stop-compact-resume pattern in openclaw_agent.py: break out of agent.run() loop → compact transcript → rebuild agent → resume. Uses litellm.acompletion for summarization with identifier preservation. Adaptive chunk ratio (BASE=0.4, MIN=0.15), three-tier fallback, iterative rolling summarization. VM tested: CONTEXT_WINDOW_OVERRIDE=5000, compaction triggered at 86% fill, 3 chunks summarized, agent continued coherently. Plan: docs/plan/US-OC-006-compaction-pipeline.md"
     },
     {
       "id": "US-OC-007",
@@ -238,14 +238,14 @@
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 build_tools() returns list containing Computer, MilestoneTool, and all 3 memory tools; ToolLoggingCallback logs tool name and params on call_start, logs tool name and result length on call_end",
+        "Level 1: Unit tests pass — build_tools() returns list containing Computer, MilestoneTool, and all 3 memory tools; ToolLoggingCallback logs tool name and params on call_start, logs tool name and result length on call_end",
         "Level 1: build_tools() is a single function that takes session + MemoryStore and returns the complete tool list",
-        "Level 2: run_magic_tower.sh 50 \u2014 tool logging callback output shows tool invocations with names and timing",
-        "Level 2: grep -r '\"memory_search\"\\|\"memory_get\"\\|\"memory_write\"\\|\"save_milestone_screenshot\"' trycua/cua-bench/mota_24_easy/task_0_agent_logs/trajectories/ \u2014 shows tool calls in trajectory"
+        "Level 2: run_magic_tower.sh 50 — tool logging callback output shows tool invocations with names and timing",
+        "Level 2: grep -r '\"memory_search\"\\|\"memory_get\"\\|\"memory_write\"\\|\"save_milestone_screenshot\"' trycua/cua-bench/mota_24_easy/task_0_agent_logs/trajectories/ — shows tool calls in trajectory"
       ],
       "priority": 7,
       "passes": true,
-      "notes": "File: agents/openclaw/tools.py. Two components: 1) build_tools(session, memory_store) -> list \u2014 assembles [session._computer, MilestoneTool(session.interface), MemorySearchTool(store), MemoryGetTool(store), MemoryWriteTool(store)]. 2) ToolLoggingCallback(AsyncCallbackHandler) \u2014 implements on_function_call_start(item) to log tool name + truncated params, on_function_call_end(item, result) to log tool name + result summary + duration. Keep it simple \u2014 this is a thin assembly layer, not a policy engine. OpenClaw's tool policy system (approval chains, sandbox rules, subagent restrictions) is irrelevant for CUA where all tools are pre-approved."
+      "notes": "File: agents/openclaw/tools.py. Two components: 1) build_tools(session, memory_store) -> list — assembles [session._computer, MilestoneTool(session.interface), MemorySearchTool(store), MemoryGetTool(store), MemoryWriteTool(store)]. 2) ToolLoggingCallback(AsyncCallbackHandler) — implements on_function_call_start(item) to log tool name + truncated params, on_function_call_end(item, result) to log tool name + result summary + duration. Keep it simple — this is a thin assembly layer, not a policy engine. OpenClaw's tool policy system (approval chains, sandbox rules, subagent restrictions) is irrelevant for CUA where all tools are pre-approved."
     },
     {
       "id": "US-OC-008",
@@ -253,8 +253,8 @@
       "description": "As the agent harness, I want perform_task() to orchestrate all B1-B5 components (prompt builder, memory, session persistence, context management, tool registry) so that the agent runs with the full OpenClaw-style pipeline.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (current perform_task \u2014 the file to modify)",
-          "submodules/cua/libs/python/agent/agent/agent.py (ComputerAgent constructor \u2014 tools, callbacks, instructions params)"
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (current perform_task — the file to modify)",
+          "submodules/cua/libs/python/agent/agent/agent.py (ComputerAgent constructor — tools, callbacks, instructions params)"
         ],
         "depends": "US-OC-001 through US-OC-007 must all be done first",
         "designDoc": "openclaw/docs/concepts/agent-loop.md (agent loop lifecycle); openclaw/docs/concepts/memory.md (pre-compaction memory flush)",
@@ -262,54 +262,54 @@
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 perform_task initializes all components (prompt builder, memory store, session manager, tools, callbacks) without errors",
-        "Level 2: run_magic_tower.sh 50 \u2014 agent runs successfully with all components active; system prompt includes labeled sections visible in trajectory logs",
+        "Level 1: Unit tests pass — perform_task initializes all components (prompt builder, memory store, session manager, tools, callbacks) without errors",
+        "Level 2: run_magic_tower.sh 50 — agent runs successfully with all components active; system prompt includes labeled sections visible in trajectory logs",
         "Level 2: After run, session state.json exists with correct task_id, run_number >= 1, and token totals > 0",
         "Level 2: After run, JSONL transcript file exists with at least 10 entries",
-        "Level 2: Memory files contain task-specific observations (not just step counters) \u2014 check memory_data/ for .md files with game-relevant content",
+        "Level 2: Memory files contain task-specific observations (not just step counters) — check memory_data/ for .md files with game-relevant content",
         "Level 2: Agent reasoning after memory tool calls references the retrieved content (read trajectory agent_response.json reasoning summaries)",
-        "Level 3: Two sequential runs on mota_24_easy \u2014 session 2 loads session 1's transcript, state.json shows run_number=2, agent in session 2 has access to session 1's observations via memory"
+        "Level 3: Two sequential runs on mota_24_easy — session 2 loads session 1's transcript, state.json shows run_number=2, agent in session 2 has access to session 1's observations via memory"
       ],
       "priority": 8,
       "passes": true,
-      "notes": "Modify: agents/openclaw_agent.py. Wire all B1-B5 components into perform_task(): init memory + session, load previous transcript, build prompt, assemble tools, create callbacks, run ComputerAgent, handle compaction triggers, save transcript + state after run. Pre-compaction memory flush: wire the flush trigger using memory_flush_at/memory_flush_compaction_count from US-OC-005a (schema only \u2014 the fields are added there, the wiring happens here). NOTE: memory flush state fields (memory_flush_at, memory_flush_compaction_count) live in SessionState via US-OC-005a \u2014 do NOT add them here. CATEGORY C VERIFICATION: This story wires in CUA SDK callbacks (ImageRetentionCallback, TrajectorySaverCallback, PromptInstructionsCallback). Read each callback's source before using it \u2014 verify ordering doesn't conflict with our custom callbacks. Do a short 10-step smoke run before the full 50-step VM test. If a CUA callback misbehaves, implement a replacement in agents/openclaw/ rather than patching the SDK."
+      "notes": "Modify: agents/openclaw_agent.py. Wire all B1-B5 components into perform_task(): init memory + session, load previous transcript, build prompt, assemble tools, create callbacks, run ComputerAgent, handle compaction triggers, save transcript + state after run. Pre-compaction memory flush: wire the flush trigger using memory_flush_at/memory_flush_compaction_count from US-OC-005a (schema only — the fields are added there, the wiring happens here). NOTE: memory flush state fields (memory_flush_at, memory_flush_compaction_count) live in SessionState via US-OC-005a — do NOT add them here. CATEGORY C VERIFICATION: This story wires in CUA SDK callbacks (ImageRetentionCallback, TrajectorySaverCallback, PromptInstructionsCallback). Read each callback's source before using it — verify ordering doesn't conflict with our custom callbacks. Do a short 10-step smoke run before the full 50-step VM test. If a CUA callback misbehaves, implement a replacement in agents/openclaw/ rather than patching the SDK."
     },
     {
       "id": "US-OC-009",
-      "title": "Post-Eval: Category C \u2014 CUA SDK Component Audit",
+      "title": "Post-Eval: Category C — CUA SDK Component Audit",
       "description": "As the project lead, I want a systematic audit of all Category C components (CUA SDK callbacks and tools assumed reusable) after B6 integration, so that I can confirm they work correctly in our pipeline or identify ones that need custom replacements.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/python/agent/agent/agent.py (ComputerAgent \u2014 start here)",
+          "submodules/cua/libs/python/agent/agent/agent.py (ComputerAgent — start here)",
           "submodules/cua/libs/python/agent/agent/callbacks/ (explore all built-in callbacks)",
           "submodules/cua/libs/python/agent/agent/tools/base.py (BaseTool, @register_tool)"
         ],
         "depends": "US-OC-008 must be done first (need the full pipeline running to test SDK components in context)",
-        "reference": "submodules/cua/libs/python/agent/agent/agent.py (ComputerAgent \u2014 the CUA side to audit); submodules/cua/libs/python/agent/agent/callbacks/ (all built-in CUA callbacks); openclaw/src/agents/ (Pi agent source \u2014 100+ files; start from pi-embedded.ts as the entry point, then explore pi-embedded-runner/ for the core loop and pi-embedded-subscribe.ts for event handling. The auditor should explore this directory themselves to compare Pi's architecture against ComputerAgent's)"
+        "reference": "submodules/cua/libs/python/agent/agent/agent.py (ComputerAgent — the CUA side to audit); submodules/cua/libs/python/agent/agent/callbacks/ (all built-in CUA callbacks); openclaw/src/agents/ (Pi agent source — 100+ files; start from pi-embedded.ts as the entry point, then explore pi-embedded-runner/ for the core loop and pi-embedded-subscribe.ts for event handling. The auditor should explore this directory themselves to compare Pi's architecture against ComputerAgent's)"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
         "Level 1: Document each Category C component's actual behavior in a checklist (create docs/category-c-audit.md)",
-        "Level 2: run_magic_tower.sh 50 \u2014 with ALL Category C callbacks enabled (ImageRetention, TrajectorySaver, BudgetManager, PromptInstructions, Logging), verify no conflicts or silent failures",
-        "Level 2: ImageRetentionCallback \u2014 verify only N most recent images remain in context (check trajectory logs for image count per turn)",
-        "Level 2: TrajectorySaverCallback \u2014 verify trajectory directory contains expected files (metadata.json, turn_NNN/ dirs with screenshots and response JSONs)",
-        "Level 2: BudgetManagerCallback \u2014 verify it tracks costs without prematurely stopping runs (check that on_run_continue returns True for 50 steps)",
-        "Level 2: PromptInstructionsCallback \u2014 verify our structured system prompt appears at the start of every LLM call (check trajectory API start logs)",
-        "Level 2: Callback ordering \u2014 verify our custom callbacks (ContextOverflow, ToolLogging) don't conflict with CUA callbacks; document the actual execution order",
-        "Level 2: BaseTool/@register_tool \u2014 verify no name conflicts between our memory tools and CUA's built-in tools (MilestoneTool, etc.)",
-        "Level 2: ComputerAgent vs Pi agent core \u2014 CRITICAL: verify ComputerAgent's run loop (message accumulation, tool dispatch, step yielding) is equivalent to Pi's embedded runner for our use case. Specifically check: (a) how messages accumulate across steps (does ComputerAgent maintain a growing message list like Pi, or does it manage its own truncation?), (b) whether on_llm_start receives the full message history or just the delta, (c) whether our callbacks can intercept and modify the message list before each LLM call (needed for compaction injection), (d) how tool results are appended to context (needed for tool result truncation). Document any gaps."
+        "Level 2: run_magic_tower.sh 50 — with ALL Category C callbacks enabled (ImageRetention, TrajectorySaver, BudgetManager, PromptInstructions, Logging), verify no conflicts or silent failures",
+        "Level 2: ImageRetentionCallback — verify only N most recent images remain in context (check trajectory logs for image count per turn)",
+        "Level 2: TrajectorySaverCallback — verify trajectory directory contains expected files (metadata.json, turn_NNN/ dirs with screenshots and response JSONs)",
+        "Level 2: BudgetManagerCallback — verify it tracks costs without prematurely stopping runs (check that on_run_continue returns True for 50 steps)",
+        "Level 2: PromptInstructionsCallback — verify our structured system prompt appears at the start of every LLM call (check trajectory API start logs)",
+        "Level 2: Callback ordering — verify our custom callbacks (ContextOverflow, ToolLogging) don't conflict with CUA callbacks; document the actual execution order",
+        "Level 2: BaseTool/@register_tool — verify no name conflicts between our memory tools and CUA's built-in tools (MilestoneTool, etc.)",
+        "Level 2: ComputerAgent vs Pi agent core — CRITICAL: verify ComputerAgent's run loop (message accumulation, tool dispatch, step yielding) is equivalent to Pi's embedded runner for our use case. Specifically check: (a) how messages accumulate across steps (does ComputerAgent maintain a growing message list like Pi, or does it manage its own truncation?), (b) whether on_llm_start receives the full message history or just the delta, (c) whether our callbacks can intercept and modify the message list before each LLM call (needed for compaction injection), (d) how tool results are appended to context (needed for tool result truncation). Document any gaps."
       ],
       "priority": 27,
       "passes": false,
-      "notes": "CAVEAT: The A/B/C classification was done upfront from source analysis, not runtime evidence. Components may be miscategorized or overlooked \u2014 acceptance criteria are subject to change. Treat component lists as starting points, not exhaustive. Verification-only story \u2014 no new code unless issues are found. For each Category C component: read its source, run a VM test with it enabled, check trajectory/logs. Document issues in docs/category-c-audit.md. HIGHEST-RISK ITEM: ComputerAgent as Pi agent core equivalent. Explore ComputerAgent.run() and the active agent loop end-to-end \u2014 compare against openclaw/src/agents/pi-embedded-runner/ to understand gaps in message accumulation, callback interception, and tool result handling. If ComputerAgent is too inflexible, options include: custom_loop override, forking ComputerAgent, or reworking our context management approach."
+      "notes": "CAVEAT: The A/B/C classification was done upfront from source analysis, not runtime evidence. Components may be miscategorized or overlooked — acceptance criteria are subject to change. Treat component lists as starting points, not exhaustive. Verification-only story — no new code unless issues are found. For each Category C component: read its source, run a VM test with it enabled, check trajectory/logs. Document issues in docs/category-c-audit.md. HIGHEST-RISK ITEM: ComputerAgent as Pi agent core equivalent. Explore ComputerAgent.run() and the active agent loop end-to-end — compare against openclaw/src/agents/pi-embedded-runner/ to understand gaps in message accumulation, callback interception, and tool result handling. If ComputerAgent is too inflexible, options include: custom_loop override, forking ComputerAgent, or reworking our context management approach."
     },
     {
       "id": "US-OC-010",
-      "title": "Post-Eval: Category A \u2014 Skipped Component Review",
+      "title": "Post-Eval: Category A — Skipped Component Review",
       "description": "As the project lead, I want a systematic review of all Category A components (OpenClaw features classified as irrelevant to CUA) after the full pipeline is running, so that I can confirm nothing important was missed and identify any features that should be reconsidered for future work.",
       "context": {
         "existingFiles": [
-          "docs/openclaw-source-analysis.md (detailed OpenClaw source analysis \u2014 lists all components)",
+          "docs/openclaw-source-analysis.md (detailed OpenClaw source analysis — lists all components)",
           "docs/openclaw-reproduction-plan.md (Category A classification table with skip rationale)"
         ],
         "depends": "US-OC-008 must be done first (need the full pipeline running to evaluate gaps)",
@@ -319,19 +319,19 @@
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
         "Level 1: Create docs/category-a-review.md with a structured review of every Category A component",
-        "Level 2: run_magic_tower.sh 100 \u2014 observe agent behavior for 100 steps, noting any capability gaps where a skipped Category A feature would have helped",
+        "Level 2: run_magic_tower.sh 100 — observe agent behavior for 100 steps, noting any capability gaps where a skipped Category A feature would have helped",
         "Level 2: For each Category A component, document: (a) original skip rationale, (b) whether the rationale still holds after seeing the agent run, (c) verdict: confirmed-skip / reconsider / add-to-backlog",
         "Level 2: Specifically check these higher-risk skips that may have agent-side relevance: model failover (does the agent need retry logic when API calls fail?), retry policy (do we need retries for transient errors?), browser automation (does the agent ever need Playwright-style actions CUA's computer tool doesn't cover?), security/tool auditing (should we log/audit tool calls beyond ToolLoggingCallback?)",
         "Level 2: If any component is reclassified as 'reconsider' or 'add-to-backlog', create a follow-up story outline in the review doc (title + one-paragraph scope, not a full PRD)"
       ],
       "priority": 28,
       "passes": false,
-      "notes": "CAVEAT: The A/B/C classification was done upfront from source analysis, not runtime evidence. Components may be miscategorized or overlooked \u2014 acceptance criteria are subject to change. Treat component lists as starting points, not exhaustive. Review-only story \u2014 no new code unless critical gaps are found. After a 100-step VM run, review each Category A skip honestly. Focus on: (1) error recovery without model failover/retry, (2) tool gaps from skipping browser automation/media, (3) observability beyond ToolLoggingCallback. Write as a table: Component | Skip Rationale | Observation | Verdict. Explore openclaw/src/agents/ broadly \u2014 there may be agent-side modules we didn't classify at all."
+      "notes": "CAVEAT: The A/B/C classification was done upfront from source analysis, not runtime evidence. Components may be miscategorized or overlooked — acceptance criteria are subject to change. Treat component lists as starting points, not exhaustive. Review-only story — no new code unless critical gaps are found. After a 100-step VM run, review each Category A skip honestly. Focus on: (1) error recovery without model failover/retry, (2) tool gaps from skipping browser automation/media, (3) observability beyond ToolLoggingCallback. Write as a table: Component | Skip Rationale | Observation | Verdict. Explore openclaw/src/agents/ broadly — there may be agent-side modules we didn't classify at all."
     },
     {
       "id": "US-OC-011",
-      "title": "Abort/Resume Tracking \u2014 DROPPED",
-      "description": "DROPPED: OpenClaw\u2019s abort cutoff is an inbound message queue gate (skip queued channel messages after /stop), not a transcript replay filter. CUA has no inbound message queue, no /stop command, and transcript replay is already bounded by limit_history_turns (US-OC-012).",
+      "title": "Abort/Resume Tracking — DROPPED",
+      "description": "DROPPED: OpenClaw’s abort cutoff is an inbound message queue gate (skip queued channel messages after /stop), not a transcript replay filter. CUA has no inbound message queue, no /stop command, and transcript replay is already bounded by limit_history_turns (US-OC-012).",
       "context": {
         "existingFiles": [],
         "depends": "",
@@ -341,7 +341,7 @@
       "acceptanceCriteria": [],
       "priority": 99,
       "passes": true,
-      "notes": "DROPPED \u2014 see docs/plan/US-OC-011-abort-resume-dropped.md for full analysis. OpenClaw\u2019s abort cutoff gates inbound channel messages (Telegram, Discord) queued before /stop propagated. CUA has no external message queue, no /stop command, and US-OC-012\u2019s limit_history_turns already bounds transcript replay. The SID/timestamp dual-track comparison is Twilio-specific and irrelevant to our UUID-based transcript entries."
+      "notes": "DROPPED — see docs/plan/US-OC-011-abort-resume-dropped.md for full analysis. OpenClaw’s abort cutoff gates inbound channel messages (Telegram, Discord) queued before /stop propagated. CUA has no external message queue, no /stop command, and US-OC-012’s limit_history_turns already bounds transcript replay. The SID/timestamp dual-track comparison is Twilio-specific and irrelevant to our UUID-based transcript entries."
     },
     {
       "id": "US-OC-012",
@@ -349,26 +349,26 @@
       "description": "As the agent harness, I want prior session transcript entries replayed as real API messages when starting a new run, with history sanitization and configurable turn limiting, so that the agent sees actual conversation history across runs instead of relying solely on the memory system for cross-run continuity.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (perform_task \u2014 currently starts fresh each run)",
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py (SessionManager.load_history \u2014 exists but unused at startup)",
-          "submodules/cua/libs/python/agent/agent/agent.py (ComputerAgent.run(messages) \u2014 already accepts a messages list as old_items)"
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (perform_task — currently starts fresh each run)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py (SessionManager.load_history — exists but unused at startup)",
+          "submodules/cua/libs/python/agent/agent/agent.py (ComputerAgent.run(messages) — already accepts a messages list as old_items)"
         ],
         "depends": "US-OC-008 must be done first (needs full pipeline running to modify startup behavior)",
         "designDoc": "openclaw/docs/concepts/session.md (session lifecycle, resume semantics)",
-        "reference": "openclaw/src/agents/pi-embedded-runner/ (start from run/attempt.ts for SessionManager.open \u2192 createAgentSession \u2192 sanitizeSessionHistory \u2192 limitHistoryTurns \u2192 replaceMessages flow; explore google.ts for sanitization pipeline, history.ts for turn limiting)"
+        "reference": "openclaw/src/agents/pi-embedded-runner/ (start from run/attempt.ts for SessionManager.open → createAgentSession → sanitizeSessionHistory → limitHistoryTurns → replaceMessages flow; explore google.ts for sanitization pipeline, history.ts for turn limiting)"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 build_replay_messages() converts TranscriptEntry list to API message dicts; sanitize_history() repairs orphaned tool results, strips base64 images, drops stale usage; limit_history_turns(messages, N) keeps last N user turns with associated assistant/tool responses",
-        "Level 1: Unit tests pass \u2014 compaction entries in transcript are converted to a single assistant message containing the summary text, replacing all messages before firstKeptEntryId",
-        "Level 1: Unit tests pass \u2014 configurable max_history_turns (default: all) limits how many prior turns are replayed",
-        "Level 2: run_magic_tower.sh 50 (run 1), then run_magic_tower.sh 50 (run 2) \u2014 run 2's first API call includes prior messages from run 1 (verify via trajectory turn_000/0000_api_start.json messages array length > 1)",
+        "Level 1: Unit tests pass — build_replay_messages() converts TranscriptEntry list to API message dicts; sanitize_history() repairs orphaned tool results, strips base64 images, drops stale usage; limit_history_turns(messages, N) keeps last N user turns with associated assistant/tool responses",
+        "Level 1: Unit tests pass — compaction entries in transcript are converted to a single assistant message containing the summary text, replacing all messages before firstKeptEntryId",
+        "Level 1: Unit tests pass — configurable max_history_turns (default: all) limits how many prior turns are replayed",
+        "Level 2: run_magic_tower.sh 50 (run 1), then run_magic_tower.sh 50 (run 2) — run 2's first API call includes prior messages from run 1 (verify via trajectory turn_000/0000_api_start.json messages array length > 1)",
         "Level 2: After run 2, agent reasoning in early turns references observations from run 1 (check agent_response.json summaries)",
-        "Level 3: Two sequential 50-step runs on mota_24_easy \u2014 session 2 agent has access to session 1's full conversation context, not just memory tool results"
+        "Level 3: Two sequential 50-step runs on mota_24_easy — session 2 agent has access to session 1's full conversation context, not just memory tool results"
       ],
       "priority": 8.1,
       "passes": true,
-      "notes": "Closes four gaps vs OpenClaw: (1) Prior messages not replayed \u2014 currently each ComputerAgent.run() starts with only the instruction string; OpenClaw replays full transcript as API messages. Fix: load_history() \u2192 build_replay_messages() \u2192 pass as messages arg to agent.run(). CUA's ComputerAgent.run(messages) already accepts a message list that becomes old_items in the loop. (2) Compaction summary as instruction vs message \u2014 currently summaries are prepended to instruction string via _create_compacted_instruction(); OpenClaw injects them as real messages replacing pre-compaction entries. Fix: convert compaction entries to assistant messages in the replay. (3) Cross-run relies on memory system only \u2014 TASK_MEMORY.md bootstrap + memory_search/get are the only bridges; the model never sees prior turns as conversation. Fix: transcript replay gives the model actual prior context. (4) No history sanitization \u2014 OpenClaw has a pipeline (repair tool pairings, drop thinking blocks, strip stale usage, validate images, limit turns). Fix: implement sanitize_history() + limit_history_turns() applied before replay. Key files: agents/openclaw/session.py (add build_replay_messages, sanitize_history, limit_history_turns), openclaw_agent.py (wire replay into perform_task before agent.run())."
+      "notes": "Closes four gaps vs OpenClaw: (1) Prior messages not replayed — currently each ComputerAgent.run() starts with only the instruction string; OpenClaw replays full transcript as API messages. Fix: load_history() → build_replay_messages() → pass as messages arg to agent.run(). CUA's ComputerAgent.run(messages) already accepts a message list that becomes old_items in the loop. (2) Compaction summary as instruction vs message — currently summaries are prepended to instruction string via _create_compacted_instruction(); OpenClaw injects them as real messages replacing pre-compaction entries. Fix: convert compaction entries to assistant messages in the replay. (3) Cross-run relies on memory system only — TASK_MEMORY.md bootstrap + memory_search/get are the only bridges; the model never sees prior turns as conversation. Fix: transcript replay gives the model actual prior context. (4) No history sanitization — OpenClaw has a pipeline (repair tool pairings, drop thinking blocks, strip stale usage, validate images, limit turns). Fix: implement sanitize_history() + limit_history_turns() applied before replay. Key files: agents/openclaw/session.py (add build_replay_messages, sanitize_history, limit_history_turns), openclaw_agent.py (wire replay into perform_task before agent.run())."
     },
     {
       "id": "US-OC-013",
@@ -376,21 +376,21 @@
       "description": "As the agent harness, I want the compaction pipeline's half-split replaced with a budget-aware split that calculates available space for kept messages, so that kept message replay (US-OC-012) doesn't cause cascading compaction from context budget pressure.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (compact_messages \u2014 current half-split logic)"
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (compact_messages — current half-split logic)"
         ],
         "depends": "US-OC-012 must be done first (budget pressure only manifests when kept messages are replayed)",
         "reference": "openclaw/src/agents/compaction.ts (compaction-safeguard extension adjusts split point for budget); openclaw/src/agents/pi-embedded-runner/compact.ts (Pi SDK split logic)",
-        "planFile": "docs/plan/US-OC-006-compaction-pipeline.md (Known Gaps \u2014 Group A); docs/plan/US-OC-013-budget-aware-compaction.md"
+        "planFile": "docs/plan/US-OC-006-compaction-pipeline.md (Known Gaps — Group A); docs/plan/US-OC-013-budget-aware-compaction.md"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 split point calculated as available_for_kept = context_window - instructions_tokens - summary_estimate - margin; split adapts when instructions are large",
-        "Level 1: Unit tests pass \u2014 repairToolUseResultPairing() fixes orphaned tool_use/tool_result pairs at split boundary",
-        "Level 2: run_magic_tower.sh 100 with CONTEXT_WINDOW_OVERRIDE=50000 \u2014 no cascading compaction (compaction_count stays <= 2)"
+        "Level 1: Unit tests pass — split point calculated as available_for_kept = context_window - instructions_tokens - summary_estimate - margin; split adapts when instructions are large",
+        "Level 1: Unit tests pass — repairToolUseResultPairing() fixes orphaned tool_use/tool_result pairs at split boundary",
+        "Level 2: run_magic_tower.sh 100 with CONTEXT_WINDOW_OVERRIDE=50000 — no cascading compaction (compaction_count stays <= 2)"
       ],
       "priority": 12,
       "passes": true,
-      "notes": "PRD Group A (from US-OC-006 design review). Three coupled changes: (1) Replace naive half-split with budget calculation. (2) Add repairToolUseResultPairing() for kept messages \u2014 chunk_messages_by_token_share can split between tool_use and its result, API rejects orphaned tool_results. (3) Wire with US-OC-012's kept message replay. OpenClaw does NOT split by half \u2014 Pi SDK decides the split point internally, and the compaction-safeguard extension adjusts if budget is exceeded."
+      "notes": "PRD Group A (from US-OC-006 design review). Three coupled changes: (1) Replace naive half-split with budget calculation. (2) Add repairToolUseResultPairing() for kept messages — chunk_messages_by_token_share can split between tool_use and its result, API rejects orphaned tool_results. (3) Wire with US-OC-012's kept message replay. OpenClaw does NOT split by half — Pi SDK decides the split point internally, and the compaction-safeguard extension adjusts if budget is exceeded."
     },
     {
       "id": "US-OC-018",
@@ -401,18 +401,18 @@
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (SUMMARIZATION_SYSTEM_PROMPT, summarize_chunk, MERGE_SUMMARIES_INSTRUCTIONS, _merge_summaries to update/remove)"
         ],
         "depends": "US-OC-006 must be done first (compaction pipeline must exist)",
-        "reference": "@mariozechner/pi-coding-agent npm package (https://github.com/badlogic/pi-mono) \u2014 dist/core/compaction/compaction.js (SUMMARIZATION_PROMPT, UPDATE_SUMMARIZATION_PROMPT) and dist/utils.js (SUMMARIZATION_SYSTEM_PROMPT). OpenClaw imports this as a versioned npm dep (package.json: \"@mariozechner/pi-coding-agent\": \"0.55.3\"), not a submodule.",
+        "reference": "@mariozechner/pi-coding-agent npm package (https://github.com/badlogic/pi-mono) — dist/core/compaction/compaction.js (SUMMARIZATION_PROMPT, UPDATE_SUMMARIZATION_PROMPT) and dist/utils.js (SUMMARIZATION_SYSTEM_PROMPT). OpenClaw imports this as a versioned npm dep (package.json: \"@mariozechner/pi-coding-agent\": \"0.55.3\"), not a submodule.",
         "planFile": "docs/plan/US-OC-018-structured-summarization.md"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 SUMMARIZATION_SYSTEM_PROMPT matches OpenClaw's text ('You are a context summarization assistant... Do NOT continue the conversation. ONLY output the structured summary.'); initial summarize_chunk call (no previous_summary) uses SUMMARIZATION_PROMPT with <conversation> tag wrapping; update call (with previous_summary) uses UPDATE_SUMMARIZATION_PROMPT with both <conversation> and <previous-summary> tag wrapping",
+        "Level 1: Unit tests pass — SUMMARIZATION_SYSTEM_PROMPT matches OpenClaw's text ('You are a context summarization assistant... Do NOT continue the conversation. ONLY output the structured summary.'); initial summarize_chunk call (no previous_summary) uses SUMMARIZATION_PROMPT with <conversation> tag wrapping; update call (with previous_summary) uses UPDATE_SUMMARIZATION_PROMPT with both <conversation> and <previous-summary> tag wrapping",
         "Level 1: MERGE_SUMMARIES_INSTRUCTIONS constant and _merge_summaries() function removed from context.py",
-        "Level 2: CONTEXT_WINDOW_OVERRIDE=5000 bash run_magic_tower.sh 15 \u2014 compaction triggers and log output shows structured summary containing '## Goal', '## Progress', and '## Next Steps' sections"
+        "Level 2: CONTEXT_WINDOW_OVERRIDE=5000 bash run_magic_tower.sh 15 — compaction triggers and log output shows structured summary containing '## Goal', '## Progress', and '## Next Steps' sections"
       ],
       "priority": 12.1,
       "passes": true,
-      "notes": "The three prompt constants to adopt from @mariozechner/pi-coding-agent: (1) SUMMARIZATION_SYSTEM_PROMPT \u2014 strict 'do not continue, ONLY output structured summary' framing; (2) SUMMARIZATION_PROMPT \u2014 structured format with Goal/Constraints/Progress/Key Decisions/Next Steps/Critical Context sections; (3) UPDATE_SUMMARIZATION_PROMPT \u2014 distinct update prompt used when previous_summary exists, with explicit rules to preserve/add/move items. Drop MERGE_SUMMARIES_INSTRUCTIONS/_merge_summaries() \u2014 these were workarounds for unstructured prose that are no longer needed. See plan doc for full prompt texts and the summarize_chunk() update spec."
+      "notes": "The three prompt constants to adopt from @mariozechner/pi-coding-agent: (1) SUMMARIZATION_SYSTEM_PROMPT — strict 'do not continue, ONLY output structured summary' framing; (2) SUMMARIZATION_PROMPT — structured format with Goal/Constraints/Progress/Key Decisions/Next Steps/Critical Context sections; (3) UPDATE_SUMMARIZATION_PROMPT — distinct update prompt used when previous_summary exists, with explicit rules to preserve/add/move items. Drop MERGE_SUMMARIES_INSTRUCTIONS/_merge_summaries() — these were workarounds for unstructured prose that are no longer needed. See plan doc for full prompt texts and the summarize_chunk() update spec."
     },
     {
       "id": "US-OC-014",
@@ -421,20 +421,20 @@
       "context": {
         "existingFiles": [
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (transcript logging)",
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (ContextOverflowCallback.on_llm_start \u2014 already sees the full payload)"
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (ContextOverflowCallback.on_llm_start — already sees the full payload)"
         ],
         "depends": "US-OC-012 should be done first (replay needs faithful messages)",
         "reference": "submodules/cua/libs/python/agent/agent/callbacks/base.py (on_llm_start signature)",
-        "planFile": "docs/plan/US-OC-006-compaction-pipeline.md (Known Gaps \u2014 Group B)"
+        "planFile": "docs/plan/US-OC-006-compaction-pipeline.md (Known Gaps — Group B)"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 on_llm_start callback captures messages and stores alongside transcript entries",
-        "Level 2: run_magic_tower.sh 50 \u2014 trajectory includes api_messages entries showing CUA-processed payloads (with ImageRetentionCallback modifications visible)"
+        "Level 1: Unit tests pass — on_llm_start callback captures messages and stores alongside transcript entries",
+        "Level 2: run_magic_tower.sh 50 — trajectory includes api_messages entries showing CUA-processed payloads (with ImageRetentionCallback modifications visible)"
       ],
       "priority": 19,
       "passes": true,
-      "notes": "PRD Group B (from US-OC-006 design review). CUA's PromptInstructionsCallback and ImageRetentionCallback modify messages before API calls. Our transcript captures what CUA yields (output items), not what it sends (preprocessed messages). For replay fidelity, we need the actual API-facing messages. The ContextOverflowCallback already receives the full payload in on_llm_start \u2014 extend it to persist these messages. OUTCOME: Verification story \u2014 our session JSONL already stores bidirectional messages matching OpenClaw's format. Full API payload (preprocessed messages) is a separate optional debug log in OpenClaw, NOT part of the session JSONL. No code changes needed. See docs/plan/US-OC-014-transcript-fidelity.md."
+      "notes": "PRD Group B (from US-OC-006 design review). CUA's PromptInstructionsCallback and ImageRetentionCallback modify messages before API calls. Our transcript captures what CUA yields (output items), not what it sends (preprocessed messages). For replay fidelity, we need the actual API-facing messages. The ContextOverflowCallback already receives the full payload in on_llm_start — extend it to persist these messages. OUTCOME: Verification story — our session JSONL already stores bidirectional messages matching OpenClaw's format. Full API payload (preprocessed messages) is a separate optional debug log in OpenClaw, NOT part of the session JSONL. No code changes needed. See docs/plan/US-OC-014-transcript-fidelity.md."
     },
     {
       "id": "US-OC-015",
@@ -442,14 +442,14 @@
       "description": "As the agent harness, I want an explicit timeout on litellm.acompletion calls in the compaction pipeline, so that a hung summarization call doesn't block the agent indefinitely.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (summarize_chunk \u2014 litellm.acompletion call)"
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (summarize_chunk — litellm.acompletion call)"
         ],
-        "planFile": "docs/plan/US-OC-006-compaction-pipeline.md (Known Gaps \u2014 Group B)"
+        "planFile": "docs/plan/US-OC-006-compaction-pipeline.md (Known Gaps — Group B)"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 summarize_chunk passes timeout=60 to litellm.acompletion; timeout is configurable",
-        "Level 1: Unit test \u2014 timeout triggers fallback to static summary note"
+        "Level 1: Unit tests pass — summarize_chunk passes timeout=60 to litellm.acompletion; timeout is configurable",
+        "Level 1: Unit test — timeout triggers fallback to static summary note"
       ],
       "priority": 20,
       "passes": true,
@@ -461,20 +461,20 @@
       "description": "As the agent harness, I want a multi-stage summarization strategy (split-summarize-merge) alongside iterative rolling summarization, so that 500+ step tasks don't overwhelm the summarization prompt with accumulated context.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (summarize_chunks_iterative \u2014 current approach)"
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (summarize_chunks_iterative — current approach)"
         ],
-        "reference": "openclaw/src/agents/compaction.ts (summarizeInStages \u2014 the multi-stage pattern)",
-        "planFile": "docs/plan/US-OC-006-compaction-pipeline.md (Known Gaps \u2014 Group C)"
+        "reference": "openclaw/src/agents/compaction.ts (summarizeInStages — the multi-stage pattern)",
+        "planFile": "docs/plan/US-OC-006-compaction-pipeline.md (Known Gaps — Group C)"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 summarize_in_stages splits chunks into groups, summarizes each group, then merges group summaries",
-        "Level 1: Unit tests pass \u2014 strategy selection: iterative for <= 10 chunks, multi-stage for > 10 chunks",
-        "Level 2: Synthetic test with 500+ messages \u2014 multi-stage produces coherent summary without context overflow in summarization calls"
+        "Level 1: Unit tests pass — summarize_in_stages splits chunks into groups, summarizes each group, then merges group summaries",
+        "Level 1: Unit tests pass — strategy selection: iterative for <= 10 chunks, multi-stage for > 10 chunks",
+        "Level 2: Synthetic test with 500+ messages — multi-stage produces coherent summary without context overflow in summarization calls"
       ],
       "priority": 23,
       "passes": false,
-      "notes": "PRD Group C (from US-OC-006 design review). For 500+ step tasks, iterative rolling summarization accumulates summary context across many chunks \u2014 the accumulated summary may compete for space in the summarization prompt. OpenClaw's summarizeInStages splits chunks into groups of ~5, summarizes each group independently, then merges the group summaries. Add this as an alternative strategy, auto-selected when chunk count exceeds a threshold."
+      "notes": "PRD Group C (from US-OC-006 design review). For 500+ step tasks, iterative rolling summarization accumulates summary context across many chunks — the accumulated summary may compete for space in the summarization prompt. OpenClaw's summarizeInStages splits chunks into groups of ~5, summarizes each group independently, then merges the group summaries. Add this as an alternative strategy, auto-selected when chunk count exceeds a threshold."
     },
     {
       "id": "US-OC-017",
@@ -482,24 +482,24 @@
       "description": "As the project lead, I want to replace the stop-compact-resume pattern with CUA's custom_loop parameter for mid-conversation compaction, AND fix the compaction summary duplication bug where cross-run replay sends 103K chars of redundant summaries (once in replay messages via firstKeptEntryId, again in the instruction via _create_compacted_instruction).",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/python/agent/agent/agent.py (ComputerAgent \u2014 custom_loop parameter)",
+          "submodules/cua/libs/python/agent/agent/agent.py (ComputerAgent — custom_loop parameter)",
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (stop-compact-resume + _create_compacted_instruction duplication)"
         ],
-        "reference": "openclaw/src/agents/pi-embedded-runner/compact.ts (OpenClaw compaction \u2014 no separate instruction-prepending, summary lives only in transcript via firstKeptEntryId)",
+        "reference": "openclaw/src/agents/pi-embedded-runner/compact.ts (OpenClaw compaction — no separate instruction-prepending, summary lives only in transcript via firstKeptEntryId)",
         "designDoc": "docs/plan/US-OC-017-custom-loop-architecture.md",
-        "planFile": "docs/plan/US-OC-006-compaction-pipeline.md (Known Gaps \u2014 Group D)"
+        "planFile": "docs/plan/US-OC-006-compaction-pipeline.md (Known Gaps — Group D)"
       },
       "acceptanceCriteria": [
-        "Level 1: Fix compaction summary duplication \u2014 skip _create_compacted_instruction when replay_messages is non-empty (interim fix, one-line guard)",
+        "Level 1: Fix compaction summary duplication — skip _create_compacted_instruction when replay_messages is non-empty (interim fix, one-line guard)",
         "Level 1: Delete _create_compacted_instruction and _compact_and_rebuild when custom_loop replaces stop-compact-resume",
         "Level 1: Prototype custom_loop that manages a mutable message list and supports mid-loop compaction injection",
-        "Level 2: run_magic_tower.sh 50 \u2014 verify reduced input tokens on first turn (~80K vs ~180K with duplication removed)",
-        "Level 2: run_magic_tower.sh 50 with custom_loop \u2014 agent completes task without stop-compact-resume; compaction happens mid-conversation",
+        "Level 2: run_magic_tower.sh 50 — verify reduced input tokens on first turn (~80K vs ~180K with duplication removed)",
+        "Level 2: run_magic_tower.sh 50 with custom_loop — agent completes task without stop-compact-resume; compaction happens mid-conversation",
         "Level 2: Compare trajectory quality: custom_loop vs stop-compact-resume on same task"
       ],
       "priority": 15,
       "passes": true,
-      "notes": "PRD Group D (from US-OC-006 design review). Two issues merged: (1) CUA's on_llm_start callback output is discarded after each turn \u2014 the agent loop always re-concatenates from immutable old_items + new_items, making callback-based compaction impossible. A custom_loop could manage its own mutable message list. (2) Compaction summary duplication: build_replay_messages handles compaction entries via firstKeptEntryId (matching OpenClaw's design), but _create_compacted_instruction ALSO loads all summaries from state.json. OpenClaw has NO equivalent of _create_compacted_instruction \u2014 compaction context lives only in the transcript. Interim fix: guard with `if prior_summaries and not replay_messages`. Full fix: delete _create_compacted_instruction when custom_loop removes stop-compact-resume."
+      "notes": "PRD Group D (from US-OC-006 design review). Two issues merged: (1) CUA's on_llm_start callback output is discarded after each turn — the agent loop always re-concatenates from immutable old_items + new_items, making callback-based compaction impossible. A custom_loop could manage its own mutable message list. (2) Compaction summary duplication: build_replay_messages handles compaction entries via firstKeptEntryId (matching OpenClaw's design), but _create_compacted_instruction ALSO loads all summaries from state.json. OpenClaw has NO equivalent of _create_compacted_instruction — compaction context lives only in the transcript. Interim fix: guard with `if prior_summaries and not replay_messages`. Full fix: delete _create_compacted_instruction when custom_loop removes stop-compact-resume."
     },
     {
       "id": "US-OC-019",
@@ -507,11 +507,11 @@
       "description": "As a benchmark operator, I want to configure the agent's thinking mode via CLI flags (--thinking-mode, --thinking-budget) so that the model uses extended thinking during computer-use task execution with configurable depth.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (OpenClawAgent.__init__, perform_task line 250, _compact_and_rebuild line 631 \u2014 where ComputerAgent is created)",
-          "submodules/cua/libs/cua-bench/cua_bench/batch/solver.py (CLI arg parsing \u2014 --model flag at line 130)",
-          "run_magic_tower.sh (shell entry point \u2014 passes CLI flags to solver)"
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (OpenClawAgent.__init__, perform_task line 250, _compact_and_rebuild line 631 — where ComputerAgent is created)",
+          "submodules/cua/libs/cua-bench/cua_bench/batch/solver.py (CLI arg parsing — --model flag at line 130)",
+          "run_magic_tower.sh (shell entry point — passes CLI flags to solver)"
         ],
-        "depends": "None \u2014 standalone feature",
+        "depends": "None — standalone feature",
         "reference": "submodules/cua/libs/python/agent/agent/ (start from agent.py lines 176-234 for ComputerAgent.__init__ **additional_generation_kwargs; explore loops/gemini.py lines 643-665 for existing thinking_level kwarg pattern)"
       },
       "acceptanceCriteria": [
@@ -520,16 +520,16 @@
         "Level 1: solver.py accepts --thinking-mode and --thinking-budget CLI flags and passes them to agent kwargs",
         "Level 1: OpenClawAgent.__init__ reads thinking_mode/thinking_budget from kwargs and stores a ThinkingConfig",
         "Level 1: ThinkingConfig.to_api_params() returns correct dict for Anthropic extended thinking API ({thinking: {type: enabled, budget_tokens: N}})",
-        "Level 1: Mode presets: off \u2192 disabled, light \u2192 5000 tokens, standard \u2192 10000, deep \u2192 25000; explicit --thinking-budget overrides preset",
+        "Level 1: Mode presets: off → disabled, light → 5000 tokens, standard → 10000, deep → 25000; explicit --thinking-budget overrides preset",
         "Level 1: ComputerAgent is created with thinking API params in **additional_generation_kwargs when mode is not off",
         "Level 1: _compact_and_rebuild also passes thinking params to the rebuilt ComputerAgent",
-        "Level 2: run_magic_tower.sh 50 with --thinking-mode standard \u2014 trajectory logs contain reasoning message types",
-        "Level 2: run_magic_tower.sh 50 with default (off) \u2014 no reasoning blocks in trajectory logs",
+        "Level 2: run_magic_tower.sh 50 with --thinking-mode standard — trajectory logs contain reasoning message types",
+        "Level 2: run_magic_tower.sh 50 with default (off) — no reasoning blocks in trajectory logs",
         "Level 2: grep -r '\"reasoning\"' trycua/cua-bench/mota_24_easy/task_0_agent_logs/trajectories/ confirms presence/absence"
       ],
       "priority": 25,
       "passes": false,
-      "notes": "ThinkingConfig defines mode presets that map to budget_tokens values. Explicit --thinking-budget overrides the preset. ComputerAgent passes **additional_generation_kwargs through to the Anthropic loop's predict_step, which spreads **kwargs into litellm.acompletion() \u2014 so passing thinking={type: enabled, budget_tokens: N} flows through without CUA SDK changes. Both initial ComputerAgent (line 250) and post-compaction rebuild (line 631) must receive the same thinking params. ThinkingConfig also has optional flush_mode and compaction_mode fields (default 'off') consumed by US-OC-020."
+      "notes": "ThinkingConfig defines mode presets that map to budget_tokens values. Explicit --thinking-budget overrides the preset. ComputerAgent passes **additional_generation_kwargs through to the Anthropic loop's predict_step, which spreads **kwargs into litellm.acompletion() — so passing thinking={type: enabled, budget_tokens: N} flows through without CUA SDK changes. Both initial ComputerAgent (line 250) and post-compaction rebuild (line 631) must receive the same thinking params. ThinkingConfig also has optional flush_mode and compaction_mode fields (default 'off') consumed by US-OC-020."
     },
     {
       "id": "US-OC-020",
@@ -537,8 +537,8 @@
       "description": "As a benchmark operator, I want per-call-site thinking config for memory flush and compaction LLM calls so that these auxiliary summarization calls can use a different (typically lighter) thinking mode than the main loop.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (_run_memory_flush line 528 \u2014 direct litellm.acompletion; _compact_and_rebuild line 601 \u2014 calls compact_messages)",
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (_summarize_chunk line 609, _final_summary line 669 \u2014 both call litellm.acompletion)"
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (_run_memory_flush line 528 — direct litellm.acompletion; _compact_and_rebuild line 601 — calls compact_messages)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (_summarize_chunk line 609, _final_summary line 669 — both call litellm.acompletion)"
         ],
         "depends": "US-OC-019 must be done first (provides ThinkingConfig with flush_mode/compaction_mode fields)",
         "reference": "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (start from _summarize_chunk at line 573 for the litellm.acompletion call pattern)"
@@ -548,11 +548,11 @@
         "Level 1: _run_memory_flush passes thinking API params to litellm.acompletion when flush_mode is not off",
         "Level 1: compact_messages and its _summarize_chunk/_final_summary accept and pass thinking params when compaction_mode is not off",
         "Level 1: Unit test: ThinkingConfig(mode='deep', flush_mode='light', compaction_mode='off') produces correct API params for each call site",
-        "Level 2: run_magic_tower.sh 50 with --thinking-mode deep and CONTEXT_WINDOW_OVERRIDE=50000 \u2014 compaction triggers and completes without error"
+        "Level 2: run_magic_tower.sh 50 with --thinking-mode deep and CONTEXT_WINDOW_OVERRIDE=50000 — compaction triggers and completes without error"
       ],
       "priority": 26,
       "passes": false,
-      "notes": "Memory flush and compaction are summarization tasks that typically benefit less from deep thinking. Both default to 'off' even when the main loop uses thinking. CLI flags --flush-thinking-mode and --compaction-thinking-mode are not needed now \u2014 code-level config via ThinkingConfig fields is sufficient. The key change is threading thinking params through compact_messages \u2192 _summarize_chunk/_final_summary, which currently only accept model and max_tokens."
+      "notes": "Memory flush and compaction are summarization tasks that typically benefit less from deep thinking. Both default to 'off' even when the main loop uses thinking. CLI flags --flush-thinking-mode and --compaction-thinking-mode are not needed now — code-level config via ThinkingConfig fields is sufficient. The key change is threading thinking params through compact_messages → _summarize_chunk/_final_summary, which currently only accept model and max_tokens."
     },
     {
       "id": "US-OC-021",
@@ -560,7 +560,7 @@
       "description": "As a benchmark operator, I want a --summary-model CLI flag so that I can use a cheaper/faster model for summarization (compaction) and memory flush while keeping the main agent on a more capable model.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/cua-bench/cua_bench/batch/solver.py (parse_args, initialize_agent \u2014 CLI arg parsing and agent kwarg wiring)",
+          "submodules/cua/libs/cua-bench/cua_bench/batch/solver.py (parse_args, initialize_agent — CLI arg parsing and agent kwarg wiring)",
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (self.model usage in _run_memory_flush and _compact_and_rebuild)",
           "run_magic_tower.sh (shell script entry point)"
         ]
@@ -570,7 +570,7 @@
         "Level 1: Unit tests pass (uv run pytest tests/)",
         "Level 1: OpenClawAgent(model='a', summary_model='b') stores both; OpenClawAgent(model='a') defaults summary_model to 'a'",
         "Level 1: solver parse_args recognizes --summary-model and passes it through to agent kwargs",
-        "Level 2: run_magic_tower.sh 15 with --summary-model set \u2014 solver log shows summary_model parsed, agent prints 'Summary/flush model: ...' at startup"
+        "Level 2: run_magic_tower.sh 15 with --summary-model set — solver log shows summary_model parsed, agent prints 'Summary/flush model: ...' at startup"
       ],
       "priority": 18,
       "passes": true,
@@ -582,26 +582,26 @@
       "description": "As the agent harness, I want replay messages converted from Chat Completions format (role-based messages with nested content blocks) to Responses API format (top-level type-dispatched items), so that transcript replay works correctly with ALL model backends (Anthropic, OpenAI, etc.) instead of being silently mangled by agent loop format converters.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py (convert_to_responses_api_format \u2014 needs rewrite to unnest content blocks)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py (convert_to_responses_api_format — needs rewrite to unnest content blocks)",
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (replay wiring at lines 192-200)",
-          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (_convert_responses_items_to_completion_messages \u2014 line 169 drops function_call/computer_call blocks from assistant content arrays)"
+          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (_convert_responses_items_to_completion_messages — line 169 drops function_call/computer_call blocks from assistant content arrays)"
         ],
         "depends": "US-OC-012 (transcript replay must exist first)",
-        "reference": "submodules/cua/libs/python/agent/agent/loops/anthropic.py:125 (_convert_responses_items_to_completion_messages \u2014 the format converter that consumes our replay messages; understand its dispatch on type/role to know what format we must produce)",
+        "reference": "submodules/cua/libs/python/agent/agent/loops/anthropic.py:125 (_convert_responses_items_to_completion_messages — the format converter that consumes our replay messages; understand its dispatch on type/role to know what format we must produce)",
         "planFile": "docs/plan/US-OC-022-replay-format-fix.md"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 convert_to_responses_api_format unnests assistant content blocks: function_call blocks become top-level {type: 'function_call', call_id, name, arguments} items; computer_call blocks become top-level {type: 'computer_call', call_id, action} items; text blocks become {type: 'message', role: 'assistant', content: [{type: 'output_text', text: ...}]}",
-        "Level 1: Unit tests pass \u2014 tool role messages with tool_result blocks become top-level {type: 'function_call_output', call_id, output} items",
-        "Level 1: Unit tests pass \u2014 user role messages with text content become standard user messages (no unnesting needed)",
+        "Level 1: Unit tests pass — convert_to_responses_api_format unnests assistant content blocks: function_call blocks become top-level {type: 'function_call', call_id, name, arguments} items; computer_call blocks become top-level {type: 'computer_call', call_id, action} items; text blocks become {type: 'message', role: 'assistant', content: [{type: 'output_text', text: ...}]}",
+        "Level 1: Unit tests pass — tool role messages with tool_result blocks become top-level {type: 'function_call_output', call_id, output} items",
+        "Level 1: Unit tests pass — user role messages with text content become standard user messages (no unnesting needed)",
         "Level 1: Non-OpenAI models also get properly formatted replay (the conversion is needed for ALL backends, not just OpenAI)",
-        "Level 2: run_magic_tower.sh 50 with anthropic/claude-sonnet-4-20250514 after 2+ prior runs \u2014 turn_000/0000_api_start.json messages array contains replay messages with tool calls (not just 2 messages)",
-        "Level 2: run_magic_tower.sh 15 with openai/computer-use-preview and existing transcript \u2014 no 'Invalid value' API errors from replay messages"
+        "Level 2: run_magic_tower.sh 50 with anthropic/claude-sonnet-4-20250514 after 2+ prior runs — turn_000/0000_api_start.json messages array contains replay messages with tool calls (not just 2 messages)",
+        "Level 2: run_magic_tower.sh 15 with openai/computer-use-preview and existing transcript — no 'Invalid value' API errors from replay messages"
       ],
       "priority": 8.2,
       "passes": true,
-      "notes": "Root cause: replay messages use Chat Completions format (role-based messages with nested content arrays like [{type: 'text', ...}, {type: 'function_call', ...}]) but CUA SDK agent loops expect Responses API format (top-level type-dispatched items). The Anthropic loop's _convert_responses_items_to_completion_messages (line 169) does content = '\\n'.join(item.get('text', '') for item in content) on assistant messages, silently dropping all function_call/computer_call blocks. Tool messages (role='tool') with tool_result blocks are silently dropped entirely since they match none of the type/role dispatch conditions. The fix is in convert_to_responses_api_format() in session.py: unnest content blocks into top-level Responses API items. This must apply to ALL models (not just OpenAI) since ALL agent loops dispatch on top-level type. Key insight: remove the _is_openai_model guard \u2014 ALL backends need this conversion."
+      "notes": "Root cause: replay messages use Chat Completions format (role-based messages with nested content arrays like [{type: 'text', ...}, {type: 'function_call', ...}]) but CUA SDK agent loops expect Responses API format (top-level type-dispatched items). The Anthropic loop's _convert_responses_items_to_completion_messages (line 169) does content = '\\n'.join(item.get('text', '') for item in content) on assistant messages, silently dropping all function_call/computer_call blocks. Tool messages (role='tool') with tool_result blocks are silently dropped entirely since they match none of the type/role dispatch conditions. The fix is in convert_to_responses_api_format() in session.py: unnest content blocks into top-level Responses API items. This must apply to ALL models (not just OpenAI) since ALL agent loops dispatch on top-level type. Key insight: remove the _is_openai_model guard — ALL backends need this conversion."
     },
     {
       "id": "US-OC-024",
@@ -609,22 +609,22 @@
       "description": "As the agent harness, I want AGENTS.md to provide richer memory writing guidance (matching OpenClaw's template quality), so that the model knows WHEN to write to task_memory vs session logs and HOW to curate memories over time.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md (current 52-line version \u2014 memory section is too thin)"
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md (current 52-line version — memory section is too thin)"
         ],
         "depends": "US-OC-003 (memory tools must exist)",
-        "reference": "openclaw/docs/reference/templates/AGENTS.md (golden template \u2014 220 lines with rich memory guidance), openclaw/docs/concepts/memory.md (memory philosophy: daily notes vs curated long-term)",
+        "reference": "openclaw/docs/reference/templates/AGENTS.md (golden template — 220 lines with rich memory guidance), openclaw/docs/concepts/memory.md (memory philosophy: daily notes vs curated long-term)",
         "planFile": "docs/plan/US-OC-024-agents-md-memory-guidance.md"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: AGENTS.md Memory section distinguishes session logs ('raw logs of what happened, append-only') from task memory ('curated knowledge \u2014 strategies, key observations, distilled learnings, overwrite')",
-        "Level 1: AGENTS.md includes explicit trigger mapping \u2014 at least 3 'when X happens \u2192 write to Y' examples (e.g., 'discover a working strategy \u2192 task_memory', 'observe game state \u2192 session log', 'make a mistake \u2192 session log + update task_memory if pattern')",
+        "Level 1: AGENTS.md Memory section distinguishes session logs ('raw logs of what happened, append-only') from task memory ('curated knowledge — strategies, key observations, distilled learnings, overwrite')",
+        "Level 1: AGENTS.md includes explicit trigger mapping — at least 3 'when X happens → write to Y' examples (e.g., 'discover a working strategy → task_memory', 'observe game state → session log', 'make a mistake → session log + update task_memory if pattern')",
         "Level 1: AGENTS.md includes consolidation guidance telling the model to periodically review session logs and update TASK_MEMORY.md with durable insights",
-        "Level 2: run_magic_tower.sh 50 \u2014 agent writes to both session log (target='session') AND task_memory (target='task_memory') at least once during a run, demonstrating it understands the distinction"
+        "Level 2: run_magic_tower.sh 50 — agent writes to both session log (target='session') AND task_memory (target='task_memory') at least once during a run, demonstrating it understands the distinction"
       ],
       "priority": 21,
       "passes": true,
-      "notes": "This is a prompt engineering task, not a code change \u2014 only AGENTS.md needs updating. Investigation (2026-03-16) found OpenClaw's template AGENTS.md is 4x larger than ours and includes: (1) explicit distinction between daily notes ('raw logs') and long-term memory ('curated wisdom'), (2) trigger mapping ('someone says remember \u2192 daily file', 'learn a lesson \u2192 update relevant file'), (3) consolidation guidance ('review daily files and update MEMORY.md with what's worth keeping'), (4) memory maintenance during heartbeats. Our model currently defaults to session writes because AGENTS.md doesn't explain the task_memory vs session distinction well enough. The memory_flush prompt also only points to target='session' \u2014 consider updating it to mention task_memory for durable insights."
+      "notes": "This is a prompt engineering task, not a code change — only AGENTS.md needs updating. Investigation (2026-03-16) found OpenClaw's template AGENTS.md is 4x larger than ours and includes: (1) explicit distinction between daily notes ('raw logs') and long-term memory ('curated wisdom'), (2) trigger mapping ('someone says remember → daily file', 'learn a lesson → update relevant file'), (3) consolidation guidance ('review daily files and update MEMORY.md with what's worth keeping'), (4) memory maintenance during heartbeats. Our model currently defaults to session writes because AGENTS.md doesn't explain the task_memory vs session distinction well enough. The memory_flush prompt also only points to target='session' — consider updating it to mention task_memory for durable insights."
     },
     {
       "id": "US-OC-023",
@@ -632,18 +632,18 @@
       "description": "As the agent harness, I want the CUA Anthropic loop to correctly handle the computer_20251124 tool version (beta flag computer-use-2025-11-24) used by Claude Opus 4.6 and Sonnet 4.6, so that tool_use/tool_result pairing is not broken during multi-turn runs with compaction.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (MODEL_TOOL_MAPPING \u2014 new pattern for claude-opus-4-6/sonnet-4-6; _convert_responses_items_to_completion_messages and _convert_completion_to_responses_items \u2014 format converters)"
+          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (MODEL_TOOL_MAPPING — new pattern for claude-opus-4-6/sonnet-4-6; _convert_responses_items_to_completion_messages and _convert_completion_to_responses_items — format converters)"
         ],
         "depends": "None (standalone CUA SDK fix)"
       },
       "acceptanceCriteria": [
         "Level 1: Identify what computer_20251124 returns differently from computer_20250124 that causes orphaned tool_use blocks",
         "Level 1: Fix the CUA Anthropic loop to handle the new response format correctly",
-        "Level 2: CONTEXT_WINDOW_OVERRIDE=35000 bash run_magic_tower.sh 50 with anthropic/claude-opus-4-6 \u2014 completes all 50 steps including compaction without tool_use pairing errors"
+        "Level 2: CONTEXT_WINDOW_OVERRIDE=35000 bash run_magic_tower.sh 50 with anthropic/claude-opus-4-6 — completes all 50 steps including compaction without tool_use pairing errors"
       ],
       "priority": 22,
       "passes": false,
-      "notes": "Discovered 2026-03-16: anthropic.py was patched to route claude-opus-4-6 and claude-sonnet-4-6 to computer_20251124 tool version (computer-use-2025-11-24 beta). After compaction at turn 11, the agent crashes at turn 19 with 'tool_use ids were found without tool_result blocks immediately after'. The same test passes with anthropic/claude-sonnet-4-20250514 (which uses computer_20250124). The orphaned tool_use is at messages.3 in the post-compaction conversation \u2014 entirely managed by CUA's internal loop, not our replay/repair code. Root cause is likely a response format difference in the newer computer-use API version that the CUA loop's message converter doesn't handle. Workaround: revert anthropic.py to use computer_20250124 for all models."
+      "notes": "Discovered 2026-03-16: anthropic.py was patched to route claude-opus-4-6 and claude-sonnet-4-6 to computer_20251124 tool version (computer-use-2025-11-24 beta). After compaction at turn 11, the agent crashes at turn 19 with 'tool_use ids were found without tool_result blocks immediately after'. The same test passes with anthropic/claude-sonnet-4-20250514 (which uses computer_20250124). The orphaned tool_use is at messages.3 in the post-compaction conversation — entirely managed by CUA's internal loop, not our replay/repair code. Root cause is likely a response format difference in the newer computer-use API version that the CUA loop's message converter doesn't handle. Workaround: revert anthropic.py to use computer_20250124 for all models."
     },
     {
       "id": "US-OC-025",
@@ -660,14 +660,14 @@
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 should_run_memory_flush still works with same thresholds; new pre-turn check uses overflow_cb.current_tokens from previous iteration (0 on first iteration)",
-        "Level 1: Flush check moved from inside compaction_triggered block (lines 387-399) to before agent.run() in the while loop \u2014 runs on every iteration, not just when compaction triggers",
-        "Level 2: CONTEXT_WINDOW_OVERRIDE=50000 bash run_magic_tower.sh 50 \u2014 log output shows [MemoryFlush] firing BEFORE [Compaction] in at least one compaction cycle",
+        "Level 1: Unit tests pass — should_run_memory_flush still works with same thresholds; new pre-turn check uses overflow_cb.current_tokens from previous iteration (0 on first iteration)",
+        "Level 1: Flush check moved from inside compaction_triggered block (lines 387-399) to before agent.run() in the while loop — runs on every iteration, not just when compaction triggers",
+        "Level 2: CONTEXT_WINDOW_OVERRIDE=50000 bash run_magic_tower.sh 50 — log output shows [MemoryFlush] firing BEFORE [Compaction] in at least one compaction cycle",
         "Level 2: With default context window (200K), flush fires when tokens approach threshold without requiring compaction to trigger first"
       ],
       "priority": 5.2,
       "passes": true,
-      "notes": "BUG: Currently flush is wired inside the compaction trigger (after needs_compaction=True). OpenClaw runs flush BEFORE each agent turn (agent-runner.ts:221). With our current wiring, compaction fires at 80% of context_window but flush requires (context_window - 4K) tokens \u2014 so compaction always fires first and flush never runs. Fix: move the should_run_memory_flush() check + _run_memory_flush() call to the top of the while loop, before agent.run(). On the first iteration current_tokens is 0 (skip flush). On subsequent iterations, use overflow_cb.current_tokens from the previous run. This matches OpenClaw's pattern where flush is evaluated pre-emptively on every turn, not reactively at compaction time. DONE: Flush moved to per-step loop (CUA cannot do pre-turn because agent.run() is opaque; per-step is the equivalent). Added DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR=20K to match OpenClaw. Added conversation context injection into flush model call. Added flush guard reset in init_session for cross-run correctness."
+      "notes": "BUG: Currently flush is wired inside the compaction trigger (after needs_compaction=True). OpenClaw runs flush BEFORE each agent turn (agent-runner.ts:221). With our current wiring, compaction fires at 80% of context_window but flush requires (context_window - 4K) tokens — so compaction always fires first and flush never runs. Fix: move the should_run_memory_flush() check + _run_memory_flush() call to the top of the while loop, before agent.run(). On the first iteration current_tokens is 0 (skip flush). On subsequent iterations, use overflow_cb.current_tokens from the previous run. This matches OpenClaw's pattern where flush is evaluated pre-emptively on every turn, not reactively at compaction time. DONE: Flush moved to per-step loop (CUA cannot do pre-turn because agent.run() is opaque; per-step is the equivalent). Added DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR=20K to match OpenClaw. Added conversation context injection into flush model call. Added flush guard reset in init_session for cross-run correctness."
     },
     {
       "id": "US-OC-028",
@@ -684,17 +684,17 @@
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
         "Level 1: All existing tests pass (uv run pytest tests/test_openclaw_compaction.py)",
-        "Level 1: perform_task() async for loop body is \u226420 lines (currently ~90) \u2014 only usage tracking, step/max_steps check, DONE check, and result collection",
-        "Level 1: Memory flush check (should_run_memory_flush + _run_memory_flush) exists in exactly ONE place \u2014 inside OpenClawComputerAgent.run(), not duplicated in perform_task() and _memory_flush_hook closure",
+        "Level 1: perform_task() async for loop body is ≤20 lines (currently ~90) — only usage tracking, step/max_steps check, DONE check, and result collection",
+        "Level 1: Memory flush check (should_run_memory_flush + _run_memory_flush) exists in exactly ONE place — inside OpenClawComputerAgent.run(), not duplicated in perform_task() and _memory_flush_hook closure",
         "Level 1: overflow_cb passed once to OpenClawComputerAgent constructor (auto-injected into callbacks list internally), not passed separately in both callbacks= and overflow_cb=",
         "Level 1: _run_memory_flush is a standalone async function in openclaw/memory_flush.py, not a method on OpenClawAgent",
         "Level 1: _serialize_flush_context and _serialize_content_blocks moved from openclaw_agent.py to openclaw/memory_flush.py",
-        "Level 2: CONTEXT_WINDOW_OVERRIDE=50000 bash run_magic_tower.sh 50 \u2014 compaction fires and completes, agent continues post-compaction",
+        "Level 2: CONTEXT_WINDOW_OVERRIDE=50000 bash run_magic_tower.sh 50 — compaction fires and completes, agent continues post-compaction",
         "Level 2: Same VM run shows [MemoryFlush] firing at expected threshold (log output confirms flush runs)"
       ],
       "priority": 24,
       "passes": true,
-      "notes": "Tech debt from US-OC-017. The custom loop architecture is correct but the boundary between perform_task() and OpenClawComputerAgent is messy: (1) dual memory flush paths \u2014 per-step in perform_task L372-386 AND pre-compaction hook closure L254-266, both calling the same _run_memory_flush; (2) _run_memory_flush is a method on OpenClawAgent but serves OpenClawComputerAgent via closure capturing 6+ variables; (3) overflow_cb double-passed (callbacks list + explicit kwarg); (4) transcript logging (group_step_output \u2192 session_mgr.append_message, ~30 lines) runs per-step in perform_task but session_mgr already lives on the agent. Solution: add on_step callback hook to OpenClawComputerAgent for transcript logging + tracer, move memory flush into the agent's run() loop, auto-inject overflow_cb into callbacks. This makes perform_task() a thin setup-run-result wrapper."
+      "notes": "Tech debt from US-OC-017. The custom loop architecture is correct but the boundary between perform_task() and OpenClawComputerAgent is messy: (1) dual memory flush paths — per-step in perform_task L372-386 AND pre-compaction hook closure L254-266, both calling the same _run_memory_flush; (2) _run_memory_flush is a method on OpenClawAgent but serves OpenClawComputerAgent via closure capturing 6+ variables; (3) overflow_cb double-passed (callbacks list + explicit kwarg); (4) transcript logging (group_step_output → session_mgr.append_message, ~30 lines) runs per-step in perform_task but session_mgr already lives on the agent. Solution: add on_step callback hook to OpenClawComputerAgent for transcript logging + tracer, move memory flush into the agent's run() loop, auto-inject overflow_cb into callbacks. This makes perform_task() a thin setup-run-result wrapper."
     },
     {
       "id": "US-OC-029",
@@ -702,7 +702,7 @@
       "description": "As the agent harness, I want a subagent tool that spawns a secondary LLM call (text-only or with screenshot context) to handle reasoning subtasks (planning, analysis, summarization) without consuming main loop turns, so that the primary computer-use agent can delegate complex thinking to a cheaper/faster model while staying focused on VM interaction.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py (existing memory tools \u2014 follow BaseTool pattern)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py (existing memory tools — follow BaseTool pattern)",
           "submodules/cua/libs/python/agent/agent/tools/base.py (BaseTool interface)"
         ],
         "reference": "openclaw/docs/concepts/ (explore for subagent/delegation patterns if available)",
@@ -710,10 +710,10 @@
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 SubagentTool accepts a prompt string, calls litellm.acompletion, returns the response text",
+        "Level 1: Unit tests pass — SubagentTool accepts a prompt string, calls litellm.acompletion, returns the response text",
         "Level 1: SubagentTool respects model config (uses --subagent-model or falls back to --summary-model)",
         "Level 1: SubagentTool has configurable timeout (default 60s) and token budget",
-        "Level 2: run_magic_tower.sh 50 \u2014 trajectory logs show agent invoked subagent tool at least once",
+        "Level 2: run_magic_tower.sh 50 — trajectory logs show agent invoked subagent tool at least once",
         "Level 2: Subagent responses in trajectory contain task-relevant reasoning (not boilerplate)"
       ],
       "priority": 29,
@@ -726,18 +726,18 @@
       "description": "As the agent harness, I want a visual analysis tool that sends a screenshot region (or full screenshot) to a VLM with a specific question, so that the agent can extract structured information from charts, diagrams, game UIs, and other visual elements without relying solely on the main model's implicit vision capability.",
       "context": {
         "existingFiles": [
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py (existing memory tools \u2014 follow BaseTool pattern)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py (existing memory tools — follow BaseTool pattern)",
           "submodules/cua/libs/python/agent/agent/tools/base.py (BaseTool interface)",
-          "utils/evaluation.py (llm_vision_judge \u2014 existing VLM call pattern for reference)"
+          "utils/evaluation.py (llm_vision_judge — existing VLM call pattern for reference)"
         ],
         "reference": "utils/evaluation.py (VLM call patterns with image encoding)"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Unit tests pass \u2014 VisualAnalysisTool accepts a question + optional region coordinates, returns VLM response text",
+        "Level 1: Unit tests pass — VisualAnalysisTool accepts a question + optional region coordinates, returns VLM response text",
         "Level 1: Tool can operate on current screenshot (default) or a saved milestone image",
         "Level 1: Tool uses configurable model (VLM provider via --visual-model or fallback)",
-        "Level 2: run_magic_tower.sh 50 \u2014 trajectory logs show agent invoked visual analysis at least once",
+        "Level 2: run_magic_tower.sh 50 — trajectory logs show agent invoked visual analysis at least once",
         "Level 2: Visual analysis responses contain task-relevant observations (e.g., game state, UI element identification)"
       ],
       "priority": 30,
@@ -754,11 +754,11 @@
           "docs/openclaw-source-analysis.md (OpenClaw component inventory)"
         ],
         "reference": "openclaw/docs/concepts/ (explore all concept docs for tool-related patterns)",
-        "depends": "None \u2014 standalone audit. Should inform future tool stories."
+        "depends": "None — standalone audit. Should inform future tool stories."
       },
       "acceptanceCriteria": [
         "Level 1: Produce docs/tool-migration-audit.md listing all OpenClaw tools with: (a) what it does, (b) relevance to CUA computer-use, (c) migration complexity (low/medium/high), (d) priority recommendation",
-        "Level 1: Audit covers at least: file tools, shell tools, web browsing, memory tools, code analysis, messaging \u2014 classify each as migrate/skip/adapt",
+        "Level 1: Audit covers at least: file tools, shell tools, web browsing, memory tools, code analysis, messaging — classify each as migrate/skip/adapt",
         "Level 1: For each \"migrate\" tool, identify the OpenClaw source file and the CUA integration point"
       ],
       "priority": 31,
@@ -772,8 +772,8 @@
       "context": {
         "existingFiles": [
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py (convert_to_responses_api_format, build_replay_messages, sanitize_history)",
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (compaction pipeline \u2014 litellm calls)",
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/memory_flush.py (memory flush \u2014 litellm calls)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (compaction pipeline — litellm calls)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/memory_flush.py (memory flush — litellm calls)",
           "submodules/cua/libs/python/agent/agent/loops/ (explore all loop implementations: anthropic.py, openai.py, etc.)"
         ],
         "depends": "US-OC-022 (replay format fix must be done first)",
@@ -782,16 +782,72 @@
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
         "Level 1: Investigation report docs/cross-model-compatibility.md covering: (a) Anthropic loop format expectations, (b) OpenAI loop format expectations, (c) Gemini loop format expectations (if CUA supports it), (d) Kimi/Moonshot format expectations, (e) format mismatches found, (f) cross-model combinations tested",
-        "Level 1: Unit tests \u2014 replay messages round-trip correctly through each supported loop's format converter (mock the LLM call, test the message pipeline)",
-        "Level 1: Unit tests \u2014 compaction summary output from model A replays correctly into model B's loop (test all pairwise combinations: Anthropic\u2194OpenAI, Anthropic\u2194Gemini, etc.)",
-        "Level 2: run_magic_tower.sh 15 with openai/computer-use-preview \u2014 no API format errors from replay messages",
-        "Level 2: run_magic_tower.sh 15 with anthropic/claude-sonnet-4-20250514 --summary-model openai/gpt-4o \u2014 compaction completes without format errors",
-        "Level 2: run_magic_tower.sh 15 with Gemini model (if computer-use supported) \u2014 document results even if it fails",
-        "Level 2: run_magic_tower.sh 15 with Kimi K2.5 (if computer-use supported) \u2014 document results even if it fails"
+        "Level 1: Unit tests — replay messages round-trip correctly through each supported loop's format converter (mock the LLM call, test the message pipeline)",
+        "Level 1: Unit tests — compaction summary output from model A replays correctly into model B's loop (test all pairwise combinations: Anthropic↔OpenAI, Anthropic↔Gemini, etc.)",
+        "Level 2: run_magic_tower.sh 15 with openai/computer-use-preview — no API format errors from replay messages",
+        "Level 2: run_magic_tower.sh 15 with anthropic/claude-sonnet-4-20250514 --summary-model openai/gpt-4o — compaction completes without format errors",
+        "Level 2: run_magic_tower.sh 15 with Gemini model (if computer-use supported) — document results even if it fails",
+        "Level 2: run_magic_tower.sh 15 with Kimi K2.5 (if computer-use supported) — document results even if it fails"
       ],
       "priority": 32,
       "passes": false,
-      "notes": "Models to cover: Anthropic (claude-sonnet-4-20250514, claude-opus-4-6), OpenAI (computer-use-preview, gpt-4o), Google Gemini (gemini-2.5-pro or similar with computer-use if available), Kimi K2.5. For models without computer-use support, test only the summarization/flush path (as --summary-model). Cross-model test matrix: main-model \u00d7 summary-model for all viable combinations. If a model family is not supported by CUA's loop system, document the gap and what would be needed."
+      "notes": "Models to cover: Anthropic (claude-sonnet-4-20250514, claude-opus-4-6), OpenAI (computer-use-preview, gpt-4o), Google Gemini (gemini-2.5-pro or similar with computer-use if available), Kimi K2.5. For models without computer-use support, test only the summarization/flush path (as --summary-model). Cross-model test matrix: main-model × summary-model for all viable combinations. If a model family is not supported by CUA's loop system, document the gap and what would be needed."
+    },
+    {
+      "id": "US-OC-033",
+      "title": "Tool: Analyze Remote Image (VLM-based)",
+      "description": "As the agent, I want an analyze_image tool that reads an image file from the remote VM and sends it to a vision model with a specific question, returning a text analysis, so that I can verify saved milestone screenshots and extract information from any image on the remote desktop without adding raw images to my context.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/python/agent/agent/tools/milestone.py (MilestoneTool — saves screenshots but returns text-only, no visual feedback)",
+          "submodules/cua/libs/python/agent/agent/tools/base.py (BaseTool interface)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py (build_tools — where to register the new tool)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (litellm.acompletion pattern for VLM calls)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md (agent instructions — add verification guidance)"
+        ],
+        "reference": "../openclaw/src/agents/tools/image-tool.ts (OpenClaw image tool — VLM analysis pattern: read image, send to VLM with prompt, return text. Key functions: createImageTool, runImagePrompt, buildImageContext). Also: ../openclaw/src/agents/tools/image-tool.helpers.ts, ../openclaw/src/agents/tools/media-tool-shared.ts (buildTextToolResult)",
+        "planFile": "docs/plan/US-OC-033-read-remote-image.md"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: Unit tests pass — AnalyzeImageTool extends BaseTool with @register_tool(\"analyze_image\"), accepts image (path) and prompt (question) parameters",
+        "Level 1: Tool detects path type — Windows paths (C:\\...) read from remote VM via interface.read_bytes(), Unix paths (/...) read from local filesystem",
+        "Level 1: Tool sends image + prompt to VLM via litellm.completion(), returns text analysis",
+        "Level 1: Tool uses summary_model (cheaper model) for VLM calls, not the main agent model",
+        "Level 1: Tool handles errors gracefully — file not found, non-image file, VLM failure all return text error messages",
+        "Level 1: Tool is registered in build_tools() alongside existing tools",
+        "Level 2: run_magic_tower.sh 50 — agent calls analyze_image after save_milestone_screenshot and trajectory shows text analysis in tool result",
+        "Level 2: AGENTS.md updated with guidance to verify milestones using analyze_image after saving"
+      ],
+      "priority": 33,
+      "passes": true,
+      "notes": "Modeled after OpenClaw's image tool (../openclaw/src/agents/tools/image-tool.ts). Core pattern: read image → send to VLM with prompt → return text analysis. Key advantage over raw image return: no context bloat (text response ~100-200 tokens vs ~1500 tokens for an image). IMPORTANT: Dual-path image loading — the tool must handle both remote VM paths (Windows, read via interface.read_bytes) and local paths (Unix, read via open()). The agent primarily uses remote paths (milestone screenshots), but local paths enable analyzing reference images or trajectory screenshots saved by TrajectorySaverCallback. Path detection: Windows-style (C:\\..., backslashes) = remote VM, Unix-style (/...) = local. Same heuristic as MilestoneTool._is_windows_path(). Uses litellm.completion() for VLM calls (same as compaction pipeline in context.py). Model defaults to summary_model from agent config. No agent loop changes needed — tool returns text, existing str(result) path works. Supersedes US-OC-030 (Visual Analysis) which was broader but unimplemented. Motivation: logs/loop_run/report.md documents systematic milestone verification failures in Magic Tower."
+    },
+    {
+      "id": "US-OC-034",
+      "title": "Expose Trajectory Screenshot Path in Computer Call Output",
+      "description": "As the agent, I want each computer call output to include the local file path where the turn screenshot was saved by TrajectorySaverCallback, so that I can later use analyze_image (US-OC-033) to re-examine any past screenshot after it has been compacted out of my context window.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/python/agent/agent/agent.py (line 594-603: computer_call_output construction — currently returns only base64 image, no file path)",
+          "submodules/cua/libs/python/agent/agent/callbacks/trajectory_saver.py (TrajectorySaverCallback — saves screenshots to turn_NNN/NNNN_screenshot_after.png but does not communicate path back)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (OpenClawComputerAgent — our ComputerAgent subclass, can override _handle_item or use callbacks)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py (ToolLoggingCallback — existing callback that could be extended)"
+        ],
+        "depends": "US-OC-033 should be done first (provides analyze_image tool to actually use the paths)",
+        "planFile": "docs/plan/US-OC-034-trajectory-path-in-output.md"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: After each computer call, the agent receives the local screenshot path alongside the base64 image",
+        "Level 1: Path format matches TrajectorySaverCallback output (e.g., trycua/.../turn_000/0003_screenshot_after.png)",
+        "Level 1: When trajectory_dir is not set (no TrajectorySaverCallback), no path is included — graceful degradation",
+        "Level 2: run_magic_tower.sh 50 — agent trajectory shows local screenshot paths in computer_call_output or adjacent metadata",
+        "Level 2: Agent can call analyze_image with a local trajectory path from a previous turn and receive valid analysis"
+      ],
+      "priority": 34,
+      "passes": true,
+      "notes": "Currently, computer_call_output returns {\"type\": \"input_image\", \"image_url\": \"data:image/png;base64,...\"} — just the raw image, no file path. TrajectorySaverCallback saves the same screenshot to disk (turn_NNN/NNNN_screenshot_after.png) via on_screenshot callback, but this path is never communicated back to the agent. \n\nImplementation approaches (choose one):\n1. **Callback approach**: Create a new callback (or extend ToolLoggingCallback) that tracks the last screenshot path from on_screenshot, then on on_computer_call_end injects metadata into the result. Pro: no CUA core changes. Con: callback ordering matters — must run after TrajectorySaverCallback.\n2. **Override approach**: Override _handle_item in OpenClawComputerAgent to append the path after the parent builds call_output. Pro: explicit control. Con: tighter coupling to parent internals.\n3. **Modify TrajectorySaverCallback**: Make it store the last saved screenshot path as an attribute, then read it from the agent loop after _handle_item returns. Pro: simple. Con: modifies CUA code.\n\nRecommended: Approach 1 (callback). Create a ScreenshotPathCallback that:\n- on_screenshot: records the artifact path that TrajectorySaverCallback just saved\n- on_computer_call_end: appends a text note to the result like \"[Screenshot saved to: /local/path/turn_005/0003_screenshot_after.png]\"\n\nThe path should be injected as text metadata, NOT by modifying the image_url field. This way the agent sees both the image (for immediate use) and the path (for later analyze_image calls). After compaction removes the base64 image from context, the text path remains in the summary, allowing the agent to re-examine old screenshots via analyze_image(image=\"/local/path/...\")."
     }
   ]
 }

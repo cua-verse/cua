@@ -127,7 +127,7 @@ class OpenClawAgent(BaseAgent):
                 print(f"[Replay] Loaded {len(replay_messages)} items from prior transcript")
 
         # Tool assembly (US-OC-007)
-        tools = build_tools(session, memory_store)
+        tools = build_tools(session, memory_store, summary_model=self.summary_model)
         tool_summaries = get_tool_summaries(tools)
         agents_md = (Path(__file__).parent / "openclaw" / "AGENTS.md").read_text()
 
@@ -297,7 +297,13 @@ async def _record_tracer_step(tracer, session, step: int, model: str, result: di
 def _check_done(result: dict) -> bool:
     """Check if the agent indicated task completion (DONE signal)."""
     for item in result["output"]:
-        if item["type"] == "message":
-            if "DONE" in item["content"][0]["text"]:
-                return True
+        if item.get("type") == "message":
+            content = item.get("content", "")
+            if isinstance(content, str):
+                if "DONE" in content:
+                    return True
+            elif isinstance(content, list) and content:
+                text = content[0].get("text", "") if isinstance(content[0], dict) else str(content[0])
+                if "DONE" in text:
+                    return True
     return False

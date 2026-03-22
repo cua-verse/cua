@@ -28,7 +28,7 @@ Reference:
 
 from __future__ import annotations
 
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Union
 
 from agent.agent import ComputerAgent, get_json, get_output_call_ids
 from agent.responses import replace_failed_computer_calls_with_function_calls
@@ -83,6 +83,7 @@ class OpenClawComputerAgent(ComputerAgent):
         self.max_compactions = max_compactions
         self._compaction_count = 0
         self._on_compaction = on_compaction
+        self._last_screenshot_path: str | None = None
 
     @property
     def compaction_count(self) -> int:
@@ -255,6 +256,59 @@ class OpenClawComputerAgent(ComputerAgent):
             flush_system_prompt=MEMORY_FLUSH_SYSTEM_PROMPT,
             silent_token=SILENT_REPLY_TOKEN,
         )
+
+    # --- Screenshot path injection (US-OC-034) ---
+
+    async def _on_screenshot(
+        self, screenshot: Union[str, bytes], name: str = "screenshot"
+    ) -> None:
+        """Override to capture screenshot path from TrajectorySaverCallback.
+
+        After super() dispatches to all callbacks (TrajectorySaverCallback saves
+        the file to disk), we read the path from the callback's internal state.
+        Callback ordering is guaranteed: TrajectorySaverCallback is auto-added
+        by ComputerAgent.__init__() before our callbacks.
+        """
+        await super()._on_screenshot(screenshot, name)
+        self._last_screenshot_path = self._resolve_screenshot_path(name)
+
+    async def _handle_item(
+        self, item: Dict[str, Any], computer=None, ignore_call_ids=None
+    ) -> List[Dict[str, Any]]:
+        """Override to inject screenshot path into computer call results.
+
+        After the parent builds [computer_call_output], appends a user message
+        with the local file path so the agent can reference it later (e.g. via
+        analyze_image after compaction removes the base64 image).
+        """
+        self._last_screenshot_path = None
+        result = await super()._handle_item(item, computer, ignore_call_ids)
+        if self._last_screenshot_path and result:
+            result.append({
+                "type": "message",
+                "role": "user",
+                "content": f"[Screenshot saved to: {self._last_screenshot_path}]",
+            })
+            self._last_screenshot_path = None
+        return result
+
+    def _resolve_screenshot_path(self, name: str) -> str | None:
+        """Get the file path where TrajectorySaverCallback just saved a screenshot.
+
+        Returns None when trajectory_dir is not set (no TrajectorySaverCallback
+        exists) — graceful degradation per US-OC-034 acceptance criteria.
+
+        Note: depends on TrajectorySaverCallback private API (_get_turn_dir,
+        current_artifact). Pinned via CUA submodule version.
+        """
+        from agent.callbacks.trajectory_saver import TrajectorySaverCallback
+
+        for cb in self.callbacks:
+            if isinstance(cb, TrajectorySaverCallback) and cb.trajectory_id:
+                turn_dir = cb._get_turn_dir()
+                idx = cb.current_artifact - 1  # just incremented by _save_artifact
+                return str(turn_dir / f"{idx:04d}_{name}.png")
+        return None
 
     def _log_step_to_transcript(self, result: Dict[str, Any]) -> None:
         """Log a step's output to the session transcript.

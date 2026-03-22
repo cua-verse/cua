@@ -7,6 +7,7 @@
 - CUA trajectory reasoning summaries: `turn_NNN/NNNN_agent_response.json → response.output[].summary[].text`
 - Turn count ≠ step count: each turn can contain multiple API calls (~2 steps/turn for openai/computer-use-preview)
 - Trajectory tool verification: `turn_000/0000_api_start.json → kwargs.tools[].name` for registered tools; `*_agent_response.json → response.output[] where type=="function_call"` for invocations
+- OpenClaw source (TypeScript reference implementation) lives at `../openclaw/` (sibling directory to agenthle-base). Key paths: `../openclaw/src/agents/` (agent loop, tools, compaction), `../openclaw/src/memory/` (memory system), `../openclaw/docs/concepts/` (component docs)
 
 ---
 
@@ -650,4 +651,40 @@
   - Prompt engineering stories (AGENTS.md changes) are cheap to implement but high-leverage: the trigger table pattern (what happened → write to → example) directly maps to model decision-making in the loop.
   - The MEMORY_FLUSH_PROMPT is a second place where memory guidance lives — always check session.py when updating AGENTS.md memory guidance so both are consistent.
   - The untracked `test_transcript_fidelity.py` file is a pre-existing test from an earlier story (US-OC-014); include it when committing submodule so it doesn't stay orphaned.
+---
+
+## 2026-03-21 - US-OC-034: Expose Trajectory Screenshot Path in Computer Call Output
+- Overrode `_on_screenshot` and `_handle_item` in `OpenClawComputerAgent` to inject screenshot file paths as user messages after each computer call
+- Agent now sees `[Screenshot saved to: /path/to/turn_NNN/NNNN_screenshot_after.png]` alongside the base64 image
+- Fixed `_check_done` in `openclaw_agent.py` to use `.get("type")` instead of `["type"]` — pre-existing fragility from US-OC-028 extraction
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py` (3 new methods: `_on_screenshot`, `_handle_item`, `_resolve_screenshot_path`)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (defensive `.get()` in `_check_done`)
+  - `docs/plan/US-OC-034-trajectory-path-in-output.md` (updated with final implementation)
+  - `prd.json` (passes: true)
+- **Learnings for future iterations:**
+  - Items injected into `_handle_item` result must include `"type": "message"` — the run loop and helpers like `_check_done` iterate over all output items expecting this field.
+  - `_resolve_screenshot_path` depends on TrajectorySaverCallback private API (`_get_turn_dir`, `current_artifact`) — pinned via CUA submodule version.
+  - User messages appended to `_handle_item` result survive `ImageRetentionCallback` (which only removes `computer_call`/`computer_call_output` pairs), making them a safe injection point for persistent metadata.
+---
+
+## 2026-03-21 - US-OC-033: Tool: Analyze Remote Image (VLM-based)
+- Implemented AnalyzeImageTool — VLM-based image analysis returning text only (no context bloat)
+- Supports: remote VM paths (Windows), local filesystem, HTTP URLs, data URIs, multi-image (up to 20), maxBytesMb safety cap
+- Input normalization from OpenClaw: dedup, @-prefix stripping, max image cap
+- Wired into build_tools() with summary_model for cheaper VLM calls
+- AGENTS.md updated with milestone verification guidance
+- 45 unit tests, all passing (449 total)
+- **Files changed:**
+  - NEW: submodules/cua/libs/python/agent/agent/tools/analyze_image.py
+  - MOD: submodules/cua/libs/python/agent/agent/tools/__init__.py
+  - MOD: submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py (build_tools + summary_model param)
+  - MOD: submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (pass summary_model)
+  - MOD: submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md
+  - NEW: tests/test_analyze_image_tool.py
+  - NEW: docs/plan/US-OC-033-analyze-image-tool.md
+- **Learnings for future iterations:**
+  - US-OC-034 (trajectory path injection) is the complement — it gives the agent local paths to pass to analyze_image after compaction removes inline images
+  - litellm must be imported at module level (not inside async methods) for unittest.mock.patch to work
+  - Tool description should stay general (like OpenClaw's) — task-specific prompt examples in AGENTS.md make it less portable across task types
 ---

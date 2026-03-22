@@ -25,23 +25,26 @@ from agent.tools.base import BaseTool
 from .memory import MemoryGetTool, MemorySearchTool, MemoryStore, MemoryWriteTool
 
 
-def build_tools(session, memory_store: MemoryStore) -> list:
+def build_tools(session, memory_store: MemoryStore, *, summary_model: str | None = None) -> list:
     """Assemble the canonical tool list for the OpenClaw agent.
 
-    Returns [Computer, MilestoneTool, MemorySearchTool, MemoryGetTool, MemoryWriteTool].
+    Returns [Computer, MilestoneTool, AnalyzeImageTool, MemorySearchTool,
+             MemoryGetTool, MemoryWriteTool].
 
     Args:
         session: CUA DesktopSession (provides ``_computer`` and ``interface``).
         memory_store: Initialized MemoryStore for this task.
+        summary_model: Model string for VLM calls in AnalyzeImageTool (defaults to agent's summary_model).
     """
-    from agent.tools import MilestoneTool
+    from agent.tools import AnalyzeImageTool, MilestoneTool
 
     milestone_tool = MilestoneTool(session.interface)
+    analyze_image_tool = AnalyzeImageTool(session.interface, model=summary_model)
     memory_search = MemorySearchTool(memory_store)
     memory_get = MemoryGetTool(memory_store)
     memory_write = MemoryWriteTool(memory_store)
 
-    return [session._computer, milestone_tool, memory_search, memory_get, memory_write]
+    return [session._computer, milestone_tool, analyze_image_tool, memory_search, memory_get, memory_write]
 
 
 def get_tool_summaries(tools: list) -> dict[str, str]:

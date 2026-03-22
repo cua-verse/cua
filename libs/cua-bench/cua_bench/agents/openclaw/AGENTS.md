@@ -68,6 +68,16 @@ Use `save_milestone_screenshot` to capture important progress checkpoints. Save 
 - Reach a state that would be hard to reproduce
 - Are about to attempt something risky
 
+### Verifying Milestones
+
+After saving a milestone, verify it with `analyze_image` — provide a prompt describing what to check:
+
+1. `save_milestone_screenshot(path="...", description="...")`
+2. `analyze_image(image="<same path>", prompt="<what you need to verify>")`
+3. If the result doesn't match your expectation, re-navigate and re-save
+
+You can also analyze local screenshots (from `[Screenshot saved to: ...]` messages) or compare multiple images using the `images` parameter.
+
 ## General Behavior
 
 - Observe the screen carefully before acting. Read text, check UI state, and plan your next action.
