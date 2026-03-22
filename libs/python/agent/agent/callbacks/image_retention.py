@@ -76,19 +76,22 @@ class ImageRetentionCallback(AsyncCallbackHandler):
 
             to_remove.add(idx)  # remove the computer_call_output itself
 
-            # Remove the immediately preceding computer_call with matching call_id (if present)
-            call_id = messages[idx].get("call_id")
-            prev_idx = idx - 1
-            if (
-                prev_idx >= 0
-                and messages[prev_idx].get("type") == "computer_call"
-                and messages[prev_idx].get("call_id") == call_id
-            ):
-                to_remove.add(prev_idx)
-                # Check a single reasoning immediately before that computer_call
-                r_idx = prev_idx - 1
-                if r_idx >= 0 and messages[r_idx].get("type") == "reasoning":
-                    to_remove.add(r_idx)
+            # Find matching computer_call by call_id (not position — other items
+            # like function_call_output may be interleaved when the model returns
+            # both function_call and computer_call in the same response turn,
+            # e.g. with computer_20251124 models like Opus 4.6).
+            output_call_id = messages[idx].get("call_id")
+            for search_idx in range(idx - 1, -1, -1):
+                if (
+                    messages[search_idx].get("type") == "computer_call"
+                    and messages[search_idx].get("call_id") == output_call_id
+                ):
+                    to_remove.add(search_idx)
+                    # Check a single reasoning immediately before that computer_call
+                    r_idx = search_idx - 1
+                    if r_idx >= 0 and messages[r_idx].get("type") == "reasoning":
+                        to_remove.add(r_idx)
+                    break
 
         # Construct filtered list
         filtered = [m for i, m in enumerate(messages) if i not in to_remove]
