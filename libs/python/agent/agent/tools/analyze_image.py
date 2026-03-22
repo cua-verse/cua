@@ -322,7 +322,6 @@ class AnalyzeImageTool(BaseTool):
                 model=self.model,
                 messages=messages,
                 max_tokens=1024,
-                temperature=0.3,
                 timeout=60,
             )
             return response.choices[0].message.content
