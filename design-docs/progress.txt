@@ -728,3 +728,38 @@
   - The guard belongs in `_build_compacted_items` (the single reconstruction point) rather than the Anthropic loop or predict_step — closer to the source, more explicit.
   - Standalone test helpers that mirror the production function (without instantiating the full async agent) are effective for pure logic coverage without a VM.
 ---
+
+## 2026-03-22 - US-OC-037: CUA OpenAI Loop — GPT 5.4 computer Tool Support
+- Extended OpenAI agent loop (`loops/openai.py`) to support GPT 5.4's `computer` tool format alongside existing `computer-use-preview` support
+- Key differences handled: `{"type": "computer"}` schema (no dimensions), batched `actions` array, `computer_screenshot` output, no `acknowledged_safety_checks`, `input_text`/`output_text` content blocks
+- Added `_is_gpt54()` helper and `get_screenshot_output_type()` for model-conditional branching
+- Added `_normalize_messages_for_gpt54()`: 7-path normalization converting compacted completion-format messages to Responses API format (the largest new piece of work)
+- Updated `_handle_item()` in `agent.py`: handles both `action` (singular) and `actions` (array), executes sequentially, screenshots after last action, terminates early on `terminate` action
+- Added orphan call repair in `_build_compacted_items()` via `repair_tool_use_result_pairing()` — fixes split function_call/tool_result pairs at compaction boundaries
+- Updated `transcript.py`: stores `actions` array when present, recognizes `computer_screenshot` output type for screenshot resolution
+- Updated `tools.py`: new `_get_action_type_label()` handles both action formats for logging
+- Updated `memory_flush.py` and `context.py`: handle `actions` (array) alongside `action` (singular) for serialization/summarization
+- Fixed unused `pytest` import in new test file (caught by ruff during ship)
+- 23 new unit tests covering all normalization paths — all pass
+- **Files changed:**
+  - MOD: `submodules/cua/libs/python/agent/agent/loops/openai.py` (+288/-15)
+  - MOD: `submodules/cua/libs/python/agent/agent/agent.py` (+59/-32)
+  - MOD: `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py` (+6/-1)
+  - MOD: `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py` (+6/-1)
+  - MOD: `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/memory_flush.py` (+17/-12)
+  - MOD: `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py` (+25/-4)
+  - MOD: `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/transcript.py` (+9/-4)
+  - MOD: `prd.json` (US-OC-037 story added + passes: true)
+  - MOD: `architecture.md` (updated to reflect external openclaw repo location)
+  - MOD: `CLAUDE.md` (updated paths for external sibling dir)
+  - MOD: `run_helloworld.sh` (agent name fix)
+  - NEW: `tests/test_normalize_messages_gpt54.py` (23 unit tests)
+  - NEW: `docs/plan/US-OC-037-gpt54-computer-tool.md` (design plan)
+  - NEW: `docs/judges/judge_2026-03-22_1442_US-OC-037.md`
+  - NEW: `docs/review-judges/review_2026-03-22_1500_US-OC-037.md`
+- **Learnings for future iterations:**
+  - When a new model uses the Responses API format (flat items without role), compacted messages (Anthropic completion format) need normalization before being sent — add a `_normalize_messages_for_<model>()` step in `predict_step()` before the API call
+  - Orphan call repair should happen at `_build_compacted_items()` (source), not in each loop's replay converter — consistent with OpenClaw's `session-transcript-repair.ts` design
+  - The `computer-use-preview` and GPT 5.4 models share the same `@register_agent` path but diverge at tool schema, output format, and content block types — model-conditional helpers (`_is_gpt54()`, `get_screenshot_output_type()`) keep branching centralized
+  - Screenshot output is taken only after the *last* batched action to avoid redundant intermediate screenshots eating context
+---

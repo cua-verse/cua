@@ -900,6 +900,117 @@
       "priority": 10,
       "passes": true,
       "notes": "Discovered 2026-03-22: after fixing US-OC-023 (ImageRetentionCallback tool pairing), the agent runs past the original crash point but hits a new error after compaction: 'This model does not support assistant message prefill. The conversation must end with a user message.' Root cause: ImageRetentionCallback removes old computer_call + computer_call_output pairs from the kept messages, leaving only assistant text. After compaction, the reconstructed message list can end with role=assistant (msg[30] in the failing trace). Opus 4.6 rejects this because it doesn't support prefill. Fix options: (a) append a synthetic user message after compaction if the last message is assistant, (b) ensure _compact_in_place always adds a continuation prompt, or (c) fix in the Anthropic loop's predict_step before calling the API."
+    },
+    {
+      "id": "US-OC-037",
+      "title": "CUA OpenAI Loop: GPT 5.4 computer Tool Support",
+      "description": "As the agent harness, I want the CUA OpenAI loop to support GPT 5.4's computer tool format (batched actions array, computer_screenshot output, no display dimensions), so that the harness works with OpenAI's latest computer-use model alongside the existing computer-use-preview support.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/python/agent/agent/loops/openai.py (model regex, tool mapping, message normalization)",
+          "submodules/cua/libs/python/agent/agent/agent.py (batched actions in _handle_item, screenshot output format)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (repair_tool_use_result_pairing in _build_compacted_items)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/transcript.py (actions plural storage, computer_screenshot recognition)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py (_get_action_type_label for batched actions)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/memory_flush.py (batched actions serialization)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (serialize_messages_for_summary actions key)"
+        ],
+        "depends": "US-OC-023 pattern (Anthropic tool version compat)",
+        "planFile": "docs/plan/US-OC-037-gpt54-computer-tool.md"
+      },
+      "acceptanceCriteria": [
+        "Level 1: find_agent_config('openai/gpt-5.4') resolves to OpenAIComputerUseConfig",
+        "Level 1: _handle_item() with actions: [click, type] executes both sequentially, returns one computer_call_output",
+        "Level 1: Existing action (singular) format backward-compatible",
+        "Level 1: uv run ruff check . passes",
+        "Level 2: bash run_magic_tower.sh 15 openai/gpt-5.4 — completes 15 steps without API errors",
+        "Level 2: CONTEXT_WINDOW_OVERRIDE=25000 bash run_magic_tower.sh 50 openai/gpt-5.4 — compaction fires and agent continues post-compaction",
+        "Level 2: bash run_magic_tower.sh 15 openai/computer-use-preview — regression passes"
+      ],
+      "priority": 23,
+      "passes": true,
+      "notes": "Analogous to US-OC-023 (Anthropic Opus 4.6 tool version). Key differences from computer-use-preview: (1) tool schema is just {type: computer} — no display dimensions; (2) batched actions array instead of single action; (3) computer_screenshot output format; (4) no acknowledged_safety_checks; (5) content blocks use input_text/output_text not text. Required completion-to-Responses format normalization for post-compaction messages, orphan call repair in _build_compacted_items, and transcript updates to preserve actions array."
+    },
+    {
+      "id": "US-OC-038",
+      "title": "Canonical Internal Message Format: Define Schema + Compaction Output Adapter",
+      "description": "As the agent harness, I want compaction to output messages in a canonical internal format (provider-agnostic items list) so that downstream loops do not need per-model format conversion code. Currently compaction outputs role-based messages that each loop must independently normalize (openai.py: _normalize_messages_for_gpt54, 130 lines; anthropic loop: computer_20251124 compat). OpenClaw avoids this by using a unified AgentMessage format. This story defines the canonical schema and adapts compaction output to produce it.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (compact_messages, repair_tool_use_result_pairing — current compaction output)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (_build_compacted_items — assembles post-compaction items)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py (sanitize_history, convert_to_responses_api_items — existing format converters)"
+        ],
+        "depends": "US-OC-037 done (establishes the dual-format problem this story solves)",
+        "reference": "../openclaw/src/agents/pi-embedded-runner/google.ts (sanitizeSessionHistory — centralized multi-pass pipeline; start at sanitizeSessionHistory function)",
+        "designDoc": "docs/plan/US-OC-038-040-canonical-format.md (full investigation + proposed design)",
+        "planFile": "docs/plan/US-OC-038-040-canonical-format.md"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: Canonical item schema defined as a TypedDict or dataclass in a new module (e.g., openclaw/canonical.py) with types for: text, computer_call, computer_call_output, function_call, function_call_output",
+        "Level 1: _build_compacted_items() outputs canonical items — unit tests verify schema compliance",
+        "Level 1: Unit tests verify canonical items round-trip: canonical → Responses API items → no data loss",
+        "Level 1: Unit tests verify canonical items round-trip: canonical → Anthropic completion format → no data loss",
+        "Level 2: CONTEXT_WINDOW_OVERRIDE=25000 bash run_magic_tower.sh 50 openai/gpt-5.4 — compaction fires, post-compaction items are canonical, agent continues"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "This is story 1 of 3 for the canonical format initiative. Scope is intentionally narrow: define the schema + adapt compaction output. Do NOT touch the loops yet — that's US-OC-039. The canonical format should be a superset that losslessly represents both Anthropic completion format and OpenAI Responses API format. Key design decision: the format should use flat items (like Responses API) rather than role-based messages (like Anthropic), because flat items are strictly more expressive and don't require content-array unpacking."
+    },
+    {
+      "id": "US-OC-039",
+      "title": "Centralized Format Adapter: Loop-Agnostic sanitize_items() Pipeline",
+      "description": "As the agent harness, I want a single sanitize_items() pipeline (modeled on OpenClaw's sanitizeSessionHistory) that converts canonical items to any loop's required format, so that adding a new model requires zero format conversion code in the loop. This replaces _normalize_messages_for_gpt54() in openai.py and the computer_20251124 compat in the Anthropic loop with a single adapter dispatched by model/provider config.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/python/agent/agent/loops/openai.py (_normalize_messages_for_gpt54 — 130 lines to be replaced; _repair_orphaned_calls — 77 lines to be consolidated)",
+          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (tool version compat — per-model format handling to be replaced)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (repair_tool_use_result_pairing — role-based repair to be consolidated with _repair_orphaned_calls)"
+        ],
+        "depends": "US-OC-038 (canonical format must exist first)",
+        "reference": "../openclaw/src/agents/pi-embedded-runner/google.ts (sanitizeSessionHistory — multi-pass pipeline with TranscriptPolicy flags)",
+        "pattern": "Model the adapter as a pipeline of passes (like OpenClaw's sanitizeSessionHistory): strip unsupported fields → convert content block types → repair orphans → validate. Each pass is a pure function on the canonical items list."
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: sanitize_items(canonical_items, target='openai-responses') produces valid Responses API items — unit tests cover all 7+ content block types",
+        "Level 1: sanitize_items(canonical_items, target='anthropic') produces valid Anthropic completion messages — unit tests",
+        "Level 1: Single repair_orphaned_items() function handles both flat items and role-based messages — the two implementations in openai.py and context.py are consolidated",
+        "Level 1: _normalize_messages_for_gpt54() deleted from openai.py; _repair_orphaned_calls() deleted from openai.py",
+        "Level 2: bash run_magic_tower.sh 15 openai/gpt-5.4 — passes (regression)",
+        "Level 2: bash run_magic_tower.sh 15 openai/computer-use-preview — passes (regression)",
+        "Level 2: CONTEXT_WINDOW_OVERRIDE=25000 bash run_magic_tower.sh 50 openai/gpt-5.4 — compaction + post-compaction works via the new pipeline"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "Story 2 of 3. The key insight from OpenClaw: sanitizeSessionHistory is a linear pipeline of pure passes. Each pass (strip images → drop thinking → repair tool calls → strip details → strip stale usage → downgrade OpenAI reasoning → fix Google turn ordering) operates on the same AgentMessage[] type. Our adapter should follow the same pattern: each pass takes List[CanonicalItem] and returns List[CanonicalItem], with a final to_openai_responses() or to_anthropic_messages() converter at the end. The TranscriptPolicy config flags (repairToolUseResultPairing, dropThinkingBlocks, validateAnthropicTurns, etc.) should be modeled as a simple config dict, not a class hierarchy."
+    },
+    {
+      "id": "US-OC-040",
+      "title": "Model Config Registry: Tool Schema + Screenshot Format as Declarative Config",
+      "description": "As the agent harness, I want model-specific differences (tool schema shape, screenshot output type, safety check support, action format) to be declared in a config registry rather than scattered across if/else branches in loop code, so that adding a new model variant requires adding one config entry and zero code changes.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/python/agent/agent/loops/openai.py (_is_gpt54, _map_computer_tool_to_openai, get_screenshot_output_type — model-specific branches to be replaced by config lookup)",
+          "submodules/cua/libs/python/agent/agent/agent.py (_screenshot_output_type, use_safety_checks — model-specific flags)",
+          "submodules/cua/libs/python/agent/agent/decorators.py (find_agent_config, @register_agent — existing registration system)"
+        ],
+        "depends": "US-OC-039 (adapter layer must exist so config drives the adapter, not the loop)",
+        "reference": "../openclaw/src/agents/pi-embedded-runner/model.ts (resolveModel — model config resolution with provider/api/contextWindow)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: ModelConfig dataclass/TypedDict with fields: tool_schema_type, screenshot_output_type, supports_safety_checks, action_format ('single'|'batched'), adapter_target ('openai-responses'|'anthropic')",
+        "Level 1: Registry lookup: get_model_config('openai/gpt-5.4') returns correct config without any if/else in loop code",
+        "Level 1: _is_gpt54() and get_screenshot_output_type() deleted from openai.py — replaced by config lookup",
+        "Level 1: Unit test: adding a hypothetical 'openai/gpt-6' config entry + running sanitize_items produces valid output with zero code changes",
+        "Level 2: bash run_magic_tower.sh 15 openai/gpt-5.4 — passes (regression)",
+        "Level 2: bash run_magic_tower.sh 15 openai/computer-use-preview — passes (regression)"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Story 3 of 3. This is the payoff: after this story, adding a new model means adding one ModelConfig entry. The config drives both the adapter pipeline (US-OC-039) and the tool/screenshot handling. Compare to OpenClaw's model.ts which resolves model configs from a provider catalog. Keep the config simple — a flat dict, not a class hierarchy. The @register_agent decorator system in CUA already does model matching; this story extends it with format metadata rather than replacing it."
     }
   ]
 }

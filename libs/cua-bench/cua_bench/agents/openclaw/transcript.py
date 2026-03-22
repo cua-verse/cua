@@ -65,11 +65,16 @@ def group_step_output(
                 "arguments": item.get("arguments", ""),
             })
         elif item_type == "computer_call":
-            assistant_content.append({
+            # Handle both "action" (computer-use-preview) and "actions" (GPT 5.4)
+            block: dict[str, Any] = {
                 "type": "computer_call",
                 "id": item.get("call_id", ""),
-                "action": item.get("action", {}),
-            })
+            }
+            if "actions" in item:
+                block["actions"] = item["actions"]
+            else:
+                block["action"] = item.get("action", {})
+            assistant_content.append(block)
         elif item_type == "function_call_output":
             tool_results.append({
                 "type": "tool_result",
@@ -79,7 +84,7 @@ def group_step_output(
         elif item_type == "computer_call_output":
             output = item.get("output", {})
             call_id = item.get("call_id", "")
-            if isinstance(output, dict) and output.get("type") == "input_image":
+            if isinstance(output, dict) and output.get("type") in ("input_image", "computer_screenshot"):
                 content_str = _find_latest_screenshot(trajectory_dir)
             else:
                 content_str = str(output)[:500]

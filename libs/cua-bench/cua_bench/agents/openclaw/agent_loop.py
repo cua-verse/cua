@@ -441,8 +441,13 @@ class OpenClawComputerAgent(ComputerAgent):
             })
 
         # Kept messages (the recent portion preserved by compaction)
+        # Repair orphaned tool_use/tool_result pairs that may arise when
+        # compaction splits at arbitrary boundaries (matches OpenClaw's
+        # session-transcript-repair.ts pattern).
         if kept_messages:
-            items.extend(kept_messages)
+            from .context import repair_tool_use_result_pairing
+            repair_result = repair_tool_use_result_pairing(kept_messages)
+            items.extend(repair_result.messages)
 
         # Ensure items don't end with role=assistant — models like Opus 4.6
         # don't support assistant message prefill and will reject the API call.

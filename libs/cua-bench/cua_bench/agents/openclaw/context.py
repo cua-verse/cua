@@ -517,6 +517,10 @@ def repair_tool_use_result_pairing(
     4. Insert synthetic error results for calls with no matching result
        (unless stop_reason is "error" or "aborted")
 
+    This operates on role-based completion-format messages (after compaction).
+    The Responses API counterpart for flat items lives in
+    ``agent.loops.openai._repair_orphaned_calls``.
+
     Args:
         messages: List of message dicts with role, content, and optional stop_reason.
 
@@ -834,7 +838,8 @@ def serialize_messages_for_summary(messages: list[dict[str, Any]]) -> str:
                         args = args[:200] + "..."
                     parts.append(f"[tool_call: {name}({args})]")
                 elif btype == "computer_call":
-                    action = block.get("action", {})
+                    # Handle both "action" (computer-use-preview) and "actions" (GPT 5.4)
+                    action = block.get("action") or block.get("actions", {})
                     parts.append(f"[computer: {json.dumps(action)[:200]}]")
                 elif btype == "tool_result":
                     result_text = str(block.get("content", ""))[:500]

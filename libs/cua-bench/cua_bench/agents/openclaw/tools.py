@@ -67,6 +67,28 @@ def get_tool_summaries(tools: list) -> dict[str, str]:
 _MAX_ARGS_LOG = 200
 """Max characters of serialized arguments to include in start log."""
 
+
+def _get_action_type_label(item: dict[str, Any]) -> str:
+    """Extract a human-readable action type label from a computer_call item.
+
+    Handles both single ``action`` (computer-use-preview) and batched
+    ``actions`` array (GPT 5.4).
+    """
+    # Single action (computer-use-preview)
+    action = item.get("action")
+    if isinstance(action, dict):
+        return action.get("type", "unknown")
+    if action is not None:
+        return str(action)
+
+    # Batched actions (GPT 5.4)
+    actions = item.get("actions")
+    if isinstance(actions, list) and actions:
+        types = [a.get("type", "?") for a in actions if isinstance(a, dict)]
+        return "+".join(types) if types else "unknown"
+
+    return "unknown"
+
 _MAX_RESULT_LOG = 100
 """Max characters of result output to include in end log."""
 
@@ -122,11 +144,11 @@ class ToolLoggingCallback(AsyncCallbackHandler):
         print(f"[Tool] {name} -> {result_summary} ({duration_str})")
 
     # --- Computer calls (mouse, keyboard, screenshot) ---
+    # Note: GPT 5.4 uses "actions" (array), computer-use-preview uses "action" (singular)
 
     async def on_computer_call_start(self, item: dict[str, Any]) -> None:
         call_id = item.get("call_id", "unknown")
-        action = item.get("action", {})
-        action_type = action.get("type", "unknown") if isinstance(action, dict) else str(action)
+        action_type = _get_action_type_label(item)
         self._start_times[call_id] = time.monotonic()
         print(f"[Computer] {action_type}")
 
@@ -134,8 +156,7 @@ class ToolLoggingCallback(AsyncCallbackHandler):
         self, item: dict[str, Any], result: list[dict[str, Any]]
     ) -> None:
         call_id = item.get("call_id", "unknown")
-        action = item.get("action", {})
-        action_type = action.get("type", "unknown") if isinstance(action, dict) else str(action)
+        action_type = _get_action_type_label(item)
 
         start = self._start_times.pop(call_id, None)
         duration_ms = round((time.monotonic() - start) * 1000) if start is not None else -1

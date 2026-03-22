@@ -313,6 +313,12 @@ class ComputerAgent:
             # Users can disable via CUA_TELEMETRY_DISABLED=true env var
             self.callbacks.append(OtelCallback(self))
 
+        # Screenshot output format — determined by the agent loop.
+        # GPT 5.4 uses "computer_screenshot", others use "input_image".
+        self._screenshot_output_type = getattr(
+            self.agent_loop, "screenshot_output_type", "input_image"
+        )
+
         self.tool_schemas = []
         self.computer_handler = None
 
@@ -535,33 +541,39 @@ class ComputerAgent:
                 if not computer:
                     raise ValueError("Computer handler is required for computer calls")
 
-                # Perform computer actions
-                action = item.get("action")
-                action_type = action.get("type") if action else None
-                if not action_type:
-                    print(
-                        f"Action type is empty or None: action={action}, action_type={action_type}"
-                    )
-                    return []
+                # Perform computer actions — supports both single action
+                # (computer-use-preview) and batched actions array (GPT 5.4)
+                actions_list = item.get("actions")  # GPT 5.4: array
+                if not isinstance(actions_list, list):
+                    single_action = item.get("action")  # computer-use-preview: single
+                    if not single_action or not single_action.get("type"):
+                        print(
+                            f"Action type is empty or None: action={single_action}"
+                        )
+                        return []
+                    actions_list = [single_action]
 
-                # Extract action arguments (all fields except 'type')
-                action_args = {k: v for k, v in action.items() if k != "type"}
-
-                # print(f"{action_type}({action_args})")
-
-                # Execute the computer action
-                computer_method = getattr(computer, action_type, None)
+                # Execute each action sequentially
+                is_terminate = False
                 action_result = None
-                if computer_method:
-                    assert_callable_with(computer_method, **action_args)
-                    action_result = await computer_method(**action_args)
-                else:
-                    raise ToolError(f"Unknown computer action: {action_type}")
+                for action in actions_list:
+                    action_type = action.get("type")
+                    if not action_type:
+                        continue
 
-                # Check if this was a terminate action
-                is_terminate = action_type == "terminate" or (
-                    isinstance(action_result, dict) and action_result.get("terminated")
-                )
+                    action_args = {k: v for k, v in action.items() if k != "type"}
+                    computer_method = getattr(computer, action_type, None)
+                    if computer_method:
+                        assert_callable_with(computer_method, **action_args)
+                        action_result = await computer_method(**action_args)
+                    else:
+                        raise ToolError(f"Unknown computer action: {action_type}")
+
+                    is_terminate = action_type == "terminate" or (
+                        isinstance(action_result, dict) and action_result.get("terminated")
+                    )
+                    if is_terminate:
+                        break
 
                 # Take screenshot after action (skip for terminate)
                 if not is_terminate:
@@ -583,24 +595,39 @@ class ComputerAgent:
                     #     raise ValueError(f"Safety check failed: {check_message}")
 
                 # Create call output
+                # GPT 5.4 ("computer" tool) does not support acknowledged_safety_checks
+                use_safety_checks = self._screenshot_output_type != "computer_screenshot"
+
                 if is_terminate:
-                    # For terminate action, include the terminated flag
                     call_output = {
                         "type": "computer_call_output",
                         "call_id": item.get("call_id"),
-                        "acknowledged_safety_checks": acknowledged_checks,
                         "output": action_result if action_result else {"terminated": True},
                     }
+                    if use_safety_checks:
+                        call_output["acknowledged_safety_checks"] = acknowledged_checks
                 else:
+                    # Model-aware screenshot format: GPT 5.4 expects
+                    # "computer_screenshot" with detail="original",
+                    # computer-use-preview expects "input_image"
+                    if self._screenshot_output_type == "computer_screenshot":
+                        output_image = {
+                            "type": "computer_screenshot",
+                            "image_url": f"data:image/png;base64,{screenshot_base64}",
+                            "detail": "original",
+                        }
+                    else:
+                        output_image = {
+                            "type": "input_image",
+                            "image_url": f"data:image/png;base64,{screenshot_base64}",
+                        }
                     call_output = {
                         "type": "computer_call_output",
                         "call_id": item.get("call_id"),
-                        "acknowledged_safety_checks": acknowledged_checks,
-                        "output": {
-                            "type": "input_image",
-                            "image_url": f"data:image/png;base64,{screenshot_base64}",
-                        },
+                        "output": output_image,
                     }
+                    if use_safety_checks:
+                        call_output["acknowledged_safety_checks"] = acknowledged_checks
 
                 # # Additional URL safety checks for browser environments
                 # if await computer.get_environment() == "browser":

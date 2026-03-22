@@ -185,18 +185,23 @@ def _serialize_content_blocks(content: Any) -> str:
         elif block.get("type") == "text":
             parts.append(block.get("text", ""))
         elif block.get("type") == "computer_call":
-            action = block.get("action", {})
-            action_type = action.get("type", "unknown")
-            detail = ""
-            if action_type == "click":
-                detail = f" at ({action.get('x')}, {action.get('y')})"
-            elif action_type == "keypress":
-                detail = f" {action.get('keys', [])}"
-            elif action_type == "type":
-                detail = f" \"{action.get('text', '')}\""
-            elif action_type == "scroll":
-                detail = f" ({action.get('x')}, {action.get('y')}) delta=({action.get('scroll_x', 0)}, {action.get('scroll_y', 0)})"
-            parts.append(f"[action: {action_type}{detail}]")
+            # Handle both "action" (computer-use-preview) and "actions" (GPT 5.4)
+            actions_list = block.get("actions")  # GPT 5.4: array
+            if actions_list is None:
+                single = block.get("action", {})
+                actions_list = [single] if single else []
+            for action in actions_list:
+                action_type = action.get("type", "unknown")
+                detail = ""
+                if action_type == "click":
+                    detail = f" at ({action.get('x')}, {action.get('y')})"
+                elif action_type == "keypress":
+                    detail = f" {action.get('keys', [])}"
+                elif action_type == "type":
+                    detail = f" \"{action.get('text', '')}\""
+                elif action_type == "scroll":
+                    detail = f" ({action.get('x')}, {action.get('y')}) delta=({action.get('scroll_x', 0)}, {action.get('scroll_y', 0)})"
+                parts.append(f"[action: {action_type}{detail}]")
         elif block.get("type") == "function_call":
             name = block.get("name", "unknown")
             args = block.get("arguments", "")
