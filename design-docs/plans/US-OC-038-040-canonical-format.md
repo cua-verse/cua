@@ -238,17 +238,26 @@ MODEL_CONFIGS["openai/gpt-6"] = ModelConfig(
 - **Does NOT touch loops** — they still receive role-based messages for now
 
 ### US-OC-039: Centralized Adapter Pipeline (priority 7)
-- Implement `sanitize_items()` pipeline
+- Implement `sanitize_items()` pipeline with core passes: `repair_orphaned_pairs`, `ensure_valid_ordering`, format conversion
 - Consolidate `repair_tool_use_result_pairing()` and `_repair_orphaned_calls()` into one `repair_orphaned_pairs()` that works on canonical items
 - Delete `_normalize_messages_for_gpt54()` and `_repair_orphaned_calls()` from openai.py
 - Loops call `sanitize_items()` instead of doing their own conversion
 - Full regression: GPT 5.4, computer-use-preview, Anthropic models
+- **NOTE**: TranscriptPolicy and thinking sanitization passes split out to US-OC-041
 
 ### US-OC-040: Model Config Registry (priority 8)
 - Define `ModelConfig` dataclass and registry
 - Delete `_is_gpt54()`, `get_screenshot_output_type()`, model-specific branches from loops
 - Config drives the adapter pipeline and tool/screenshot handling
 - Payoff test: add hypothetical `openai/gpt-6` config, verify it works with zero code changes
+
+### US-OC-041: TranscriptPolicy + Thinking Sanitization Passes (priority 9, depends on US-OC-039)
+Extends the `sanitize_items()` pipeline with provider-specific thinking sanitization:
+- **TranscriptPolicy**: Dataclass with per-provider boolean flags (`drop_thinking_blocks`, `sanitize_thinking_signatures`, `downgrade_openai_reasoning`, `repair_tool_use_result_pairing`, `validate_anthropic_turns`). Resolved via `get_transcript_policy(model)`. Mirrors OpenClaw's `TranscriptPolicy` in `transcript-policy.ts`.
+- **`drop_thinking_blocks` pass**: Strips `type="thinking"` content blocks from assistant messages, preserving turn structure with empty text block. Currently only needed for GitHub Copilot Claude. (OpenClaw: `pi-embedded-runner/thinking.ts:25-53`)
+- **`sanitize_thinking_signatures` pass**: Strips/normalizes `thinkingSignature` fields from thinking blocks. The signature is a tamper-proof token validated by the API on re-submission — if missing, malformed, or from a different provider, the API rejects the request. Needed for cross-provider transcript replay. (OpenClaw: `transcript-policy.ts`, `google.ts`)
+- **`downgrade_openai_reasoning` pass**: Converts OpenAI reasoning blocks with missing/invalid signatures to empty text blocks. Without this, o3/o4 model thinking blocks cause API rejection on replay. Also handles paired function call IDs referencing absent reasoning blocks. (OpenClaw: `pi-embedded-helpers/openai.ts:92-200`)
+- All passes are no-ops when their policy flag is False — zero impact on existing providers
 
 ## Risk Assessment
 

@@ -67,6 +67,7 @@ class OpenClawComputerAgent(ComputerAgent):
         summary_model: str,
         max_compactions: int = 3,
         on_compaction: Callable | None = None,
+        thinking_config: Optional[Any] = None,
         **kwargs,  # Pass through to ComputerAgent
     ):
         # Auto-inject overflow_cb into callbacks (US-OC-028)
@@ -84,6 +85,8 @@ class OpenClawComputerAgent(ComputerAgent):
         self._compaction_count = 0
         self._on_compaction = on_compaction
         self._last_screenshot_path: str | None = None
+        # Thinking config for per-call-site params (US-OC-019/020)
+        self.thinking_config = thinking_config
 
     @property
     def compaction_count(self) -> int:

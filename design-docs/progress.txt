@@ -789,3 +789,28 @@
   - When adding a new normalization step to `predict_step()`, always verify that downstream repair functions (like `_repair_orphaned_calls`) are also wired in — definitions without call sites are silent bugs
   - Score loop exit condition: compare against normalized `1.0` (full score), not `num_reference_files` (an int) — shell float comparison requires Python subprocess
 ---
+
+## 2026-03-23 - US-OC-019: Thinking Mode — Config, CLI, and Main Agent Loop
+- Implemented OpenClaw thinking level system with 7 ThinkLevel values (off/minimal/low/medium/high/xhigh/adaptive)
+- Provider-specific parameter mapping: Anthropic (thinking budget), OpenAI (reasoning.effort), Gemini (thinking_level)
+- resolve_thinking_default() auto-detects model capabilities: Claude 4.6 → adaptive, Claude 4 → low, reasoning models → low
+- CLI --thinking-level flag threaded through solver.py → OpenClawAgent → OpenClawComputerAgent → ComputerAgent additional_generation_kwargs
+- ThinkingConfig extracted as named param in OpenClawComputerAgent.__init__ to avoid JSON serialization by TrajectorySaverCallback
+- PRD reorganization: expanded US-OC-020, trimmed US-OC-039, added US-OC-041 (TranscriptPolicy) and US-OC-042 (fallback retry)
+- Files changed:
+  - submodules/cua/.../openclaw/thinking.py (new)
+  - submodules/cua/.../openclaw/__init__.py
+  - submodules/cua/.../openclaw_agent.py
+  - submodules/cua/.../openclaw/agent_loop.py
+  - submodules/cua/.../batch/solver.py
+  - run_magic_tower.sh
+  - tests/test_thinking.py (new)
+  - docs/plan/US-OC-019-020-thinking-system.md (new)
+  - docs/plan/US-OC-038-040-canonical-format.md (updated)
+  - prd.json (updated)
+- **Learnings for future iterations:**
+  - ComputerAgent's **additional_generation_kwargs are stored as self.kwargs and spread into run_kwargs which gets JSON-serialized by TrajectorySaverCallback. Non-serializable objects (like ThinkingConfig) must be extracted as named params before **kwargs reach ComputerAgent.
+  - litellm passes thinking={type: enabled, budget_tokens: N} through to Anthropic API. Response contains thinking_blocks and reasoning_content fields (same text, two representations — thinking_blocks is Anthropic-native, reasoning_content is litellm-normalized).
+  - OpenClaw keeps thinking blocks in context by default — dropThinkingBlocks() is only for specific providers (GitHub Copilot Claude). Our system matches this default.
+  - thinkingSignature is a tamper-proof token validated by the API on re-submission — if missing/malformed/cross-provider, the API rejects the request. Downgrade to empty text is the safety valve.
+---

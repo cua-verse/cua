@@ -139,6 +139,8 @@ def parse_args(argv: list[str]) -> dict:
             args["output_dir"] = argv[i + 1]
         elif arg == "--summary-model" and i + 1 < len(argv):
             args["summary_model"] = argv[i + 1]
+        elif arg == "--thinking-level" and i + 1 < len(argv):
+            args["thinking_level"] = argv[i + 1]
 
     return args
 
@@ -525,6 +527,8 @@ def initialize_agent(args, agent_class):
         agent_kwargs["max_steps"] = args["max_steps"]
     if args.get("summary_model"):
         agent_kwargs["summary_model"] = args["summary_model"]
+    if args.get("thinking_level"):
+        agent_kwargs["thinking_level"] = args["thinking_level"]
     return agent_class(**agent_kwargs)
 
 

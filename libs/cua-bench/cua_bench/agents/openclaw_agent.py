@@ -40,6 +40,17 @@ class OpenClawAgent(BaseAgent):
         self.max_steps = kwargs.get("max_steps", 100)
         self.max_history_turns = kwargs.get("max_history_turns", None)  # None = all
 
+        # Thinking level configuration (US-OC-019)
+        # CLI --thinking-level overrides auto-detection; omitting uses model default.
+        from .openclaw.thinking import ThinkLevel, ThinkingConfig, resolve_thinking_default
+
+        thinking_level_str = kwargs.get("thinking_level")
+        if thinking_level_str is not None:
+            level = ThinkLevel(thinking_level_str)
+        else:
+            level = resolve_thinking_default(self.model)
+        self.thinking_config = ThinkingConfig(level=level)
+
     @staticmethod
     def name() -> str:
         return "openclaw-agent"
@@ -175,7 +186,9 @@ class OpenClawAgent(BaseAgent):
 
         # Create OpenClawComputerAgent with mid-loop compaction support (US-OC-017)
         # overflow_cb is auto-injected into callbacks by OpenClawComputerAgent (US-OC-028)
+        # Thinking params flow to ComputerAgent's additional_generation_kwargs (US-OC-019)
         tool_logging_cb = ToolLoggingCallback()
+        thinking_api_params = self.thinking_config.to_api_params(self.model)
         agent = OpenClawComputerAgent(
             # ComputerAgent params
             model=self.model,
@@ -189,10 +202,16 @@ class OpenClawAgent(BaseAgent):
             session_mgr=session_mgr,
             memory_store=memory_store,
             summary_model=self.summary_model,
+            # Thinking config (US-OC-019/020)
+            thinking_config=self.thinking_config,
+            # Provider-specific thinking kwargs → ComputerAgent additional_generation_kwargs
+            **thinking_api_params,
         )
         print("OpenClaw Agent initialized with model:", self.model)
         if self.summary_model != self.model:
             print("  Summary/flush model:", self.summary_model)
+        if self.thinking_config.level.value != "off":
+            print("  Thinking level:", self.thinking_config.level.value)
 
         # Single-loop execution (US-OC-017)
         # Compaction happens in-place inside OpenClawComputerAgent.run() — no

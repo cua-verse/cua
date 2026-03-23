@@ -17,6 +17,7 @@ Components:
   - build_tools / get_tool_summaries / ToolLoggingCallback: tool registry & logging (US-OC-007)
   - build_replay_messages / sanitize_history / limit_history_turns: transcript replay (US-OC-012)
   - run_memory_flush: standalone memory flush module (US-OC-028)
+  - ThinkLevel / ThinkingConfig / resolve_thinking_default: thinking level system (US-OC-019)
 """
 
 from .agent_loop import OpenClawComputerAgent
@@ -55,6 +56,7 @@ from .session import (
     sanitize_history,
     should_run_memory_flush,
 )
+from .thinking import ThinkingConfig, ThinkLevel, resolve_thinking_default
 from .tools import ToolLoggingCallback, build_tools, get_tool_summaries
 from .transcript import group_step_output
 
@@ -95,5 +97,8 @@ __all__ = [
     "MEMORY_FLUSH_SYSTEM_PROMPT",
     "SILENT_REPLY_TOKEN",
     "should_run_memory_flush",
+    "ThinkingConfig",
+    "ThinkLevel",
+    "resolve_thinking_default",
     "group_step_output",
 ]
