@@ -347,6 +347,9 @@ class OpenAIComputerUseConfig:
         # (strips unsupported fields, converts content block types)
         if _is_gpt54(model):
             messages = _normalize_messages_for_gpt54(messages)
+            # Repair orphaned tool/computer calls after format conversion.
+            # Mirrors OpenClaw's sanitizeSessionHistory() before API call.
+            messages = _repair_orphaned_calls(messages)
 
         # Prepare API call kwargs
         api_kwargs = {

@@ -906,7 +906,7 @@ async def summarize_chunk(
                 model=model,
                 messages=llm_messages,
                 max_tokens=2048,
-                temperature=0.3,
+                temperature=1.0,
                 timeout=timeout,
             )
             content = response.choices[0].message.content

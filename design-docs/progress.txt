@@ -763,3 +763,29 @@
   - The `computer-use-preview` and GPT 5.4 models share the same `@register_agent` path but diverge at tool schema, output format, and content block types — model-conditional helpers (`_is_gpt54()`, `get_screenshot_output_type()`) keep branching centralized
   - Screenshot output is taken only after the *last* batched action to avoid redundant intermediate screenshots eating context
 ---
+
+## 2026-03-22 - GPT 5.4 Support & Testing Infrastructure
+- Fixed GPT 5.4 compaction failures: changed `temperature=0.3` to `temperature=1.0` in `summarize_chunk()` (context.py) and `run_memory_flush()` (memory_flush.py) — GPT-5 models reject non-1.0 temperature
+- Wired `_repair_orphaned_calls()` into `predict_step()` after `_normalize_messages_for_gpt54()` — function was defined but never called; now every tool/computer call has a matching output before the API call
+- Added `run_task_loop.sh`: generic version of `run_magic_tower_loop.sh` accepting any task path as first arg
+- Added `.claude/skills/test-task/SKILL.md`: `/test-task` skill for end-to-end test workflow on any task
+- Updated `.claude/skills/analyze/SKILL.md`: task-generic with `logs/<task_id>/report.md` paths
+- Fixed score comparison bug in both `run_task_loop.sh` and `run_magic_tower_loop.sh`: was comparing `total_score >= num_ref` (float vs int, e.g. 0.667 >= 3, always false) — fixed to `total_score >= 1.0`
+- Updated `run_magic_tower_loop.sh`: log directory now uses `logs/<task>/` instead of `logs/loop_run/`
+- Removed task-specific `/test-mota` skill (replaced by generic `/test-task`)
+- Analysis reports from GPT 5.4 runs stored in `logs/mota_24_easy/report.md`
+- **Files changed:**
+  - MOD (submodule): `libs/cua-bench/cua_bench/agents/openclaw/context.py` (temperature fix)
+  - MOD (submodule): `libs/cua-bench/cua_bench/agents/openclaw/memory_flush.py` (temperature fix)
+  - MOD (submodule): `libs/python/agent/agent/loops/openai.py` (wire _repair_orphaned_calls)
+  - NEW: `run_task_loop.sh` (generic task loop script)
+  - NEW: `.claude/skills/test-task/SKILL.md` (generic test skill)
+  - MOD: `.claude/skills/analyze/SKILL.md` (task-generic paths)
+  - DEL: `.claude/skills/test-mota/SKILL.md` (superseded by test-task)
+  - MOD: `run_magic_tower_loop.sh` (score fix + log dir fix)
+  - NEW: `logs/mota_24_easy/report.md` (GPT 5.4 run analysis)
+- **Learnings for future iterations:**
+  - GPT-5 family models require `temperature=1.0` — any other value triggers an API error. Always use 1.0 as default for OpenAI compaction/summary calls to ensure forward compatibility
+  - When adding a new normalization step to `predict_step()`, always verify that downstream repair functions (like `_repair_orphaned_calls`) are also wired in — definitions without call sites are silent bugs
+  - Score loop exit condition: compare against normalized `1.0` (full score), not `num_reference_files` (an int) — shell float comparison requires Python subprocess
+---

@@ -99,7 +99,7 @@ async def run_memory_flush(
             messages=messages,
             tools=[memory_write_tool],
             max_tokens=1024,
-            temperature=0.3,
+            temperature=1.0,
         )
 
         choice = response.choices[0]
