@@ -31,6 +31,7 @@ async def run_memory_flush(
     flush_prompt: str,
     flush_system_prompt: str,
     silent_token: str,
+    thinking_params: dict[str, Any] | None = None,
 ) -> None:
     """Run a pre-compaction memory flush turn via litellm.
 
@@ -100,6 +101,7 @@ async def run_memory_flush(
             tools=[memory_write_tool],
             max_tokens=1024,
             temperature=1.0,
+            **(thinking_params or {}),
         )
 
         choice = response.choices[0]
@@ -213,6 +215,11 @@ def _serialize_content_blocks(content: Any) -> str:
             if isinstance(result_content, str) and len(result_content) > 200:
                 result_content = result_content[:200] + "..."
             parts.append(f"[tool_result: {result_content}]")
+        elif block.get("type") == "thinking":
+            thinking_text = block.get("thinking", "")
+            if isinstance(thinking_text, str) and len(thinking_text) > 200:
+                thinking_text = thinking_text[:200] + "..."
+            parts.append(f"[thinking: {thinking_text}]")
         else:
             parts.append(f"[{block.get('type', 'unknown')}]")
     return " ".join(parts).strip()

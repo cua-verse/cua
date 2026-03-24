@@ -258,6 +258,11 @@ class OpenClawComputerAgent(ComputerAgent):
             flush_prompt=MEMORY_FLUSH_PROMPT,
             flush_system_prompt=MEMORY_FLUSH_SYSTEM_PROMPT,
             silent_token=SILENT_REPLY_TOKEN,
+            thinking_params=(
+                self.thinking_config.flush_params(self.summary_model)
+                if self.thinking_config is not None
+                else None
+            ),
         )
 
     # --- Screenshot path injection (US-OC-034) ---
@@ -378,6 +383,11 @@ class OpenClawComputerAgent(ComputerAgent):
             self.summary_model,
             self.overflow_cb.context_window,
             instructions_tokens=len(self.instructions or "") // 4,
+            thinking_params=(
+                self.thinking_config.compaction_params(self.summary_model)
+                if self.thinking_config is not None
+                else None
+            ),
         )
 
         # Persist compaction entry with firstKeptEntryId

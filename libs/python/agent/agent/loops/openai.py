@@ -80,6 +80,15 @@ def _normalize_messages_for_gpt54(messages: List[Dict[str, Any]]) -> List[Dict[s
     2. Expands role-based messages with tool/computer blocks into top-level
        Responses API items (``computer_call``, ``function_call``, etc.)
     3. Converts ``type: "text"`` blocks to ``input_text``/``output_text``
+
+    Temporary GPT-5.4 replay safeguard:
+    - Preserve top-level ``reasoning`` items in normalized output, but repair
+      their adjacency later. OpenAI Responses may reject replayed reasoning
+      unless it is paired with the exact required following item from the
+      original turn. The OpenClaw-style provider-aware replay/sanitization
+      architecture is not in place yet, so the GPT-5.4 loop applies a narrow
+      repair step until the canonical message model + sanitize passes land in
+      the later architecture stories.
     """
     cleaned: List[Dict[str, Any]] = []
     for msg in messages:
@@ -194,6 +203,133 @@ def _normalize_messages_for_gpt54(messages: List[Dict[str, Any]]) -> List[Dict[s
             cleaned.append({"role": role, "content": text_blocks})
 
     return cleaned
+
+
+def _repair_reasoning_item_pairing(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep OpenAI reasoning items attached to the following assistant response items.
+
+    GPT-5.4 may reject replayed history when a top-level ``reasoning`` item is
+    detached from the assistant output sequence it originally preceded. In
+    practice, OpenAI responses can emit ``reasoning`` followed by one or more
+    assistant ``message`` items and/or ``function_call`` / ``computer_call``
+    items. Transcript normalization can reorder those pieces, so this repair
+    step reconstructs the assistant-side segment as:
+
+    ``reasoning -> assistant messages -> assistant calls -> trailing outputs``
+
+    If no assistant-side items remain after a reasoning item, the reasoning is
+    dropped as an orphaned replay artifact.
+
+    This is an interim provider-specific repair. The later canonical message
+    model + sanitize pipeline should replace it with a principled transcript
+    policy implementation.
+    """
+
+    def _flush_pending(
+        reasoning: Optional[Dict[str, Any]],
+        pending_items: List[Any],
+    ) -> List[Any]:
+        if reasoning is None:
+            return list(pending_items)
+
+        assistant_messages: List[Any] = []
+        assistant_calls: List[Any] = []
+        trailing_items: List[Any] = []
+
+        for pending in pending_items:
+            if not isinstance(pending, dict):
+                trailing_items.append(pending)
+                continue
+
+            pending_type = pending.get("type", "")
+            pending_role = pending.get("role", "")
+
+            if pending_role == "assistant":
+                assistant_messages.append(pending)
+            elif pending_type in ("function_call", "computer_call"):
+                assistant_calls.append(pending)
+            else:
+                trailing_items.append(pending)
+
+        if not assistant_messages and not assistant_calls:
+            return trailing_items
+
+        return [reasoning, *assistant_messages, *assistant_calls, *trailing_items]
+
+    repaired: List[Any] = []
+    pending_reasoning: Dict[str, Any] | None = None
+    pending_items: List[Any] = []
+
+    for item in items:
+        if isinstance(item, dict) and item.get("type") == "reasoning":
+            repaired.extend(_flush_pending(pending_reasoning, pending_items))
+            pending_reasoning = item
+            pending_items = []
+            continue
+
+        if pending_reasoning is not None:
+            pending_items.append(item)
+            continue
+
+        repaired.append(item)
+
+    repaired.extend(_flush_pending(pending_reasoning, pending_items))
+    return repaired
+
+
+def _drop_opaque_reasoning_segments(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop replayed OpenAI reasoning segments that expose no textual reasoning.
+
+    GPT-5.4 returns top-level ``reasoning`` items whose ``summary`` is often an
+    empty list. Those opaque provider-internal items are not reconstructible
+    from transcript state, and replaying them can trigger ``reasoning was
+    provided without its required following item`` errors even when the nearby
+    call ordering looks correct.
+
+    As an interim safeguard, drop an opaque reasoning item and the assistant-side
+    segment it prefixes (assistant messages, function/computer calls, and their
+    outputs) until the next user message. This trades some fidelity for a stable
+    replay path until the canonical message model and provider-aware sanitize
+    pipeline are implemented.
+    """
+    repaired: List[Any] = []
+    dropping = False
+
+    for item in items:
+        if not isinstance(item, dict):
+            if not dropping:
+                repaired.append(item)
+            continue
+
+        item_type = item.get("type", "")
+        item_role = item.get("role", "")
+
+        if item_type == "reasoning":
+            summary = item.get("summary", [])
+            reasoning_text = item.get("reasoning", "")
+            has_summary_text = (
+                isinstance(summary, list)
+                and any(
+                    isinstance(block, dict)
+                    and block.get("type") == "summary_text"
+                    and block.get("text")
+                    for block in summary
+                )
+            )
+            has_reasoning_text = isinstance(reasoning_text, str) and bool(reasoning_text.strip())
+            if not has_summary_text and not has_reasoning_text:
+                dropping = True
+                continue
+
+        if dropping:
+            if item_role == "user":
+                dropping = False
+                repaired.append(item)
+            continue
+
+        repaired.append(item)
+
+    return repaired
 
 
 def _repair_orphaned_calls(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -347,6 +483,8 @@ class OpenAIComputerUseConfig:
         # (strips unsupported fields, converts content block types)
         if _is_gpt54(model):
             messages = _normalize_messages_for_gpt54(messages)
+            messages = _drop_opaque_reasoning_segments(messages)
+            messages = _repair_reasoning_item_pairing(messages)
             # Repair orphaned tool/computer calls after format conversion.
             # Mirrors OpenClaw's sanitizeSessionHistory() before API call.
             messages = _repair_orphaned_calls(messages)

@@ -49,7 +49,19 @@ class OpenClawAgent(BaseAgent):
             level = ThinkLevel(thinking_level_str)
         else:
             level = resolve_thinking_default(self.model)
-        self.thinking_config = ThinkingConfig(level=level)
+        flush_level_str = kwargs.get("flush_thinking_level")
+        compaction_level_str = kwargs.get("compaction_thinking_level")
+        flush_level = ThinkLevel(flush_level_str) if flush_level_str is not None else level
+        compaction_level = (
+            ThinkLevel(compaction_level_str)
+            if compaction_level_str is not None
+            else level
+        )
+        self.thinking_config = ThinkingConfig(
+            level=level,
+            flush_level=flush_level,
+            compaction_level=compaction_level,
+        )
 
     @staticmethod
     def name() -> str:
@@ -212,6 +224,10 @@ class OpenClawAgent(BaseAgent):
             print("  Summary/flush model:", self.summary_model)
         if self.thinking_config.level.value != "off":
             print("  Thinking level:", self.thinking_config.level.value)
+        if self.thinking_config.flush_level != self.thinking_config.level:
+            print("  Flush thinking level:", self.thinking_config.flush_level.value)
+        if self.thinking_config.compaction_level != self.thinking_config.level:
+            print("  Compaction thinking level:", self.thinking_config.compaction_level.value)
 
         # Single-loop execution (US-OC-017)
         # Compaction happens in-place inside OpenClawComputerAgent.run() — no

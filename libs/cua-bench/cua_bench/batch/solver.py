@@ -41,7 +41,7 @@ from pathlib import Path
 # Configure logging if not already configured
 def setup_logging(output_dir=None):
     """Configure logging if not already configured.
-    
+
     Args:
         output_dir: Directory to save log files
     """
@@ -51,19 +51,19 @@ def setup_logging(output_dir=None):
         formatter = logging.Formatter(
             fmt="%(asctime)s %(levelname)s %(module)s/%(lineno)d: %(message)s"
         )
-        
+
         # Console handler
         stdout_handler = logging.StreamHandler(sys.stdout)
         stdout_handler.setLevel(logging.INFO)
         stdout_handler.setFormatter(formatter)
         root_logger.addHandler(stdout_handler)
-        
+
         # File handler if output directory is provided
         if output_dir:
             log_dir = Path(output_dir) / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             log_file = log_dir / "solver.log"
-            
+
             file_handler = logging.FileHandler(log_file, encoding="utf-8")
             file_handler.setLevel(logging.INFO)
             file_handler.setFormatter(formatter)
@@ -109,6 +109,10 @@ def parse_args(argv: list[str]) -> dict:
         "setup_only": False,
         "evaluate_only": False,
         "task_only": False,
+        "summary_model": None,
+        "thinking_level": None,
+        "flush_thinking_level": None,
+        "compaction_thinking_level": None,
     }
 
     if len(argv) < 2:
@@ -141,6 +145,10 @@ def parse_args(argv: list[str]) -> dict:
             args["summary_model"] = argv[i + 1]
         elif arg == "--thinking-level" and i + 1 < len(argv):
             args["thinking_level"] = argv[i + 1]
+        elif arg == "--flush-thinking-level" and i + 1 < len(argv):
+            args["flush_thinking_level"] = argv[i + 1]
+        elif arg == "--compaction-thinking-level" and i + 1 < len(argv):
+            args["compaction_thinking_level"] = argv[i + 1]
 
     return args
 
@@ -189,7 +197,7 @@ async def main():
         task_cfg = None
 
         # Initialize environment based on provider type
-        screenshot = await initialize_environment(
+        await initialize_environment(
             provider, args, env, task_index, env_api_url, env_vnc_url, env_type, logger
         )
         session = env.session
@@ -257,7 +265,11 @@ def validate_args(args, logger):
         logger.error("  --agent <name>         Agent name from registry")
         logger.error("  --agent-import-path <path>  Agent class import path")
         logger.error("  --model <model>        Model to use for agent")
+        logger.error("  --summary-model <model> Model to use for flush/compaction helpers")
         logger.error("  --max-steps <n>        Maximum steps for agent")
+        logger.error("  --thinking-level <level> Main loop thinking level")
+        logger.error("  --flush-thinking-level <level> Flush thinking level (defaults to main)")
+        logger.error("  --compaction-thinking-level <level> Compaction thinking level (defaults to main)")
         logger.error("  --save-pngs            Save screenshots as PNGs")
         logger.error("  --filter <events>      Filter trace events")
         logger.error("  --task-index <n>       Override task index")

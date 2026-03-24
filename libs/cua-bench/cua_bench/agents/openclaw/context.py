@@ -109,7 +109,9 @@ def estimate_message_tokens(msg: dict[str, Any]) -> int:
     """Estimate token count for a single message using chars/4 heuristic.
 
     Special handling for images: subtracts the base64 string length and adds
-    FIXED_IMAGE_TOKENS per image (matching actual API billing).
+    FIXED_IMAGE_TOKENS per image (matching actual API billing). Thinking
+    blocks are counted naturally because they remain part of the serialized
+    message payload.
     """
     raw = json.dumps(msg, separators=(",", ":"))
     # Count and subtract base64 image data, replace with fixed token cost
@@ -865,6 +867,7 @@ async def summarize_chunk(
     previous_summary: str | None = None,
     custom_instructions: str | None = None,
     timeout: int = SUMMARIZATION_TIMEOUT,
+    thinking_params: dict[str, Any] | None = None,
 ) -> str:
     """Summarize a chunk of messages via litellm.acompletion.
 
@@ -908,6 +911,7 @@ async def summarize_chunk(
                 max_tokens=2048,
                 temperature=1.0,
                 timeout=timeout,
+                **(thinking_params or {}),
             )
             content = response.choices[0].message.content
             return content.strip() if content else DEFAULT_SUMMARY_FALLBACK
@@ -928,6 +932,7 @@ async def summarize_chunks_iterative(
     *,
     custom_instructions: str | None = None,
     timeout: int = SUMMARIZATION_TIMEOUT,
+    thinking_params: dict[str, Any] | None = None,
 ) -> str:
     """Iteratively summarize chunks, feeding each summary as context to the next.
 
@@ -945,6 +950,7 @@ async def summarize_chunks_iterative(
             previous_summary=summary,
             custom_instructions=custom_instructions,
             timeout=timeout,
+            thinking_params=thinking_params,
         )
 
     return summary or DEFAULT_SUMMARY_FALLBACK
@@ -963,6 +969,7 @@ async def summarize_with_fallback(
     *,
     custom_instructions: str | None = None,
     timeout: int = SUMMARIZATION_TIMEOUT,
+    thinking_params: dict[str, Any] | None = None,
 ) -> str:
     """Three-tier summarization with progressive fallback.
 
@@ -977,6 +984,7 @@ async def summarize_with_fallback(
             return await summarize_chunks_iterative(
                 chunks, model, custom_instructions=custom_instructions,
                 timeout=timeout,
+                thinking_params=thinking_params,
             )
     except Exception as e:
         print(f"[Compaction] Tier 1 (full) failed: {e}")
@@ -991,6 +999,7 @@ async def summarize_with_fallback(
                 summary = await summarize_chunks_iterative(
                     chunks, model, custom_instructions=custom_instructions,
                     timeout=timeout,
+                    thinking_params=thinking_params,
                 )
                 if oversized_count > 0:
                     summary += f"\n\n[Note: {oversized_count} oversized message(s) excluded from summary]"
@@ -1019,6 +1028,7 @@ async def compact_messages(
     recent_turns_preserve: int = 3,
     custom_instructions: str | None = None,
     timeout: int = SUMMARIZATION_TIMEOUT,
+    thinking_params: dict[str, Any] | None = None,
 ) -> CompactionResult:
     """Compact older conversation messages into a summary with budget-aware splitting.
 
@@ -1149,6 +1159,7 @@ async def compact_messages(
             max_chunk_tokens,
             custom_instructions=custom_instructions,
             timeout=timeout,
+            thinking_params=thinking_params,
         )
     else:
         summary = DEFAULT_SUMMARY_FALLBACK

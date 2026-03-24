@@ -13,6 +13,23 @@ from pathlib import Path
 from typing import Any
 
 
+def _extract_reasoning_text(item: dict[str, Any]) -> str:
+    """Extract text content from a CUA reasoning item."""
+    summary = item.get("summary", [])
+    if isinstance(summary, list):
+        parts = [
+            block.get("text", "")
+            for block in summary
+            if isinstance(block, dict)
+            and block.get("type") == "summary_text"
+            and block.get("text")
+        ]
+        if parts:
+            return "\n".join(parts)
+    reasoning = item.get("reasoning", "")
+    return reasoning if isinstance(reasoning, str) else ""
+
+
 def _find_latest_screenshot(trajectory_dir: Path | None) -> str:
     """Find the most recently saved screenshot_after.png in trajectory_dir.
 
@@ -57,6 +74,25 @@ def group_step_output(
             for block in item.get("content", []):
                 if block.get("text"):
                     assistant_content.append({"type": "text", "text": block["text"]})
+                elif block.get("type") == "thinking" and block.get("thinking"):
+                    thinking_block = {
+                        "type": "thinking",
+                        "thinking": block["thinking"],
+                    }
+                    if block.get("id"):
+                        thinking_block["id"] = block["id"]
+                    if block.get("thinkingSignature") is not None:
+                        thinking_block["thinkingSignature"] = block["thinkingSignature"]
+                    assistant_content.append(thinking_block)
+        elif item_type == "reasoning":
+            thinking_text = _extract_reasoning_text(item)
+            if thinking_text:
+                thinking_block = {"type": "thinking", "thinking": thinking_text}
+                if item.get("id"):
+                    thinking_block["id"] = item["id"]
+                if item.get("thinkingSignature") is not None:
+                    thinking_block["thinkingSignature"] = item["thinkingSignature"]
+                assistant_content.append(thinking_block)
         elif item_type == "function_call":
             assistant_content.append({
                 "type": "function_call",
