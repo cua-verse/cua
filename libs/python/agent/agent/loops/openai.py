@@ -91,6 +91,9 @@ def _normalize_messages_for_gpt54(messages: List[Dict[str, Any]]) -> List[Dict[s
       the later architecture stories.
     """
     cleaned: List[Dict[str, Any]] = []
+    # Track call types so tool_result blocks can emit the correct output type
+    # (computer_call → computer_call_output, function_call → function_call_output)
+    _call_type_map: Dict[str, str] = {}  # call_id → "computer_call" | "function_call"
     for msg in messages:
         if not isinstance(msg, dict):
             cleaned.append(msg)
@@ -103,6 +106,9 @@ def _normalize_messages_for_gpt54(messages: List[Dict[str, Any]]) -> List[Dict[s
 
         # Items that already have a Responses API "type" (not "role") pass through
         if msg.get("type") and not msg.get("role"):
+            # Track call types from top-level items too
+            if msg.get("type") in ("computer_call", "function_call") and msg.get("call_id"):
+                _call_type_map[msg["call_id"]] = msg["type"]
             cleaned.append(msg)
             continue
 
@@ -154,10 +160,13 @@ def _normalize_messages_for_gpt54(messages: List[Dict[str, Any]]) -> List[Dict[s
                     })
                     continue
 
+                _cid = block.get("id", block.get("call_id", ""))
                 call_item: Dict[str, Any] = {
                     "type": "computer_call",
-                    "call_id": block.get("id", block.get("call_id", "")),
+                    "call_id": _cid,
                 }
+                if _cid:
+                    _call_type_map[_cid] = "computer_call"
                 if has_valid_actions:
                     call_item["actions"] = actions
                 elif has_valid_action:
@@ -167,9 +176,12 @@ def _normalize_messages_for_gpt54(messages: List[Dict[str, Any]]) -> List[Dict[s
                 if text_blocks:
                     cleaned.append({"role": role, "content": list(text_blocks)})
                     text_blocks = []
+                _cid = block.get("id", block.get("call_id", ""))
+                if _cid:
+                    _call_type_map[_cid] = "function_call"
                 cleaned.append({
                     "type": "function_call",
-                    "call_id": block.get("id", block.get("call_id", "")),
+                    "call_id": _cid,
                     "name": block.get("name", ""),
                     "arguments": block.get("arguments", ""),
                 })
@@ -177,16 +189,34 @@ def _normalize_messages_for_gpt54(messages: List[Dict[str, Any]]) -> List[Dict[s
                 if text_blocks:
                     cleaned.append({"role": role, "content": list(text_blocks)})
                     text_blocks = []
+                _cid = block.get("tool_use_id", block.get("id", ""))
                 result_content = block.get("content", "")
                 if isinstance(result_content, list):
                     result_content = json.dumps(result_content)
                 elif not isinstance(result_content, str):
                     result_content = str(result_content)
-                cleaned.append({
-                    "type": "function_call_output",
-                    "call_id": block.get("tool_use_id", block.get("id", "")),
-                    "output": result_content,
-                })
+                # Emit the correct output type based on the original call
+                if _call_type_map.get(_cid) == "computer_call":
+                    # computer_call requires computer_call_output with a screenshot
+                    _PLACEHOLDER_PNG = (
+                        "data:image/png;base64,"
+                        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB"
+                        "Nl7BcQAAAABJRU5ErkJggg=="
+                    )
+                    cleaned.append({
+                        "type": "computer_call_output",
+                        "call_id": _cid,
+                        "output": {
+                            "type": "computer_screenshot",
+                            "image_url": _PLACEHOLDER_PNG,
+                        },
+                    })
+                else:
+                    cleaned.append({
+                        "type": "function_call_output",
+                        "call_id": _cid,
+                        "output": result_content,
+                    })
             elif btype in ("input_text", "output_text", "input_image",
                            "computer_screenshot", "summary_text", "refusal"):
                 # Already valid Responses API types
