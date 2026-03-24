@@ -115,12 +115,16 @@ def _normalize_messages_for_gpt54(messages: List[Dict[str, Any]]) -> List[Dict[s
         # Role-based messages with content arrays (completion format from compaction)
         content = msg.get("content")
         role = msg.get("role", "user")
+        # Normalize "tool" role to "user" — Responses API only accepts
+        # assistant/system/developer/user. Tool results are handled via
+        # top-level function_call_output/computer_call_output items.
+        emit_role = "user" if role == "tool" else role
 
         # String content — wrap as a simple role message with correct text type
         if isinstance(content, str):
             text_type = "output_text" if role == "assistant" else "input_text"
             cleaned.append({
-                "role": role,
+                "role": emit_role,
                 "content": [{"type": text_type, "text": content}],
             })
             continue
@@ -142,39 +146,24 @@ def _normalize_messages_for_gpt54(messages: List[Dict[str, Any]]) -> List[Dict[s
             if btype == "text":
                 text_blocks.append({"type": text_type, "text": block.get("text", "")})
             elif btype == "computer_call":
-                # Flush accumulated text blocks as a message first
-                if text_blocks:
-                    cleaned.append({"role": role, "content": list(text_blocks)})
-                    text_blocks = []
-                # Convert to top-level computer_call item
-                action = block.get("action")
-                actions = block.get("actions")
-                has_valid_action = isinstance(action, dict) and action.get("type")
-                has_valid_actions = isinstance(actions, list) and len(actions) > 0
-
-                if not has_valid_action and not has_valid_actions:
-                    # Stale transcript entry with empty action — serialize as text
-                    text_blocks.append({
-                        "type": text_type,
-                        "text": "[computer action: details unavailable]",
-                    })
-                    continue
-
+                # Role-based messages with computer_call blocks come from
+                # compaction/replay — the original screenshot is gone. Convert
+                # to text to avoid needing a placeholder image (OpenAI validates
+                # image data in computer_call_output and rejects placeholders).
+                # Fresh computer_call items from the current run are top-level
+                # Responses API items that pass through unchanged (line 108).
+                action = block.get("action") or block.get("actions", {})
+                action_desc = json.dumps(action)[:200] if action else "details unavailable"
                 _cid = block.get("id", block.get("call_id", ""))
-                call_item: Dict[str, Any] = {
-                    "type": "computer_call",
-                    "call_id": _cid,
-                }
                 if _cid:
                     _call_type_map[_cid] = "computer_call"
-                if has_valid_actions:
-                    call_item["actions"] = actions
-                elif has_valid_action:
-                    call_item["action"] = action
-                cleaned.append(call_item)
+                text_blocks.append({
+                    "type": text_type,
+                    "text": f"[computer action: {action_desc}]",
+                })
             elif btype == "function_call":
                 if text_blocks:
-                    cleaned.append({"role": role, "content": list(text_blocks)})
+                    cleaned.append({"role": emit_role, "content": list(text_blocks)})
                     text_blocks = []
                 _cid = block.get("id", block.get("call_id", ""))
                 if _cid:
@@ -187,7 +176,7 @@ def _normalize_messages_for_gpt54(messages: List[Dict[str, Any]]) -> List[Dict[s
                 })
             elif btype == "tool_result":
                 if text_blocks:
-                    cleaned.append({"role": role, "content": list(text_blocks)})
+                    cleaned.append({"role": emit_role, "content": list(text_blocks)})
                     text_blocks = []
                 _cid = block.get("tool_use_id", block.get("id", ""))
                 result_content = block.get("content", "")
@@ -197,19 +186,16 @@ def _normalize_messages_for_gpt54(messages: List[Dict[str, Any]]) -> List[Dict[s
                     result_content = str(result_content)
                 # Emit the correct output type based on the original call
                 if _call_type_map.get(_cid) == "computer_call":
-                    # computer_call requires computer_call_output with a screenshot
-                    _PLACEHOLDER_PNG = (
-                        "data:image/png;base64,"
-                        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB"
-                        "Nl7BcQAAAABJRU5ErkJggg=="
-                    )
-                    cleaned.append({
-                        "type": "computer_call_output",
-                        "call_id": _cid,
-                        "output": {
-                            "type": "computer_screenshot",
-                            "image_url": _PLACEHOLDER_PNG,
-                        },
+                    # Compacted/replayed computer_call results no longer have
+                    # the original screenshot. Convert to text — the compaction
+                    # summary already captures what happened. We don't emit a
+                    # computer_call_output with a placeholder image because
+                    # OpenAI validates image data. The matching computer_call
+                    # was already converted to text above (see computer_call
+                    # branch), so no call/result pairing issue.
+                    text_blocks.append({
+                        "type": text_type,
+                        "text": f"[computer action result — screenshot no longer available: {result_content[:200]}]",
                     })
                 else:
                     cleaned.append({
@@ -230,7 +216,7 @@ def _normalize_messages_for_gpt54(messages: List[Dict[str, Any]]) -> List[Dict[s
 
         # Flush remaining text blocks
         if text_blocks:
-            cleaned.append({"role": role, "content": text_blocks})
+            cleaned.append({"role": emit_role, "content": text_blocks})
 
     return cleaned
 
@@ -279,35 +265,31 @@ def _repair_orphaned_calls(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     and item.get("call_id") in orphaned_results)
         ]
 
-    # Insert synthetic outputs right after each orphaned call
+    # Insert synthetic outputs for orphaned function_calls; drop orphaned
+    # computer_calls entirely (can't synthesize valid screenshots and OpenAI
+    # validates image data in computer_call_output).
     repaired: List[Dict[str, Any]] = []
     for item in items:
-        repaired.append(item)
         if not isinstance(item, dict):
+            repaired.append(item)
             continue
         call_id = item.get("call_id", "")
         if call_id in orphaned:
-            ctype = orphaned.pop(call_id)
-            if ctype == "function_call":
+            ctype = orphaned[call_id]
+            if ctype == "computer_call":
+                # Drop orphaned computer_call — can't provide valid screenshot
+                orphaned.pop(call_id)
+                continue
+            elif ctype == "function_call":
+                repaired.append(item)
                 repaired.append({
                     "type": "function_call_output",
                     "call_id": call_id,
                     "output": "[compacted — result no longer available]",
                 })
-            elif ctype == "computer_call":
-                # Use a minimal valid 1x1 white PNG for orphaned computer calls
-                repaired.append({
-                    "type": "computer_call_output",
-                    "call_id": call_id,
-                    "output": {
-                        "type": "computer_screenshot",
-                        "image_url": (
-                            "data:image/png;base64,"
-                            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB"
-                            "Nl7BcQAAAABJRU5ErkJggg=="
-                        ),
-                    },
-                })
+                orphaned.pop(call_id)
+                continue
+        repaired.append(item)
 
     # Also drop orphaned results
     orphaned_results = result_ids - set(call_ids.keys())

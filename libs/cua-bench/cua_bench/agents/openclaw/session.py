@@ -835,7 +835,8 @@ def convert_to_responses_api_items(
     - Assistant text → ``{type: "message", role: "assistant", content: [{type: "output_text", …}]}``
     - function_call block → ``{type: "function_call", call_id, name, arguments}``
     - computer_call block → ``{type: "computer_call", call_id, action}``
-    - tool_result block → ``{type: "function_call_output", call_id, output}``
+    - tool_result block → ``{type: "function_call_output", …}`` or
+      ``{type: "computer_call_output", …}`` (matched by call_id to original call type)
 
     The ``id`` → ``call_id`` mapping matches what ``group_step_output`` stores
     (``"id"`` key in transcript) versus what the Responses API expects
@@ -848,6 +849,9 @@ def convert_to_responses_api_items(
     US-OC-022: Replay Format Fix.
     """
     items: list[dict[str, Any]] = []
+    # Track call types so tool results emit the correct output type
+    # (computer_call → computer_call_output, function_call → function_call_output)
+    call_type_map: dict[str, str] = {}
 
     for msg in messages:
         role = msg.get("role", "")
@@ -872,14 +876,22 @@ def convert_to_responses_api_items(
         # --- List content (content blocks) ---
         if isinstance(content, list):
             if role == "assistant":
-                items.extend(_unnest_assistant_blocks(content))
+                unnested = _unnest_assistant_blocks(content)
+                # Record call types for later tool result matching
+                for item in unnested:
+                    itype = item.get("type", "")
+                    if itype in ("function_call", "computer_call"):
+                        cid = item.get("call_id", "")
+                        if cid:
+                            call_type_map[cid] = itype
+                items.extend(unnested)
             elif role in ("tool", "user"):
                 # Check if this is a tool-result message (all blocks are tool_result)
                 has_tool_results = any(
                     b.get("type") == "tool_result" for b in content if isinstance(b, dict)
                 )
                 if role == "tool" or (role == "user" and has_tool_results):
-                    items.extend(_unnest_tool_blocks(content))
+                    items.extend(_unnest_tool_blocks(content, call_type_map))
                 else:
                     items.append(_wrap_user_content(content))
             else:
@@ -1002,19 +1014,40 @@ def _unnest_assistant_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any
     return items
 
 
-def _unnest_tool_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert tool_result content blocks into top-level Responses API output items."""
+def _unnest_tool_blocks(
+    blocks: list[dict[str, Any]],
+    call_type_map: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Convert tool_result content blocks into top-level Responses API output items.
+
+    Uses ``call_type_map`` (call_id → "function_call" | "computer_call") to emit
+    the correct output type:
+    - computer_call → ``computer_call_output`` with text (screenshot from prior
+      turn is no longer available; OpenAI validates image data so we can't use
+      a placeholder PNG)
+    - function_call → ``function_call_output`` with the original text content
+    """
+    if call_type_map is None:
+        call_type_map = {}
     items: list[dict[str, Any]] = []
     for block in blocks:
         if not isinstance(block, dict):
             continue
         btype = block.get("type", "")
         if btype == "tool_result":
-            items.append({
-                "type": "function_call_output",
-                "call_id": block.get("tool_use_id", block.get("call_id", "")),
-                "output": block.get("content", ""),
-            })
+            call_id = block.get("tool_use_id", block.get("call_id", ""))
+            if call_type_map.get(call_id) == "computer_call":
+                items.append({
+                    "type": "computer_call_output",
+                    "call_id": call_id,
+                    "output": "[screenshot from prior turn — no longer available]",
+                })
+            else:
+                items.append({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": block.get("content", ""),
+                })
         elif btype == "computer_call_output":
             items.append({
                 "type": "computer_call_output",

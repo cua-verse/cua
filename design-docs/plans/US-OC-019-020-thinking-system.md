@@ -27,13 +27,68 @@ OpenClaw has a sophisticated thinking/reasoning control system with 7 levels (of
 
 **What We Drop and Why**:
 - Per-session / per-turn overrides — CUA benchmark runs are single-shot, no interactive user
-- `dropThinkingBlocks()` — not needed now; OpenClaw only uses it for Copilot Claude. If provider-specific issues arise, we add it then.
+- Full transcript-policy / sanitize pipeline — deferred to US-OC-038/039/041, where message replay and provider-specific sanitization are designed centrally
+- Provider-specific thinking sanitization (`dropThinkingBlocks`, signature repair, downgrade passes) — deferred to US-OC-041; US-OC-020 only preserves thinking blocks, it does not make them replay-safe across providers/models
 
 **Future Work** (note in docs, don't implement):
 - `VerboseLevel`, `ReasoningLevel`, `ElevatedLevel` — additional control dimensions from OpenClaw. VerboseLevel controls output detail, ReasoningLevel controls chain-of-thought visibility, ElevatedLevel controls permission escalation. Not needed for headless CUA benchmark runs but may be useful for interactive agent modes.
-- `dropThinkingBlocks()` — conditional per-provider stripping of thinking blocks from history (OpenClaw: `pi-embedded-runner/thinking.ts:25-53`). Currently only needed for GitHub Copilot Claude; implement if other providers reject persisted thinking blocks on follow-up API calls. Would be part of the TranscriptPolicy pipeline (US-OC-038-040).
+- `dropThinkingBlocks()` — conditional per-provider stripping of thinking blocks from history (OpenClaw: `pi-embedded-runner/thinking.ts:25-53`). This belongs in the future TranscriptPolicy pipeline:
+  - US-OC-038 defines the canonical internal message model
+  - US-OC-039 defines the centralized sanitize/adapter pipeline
+  - US-OC-041 adds provider-specific thinking sanitization passes
 - `<think>` tag extraction — some models (DeepSeek R1, older reasoning models) emit reasoning inside `<think>...</think>` XML tags in plain text rather than structured thinking blocks. OpenClaw has `extractThinkingFromTaggedText()`, `splitThinkingTaggedText()`, and `promoteThinkingTagsToBlocks()` in `pi-embedded-utils.ts` to parse and promote these to structured blocks. Implement when adding non-structured reasoning models (DeepSeek R1, QwQ, etc.) — without this, thinking text stays in visible content and pollutes compaction summaries.
 - Per-turn thinking level overrides — agent self-adjusting thinking depth based on task difficulty.
+
+## Updated Investigation (2026-03-23)
+
+### 1. Sequencing decision
+
+Implement US-OC-020 before US-OC-038/039/041, but keep the contract narrow.
+
+Reasoning:
+- US-OC-020 is additive and local: it wires per-call-site thinking params and stops dropping thinking blocks at the transcript boundary.
+- US-OC-038/039/041 are architectural: they define the canonical message model and replay sanitization rules.
+- If we design sanitization first while the transcript is still lossy, we risk building adapters around incomplete data.
+
+So the order should be:
+1. US-OC-020 — preserve and plumb thinking correctly
+2. US-OC-038 — canonical internal message model
+3. US-OC-039 — centralized sanitize/adapter pipeline
+4. US-OC-041 — provider-specific thinking sanitization passes
+
+### 2. Session message model vs replay model
+
+Current AgentHLE does not have one canonical internal message format. It has multiple related representations:
+- CUA output items from the live loop
+- Session transcript message content blocks
+- Compaction input messages
+- Provider-specific API payloads
+
+That matters for thinking support because a thinking block can be:
+- present in CUA output
+- dropped during transcript grouping
+- serialized in a shape that is not safe to replay later
+
+For US-OC-020, the transcript should become a high-fidelity stored history: if a thinking block exists in the step output, we should persist it. But we should not overclaim the transcript as the final canonical replay model. US-OC-038/039 still need to define the canonical item shape and the provider adapters.
+
+### 3. Multi-provider risk
+
+There are two separate questions:
+1. Can we store thinking blocks in session history?
+2. Can we replay those thinking blocks safely into later model calls?
+
+US-OC-020 answers only the first question. The second is deferred to the sanitize-policy work.
+
+This distinction matters because different providers have different replay constraints:
+- some require provider-native reasoning item shapes
+- some validate reasoning signatures or IDs on replay
+- some reject persisted thinking blocks entirely unless transformed or downgraded
+
+So the explicit US-OC-020 contract should be:
+- preserve thinking blocks in transcript/history
+- pass thinking params to the relevant LLM call sites
+- count thinking content in token estimation/compaction
+- do not promise provider-safe replay until US-OC-041
 
 ---
 
@@ -102,17 +157,37 @@ Provider-specific mappings:
 - **Gemini**: `{"thinking_level": "MINIMAL"|"LOW"|"MEDIUM"|"HIGH"}` (CUA gemini loop handles this)
 - **Fallback**: `{"reasoning_effort": level.value}`
 
-### 2. CLI: `solver.py:parse_args` (lines 95-143)
+### 2. CLI: `solver.py:parse_args`
 
-Add `--thinking-level` flag → `args["thinking_level"]`
+Add three flags:
+- `--thinking-level`
+- `--flush-thinking-level`
+- `--compaction-thinking-level`
 
-Thread through `initialize_agent()` (lines 519-528) → `agent_kwargs["thinking_level"]`
+Thread through `initialize_agent()` into:
+- `agent_kwargs["thinking_level"]`
+- `agent_kwargs["flush_thinking_level"]`
+- `agent_kwargs["compaction_thinking_level"]`
 
-### 3. `OpenClawAgent.__init__` (lines 35-41)
+### 3. `OpenClawAgent.__init__`
 
-- Read `thinking_level` from kwargs (string or None)
-- If provided: `ThinkingConfig(level=ThinkLevel(thinking_level))`
-- If not provided: `ThinkingConfig(level=resolve_thinking_default(self.model))`
+Resolve the three levels as follows:
+- `thinking_level`: explicit CLI value or `resolve_thinking_default(self.model)`
+- `flush_thinking_level`: explicit CLI value or inherit `thinking_level`
+- `compaction_thinking_level`: explicit CLI value or inherit `thinking_level`
+
+This gives the operator a simple default mental model: if they turn thinking on, all call sites use that level unless explicitly overridden.
+
+```python
+main_level = ThinkLevel(kwargs["thinking_level"]) if kwargs.get("thinking_level") else resolve_thinking_default(self.model)
+flush_level = ThinkLevel(kwargs["flush_thinking_level"]) if kwargs.get("flush_thinking_level") else main_level
+compaction_level = ThinkLevel(kwargs["compaction_thinking_level"]) if kwargs.get("compaction_thinking_level") else main_level
+self.thinking_config = ThinkingConfig(
+    level=main_level,
+    flush_level=flush_level,
+    compaction_level=compaction_level,
+)
+```
 
 ### 4. `OpenClawAgent.perform_task` (lines 179-192)
 
@@ -132,17 +207,14 @@ if self.thinking_config.level != ThinkLevel.OFF:
     print("  Thinking level:", self.thinking_config.level.value)
 ```
 
-### 5. `run_magic_tower.sh`
+### 5. Shell entry points
 
-Add optional `$4` for thinking level:
-```bash
-thinking_level="${4:-}"
-THINKING_ARG=""
-if [ -n "$thinking_level" ]; then
-    THINKING_ARG="--thinking-level $thinking_level"
-fi
-# Add $THINKING_ARG to uv run command
-```
+Update task runner scripts to optionally accept and forward:
+- main thinking level
+- flush thinking level
+- compaction thinking level
+
+The shell scripts do not need their own defaulting logic beyond argument pass-through; inheritance should live in Python so all entry points behave the same.
 
 ### 6. Export from `__init__.py`
 
@@ -157,31 +229,54 @@ Add `ThinkingConfig`, `ThinkLevel`, `resolve_thinking_default` to `agents/opencl
 
 ---
 
-## US-OC-020: Wire into Memory Flush and Compaction
+## US-OC-020: Wire into Memory Flush, Compaction, and Transcript
 
-### 1. `memory_flush.py:run_memory_flush` (line 26)
+### 1. `memory_flush.py:run_memory_flush`
 
 Add `thinking_params: dict | None = None` parameter. Spread `**(thinking_params or {})` into `litellm.acompletion()` at line 97.
 
-### 2. `context.py` summarization function (line 860)
+### 2. `context.py` summarization functions
 
-Add `thinking_params: dict | None = None` parameter. Spread into `litellm.acompletion()` at line 905.
+Add `thinking_params: dict | None = None` parameter to:
+- `summarize_chunk`
+- `summarize_chunks_iterative`
+- `summarize_with_fallback`
+- `compact_messages`
 
-### 3. `context.py:compact_messages` (line 1012)
+Thread the value through to each `litellm.acompletion()` summarization call.
 
-Add `thinking_params: dict | None = None`. Thread to the internal summarization call.
+### 3. `agent_loop.py:OpenClawComputerAgent`
 
-### 4. `agent_loop.py:OpenClawComputerAgent` (line 61)
-
-- Accept `thinking_config: ThinkingConfig | None = None` in `__init__`, store it
+- Keep `thinking_config` on the agent loop object
 - In `_maybe_flush_memory()`: pass `self.thinking_config.flush_params(self.summary_model)` to `run_memory_flush`
 - In `_compact_in_place()`: pass `self.thinking_config.compaction_params(self.summary_model)` to `compact_messages`
+
+### 4. `transcript.py:group_step_output`
+
+Capture thinking blocks from CUA output items into assistant content, preserving at least:
+
+```python
+{"type": "thinking", "thinking": "..."}
+```
+
+If the provider output includes additional replay-relevant fields such as a thinking signature or ID, preserve them in the transcript too instead of discarding them. US-OC-020 should bias toward loss-minimizing storage even though later sanitize passes may rewrite or drop these fields.
+
+### 5. `context.py` token estimation contract
+
+Make thinking support explicit in the estimator and tests:
+- token estimation must include thinking block characters
+- this should be tested directly, not only inferred from generic JSON serialization
+
+Even if the current estimator already counts thinking chars indirectly because it serializes the full message dict, US-OC-020 should turn that into a documented and tested contract.
 
 ### Files modified (US-OC-020):
 - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/memory_flush.py`
 - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py`
 - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py`
-- `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (pass thinking_config)
+- `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/transcript.py`
+- `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py`
+- `submodules/cua/libs/cua-bench/cua_bench/batch/solver.py`
+- shell task runner(s)
 
 ---
 
@@ -192,6 +287,20 @@ Add `thinking_params: dict | None = None`. Thread to the internal summarization 
    - ThinkLevel enum values match OpenClaw's 7 levels
    - `resolve_thinking_default()`: Claude 4.6 → adaptive, reasoning model → low, unknown → off
    - `resolve_thinking_params()`: correct provider-specific output per model string
-   - `ThinkingConfig.flush_params()` / `.compaction_params()` independent of main level
-3. **Level 2**: `bash run_magic_tower.sh 50 anthropic/claude-sonnet-4-20250514 anthropic/claude-sonnet-4-20250514 medium` — agent runs with thinking params
-4. **Level 2**: Default run (no flag) — `resolve_thinking_default` applies; for Claude Sonnet 4 → "adaptive"
+   - `ThinkingConfig` inheritance: flush/compaction default to main thinking level when unspecified
+   - explicit overrides work: main/high + flush/off + compaction/low produce distinct params
+   - transcript grouping preserves thinking blocks
+   - token estimation explicitly counts thinking block characters
+   - memory flush and compaction helpers pass through the supplied thinking params
+3. **Level 2**: run with main thinking only — flush and compaction inherit the same level by default
+4. **Level 2**: run with explicit overrides — flush/compaction use different params from the main loop
+
+## Non-goals for US-OC-020
+
+- Do not implement provider-safe reasoning replay
+- Do not add TranscriptPolicy or sanitize-thinking passes here
+- Do not redesign the canonical internal message model here
+
+Those belong to:
+- `docs/plan/US-OC-038-040-canonical-format.md`
+- future US-OC-041 implementation

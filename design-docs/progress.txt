@@ -8,7 +8,88 @@
 - Turn count ≠ step count: each turn can contain multiple API calls (~2 steps/turn for openai/computer-use-preview)
 - Trajectory tool verification: `turn_000/0000_api_start.json → kwargs.tools[].name` for registered tools; `*_agent_response.json → response.output[] where type=="function_call"` for invocations
 - OpenClaw source (TypeScript reference implementation) lives at `../openclaw/` (sibling directory to agenthle-base). Key paths: `../openclaw/src/agents/` (agent loop, tools, compaction), `../openclaw/src/memory/` (memory system), `../openclaw/docs/concepts/` (component docs)
+- GPT-5.4/OpenAI Responses may emit opaque top-level `reasoning` items with `summary: []`; those items can be persisted in trajectory artifacts without any transcript-safe text payload, so replay fixes need provider-specific handling and cannot rely on transcript text alone
+- OpenAI Responses API enforces **bidirectional reasoning↔call coupling**: `function_call` items require their paired `reasoning` item (by server-side ID), and vice versa. You cannot strip, modify, or replay reasoning items independently — the API validates by internal ID against server state. OpenClaw solves this via dual-ID format (`call_XXX|fc_XXX`) + `downgradeOpenAIFunctionCallReasoningPairs()` which strips the `|fc_*` suffix when reasoning is absent, plus `previous_response_id` chaining within a WS session run (intra-run only, not cross-session)
 
+---
+
+## 2026-03-23 - US-OC-020: Deep investigation of OpenAI reasoning replay constraints
+- Investigated and reverted overly aggressive `_drop_opaque_reasoning_segments` in openai.py:
+  - Original code dropped everything from opaque reasoning until next user message — catastrophic for CUA (single user message → wipes entire history)
+  - Attempted fix 1 (drop only reasoning item): API rejects orphaned function_calls that require their paired reasoning
+  - Attempted fix 2 (patch reasoning with placeholder summary): API validates reasoning by server-side ID, rejects modified items
+  - Attempted fix 3 (strip all reasoning): function_calls still reference their reasoning by server-side coupling
+- **Root cause**: OpenAI Responses API enforces bidirectional reasoning↔call coupling at the server level. Cannot strip, modify, or replay reasoning independently.
+- **OpenClaw's solution** (confirmed via source analysis):
+  - Dual-ID tool call format: `call_XXX|fc_XXX` — the `fc_*` suffix is the Responses API item ID coupled to reasoning
+  - `downgradeOpenAIFunctionCallReasoningPairs()` strips `|fc_*` when reasoning is absent, breaking server-side association
+  - `downgradeOpenAIReasoningBlocks()` removes orphaned reasoning blocks
+  - `previous_response_id` chaining via WebSocket (intra-run optimization, NOT cross-session)
+  - `thinkingSignature` stores provider-specific reasoning metadata for reconstruction
+- **Decision**: Defer GPT-5.4 replay fix to US-OC-038/039/041 (canonical format + sanitize pipeline). These stories will implement:
+  - Dual-ID tool call format matching OpenClaw
+  - Provider-aware reasoning downgrade passes
+  - `thinkingSignature` storage in transcript
+- Reverted all interim openai.py changes (strip/repair/drop functions) — clean slate for US-OC-038
+- **Learnings for future iterations:**
+  - OpenAI Responses API reasoning items are server-validated by ID — no client-side patching works
+  - The bidirectional coupling means you must handle reasoning+calls as an atomic unit
+  - OpenClaw's dual-ID format is specifically designed for this — storing both Chat Completions ID and Responses API ID allows selective downgrade
+  - `previous_response_id` is intra-run only (WS session released at run end), not a cross-session mechanism
+
+---
+
+## 2026-03-23 - US-OC-020: Thinking wiring + GPT-5.4 replay investigation
+- Implemented per-call-site thinking wiring for OpenClaw main loop, memory flush, and compaction:
+  - `solver.py` now accepts `--thinking-level`, `--flush-thinking-level`, and `--compaction-thinking-level`
+  - `OpenClawAgent` now defaults flush/compaction thinking to the main level unless explicitly overridden
+  - `run_magic_tower.sh` forwards the three thinking flags
+- Wired auxiliary thinking params through the actual LLM call sites:
+  - memory flush passes thinking params into `litellm.acompletion`
+  - compaction/summarization passes thinking params through all summarization helpers
+- Preserved transcript-side thinking where textual payload exists:
+  - `group_step_output()` now keeps `thinking` blocks from message content
+  - top-level CUA/OpenAI `reasoning` items are converted to transcript `thinking` blocks only when `summary_text` or explicit reasoning text exists
+  - token estimation tests now explicitly cover thinking-block characters
+- Added focused test coverage:
+  - thinking config inheritance
+  - flush/compaction pass-through
+  - transcript thinking capture
+  - solver CLI parsing
+  - GPT-5.4 replay normalization / reasoning repair behavior
+  - MLX import stubs in `tests/conftest.py` to keep pytest collection pure-Python on this machine
+- Investigated GPT-5.4/OpenAI Responses replay failures under real VM runs:
+  - clean sessions with thinking enabled work and produce reasoning items in trajectory logs
+  - persisted/replayed sessions can still fail with `reasoning ... without its required following item`
+  - added interim OpenAI-specific replay guards in `agent/loops/openai.py`:
+    - repair ordering for `reasoning -> assistant-segment`
+    - drop opaque replayed reasoning segments that have no usable text payload
+  - current status: clean-session VM runs succeed; replayed opaque reasoning is improved but not fully resolved for long-running reuse
+- Updated `docs/plan/US-OC-019-020-thinking-system.md` with the sequencing decision:
+  - land US-OC-020 before canonical-format/sanitize stories
+  - defer provider-safe reasoning replay to US-OC-038/039/041
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py`
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py`
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py`
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/memory_flush.py`
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/transcript.py`
+  - `submodules/cua/libs/cua-bench/cua_bench/batch/solver.py`
+  - `submodules/cua/libs/python/agent/agent/loops/openai.py`
+  - `run_magic_tower.sh`
+  - `tests/test_thinking.py`
+  - `tests/test_openclaw_transcript_format.py`
+  - `tests/test_openclaw_context.py`
+  - `tests/test_openclaw_compaction.py`
+  - `tests/test_normalize_messages_gpt54.py`
+  - `tests/test_openclaw_memory_flush.py`
+  - `tests/test_solver_args.py`
+  - `tests/conftest.py`
+  - `docs/plan/US-OC-019-020-thinking-system.md`
+- **Learnings for future iterations:**
+  - trajectory artifacts may show `reasoning_tokens > 0` even when the session transcript has no `thinking` block, because OpenAI often returns opaque reasoning items with empty summaries
+  - repeated `memory_search` on replay can be a symptom of lossy OpenAI replay sanitization, not just prompt behavior
+  - a fresh session is a useful control: it separates “thinking generation works” from “reasoning replay is safe”
 ---
 
 ## 2026-03-10 - Prepare harness for OpenClaw reproduction
@@ -813,4 +894,37 @@
   - litellm passes thinking={type: enabled, budget_tokens: N} through to Anthropic API. Response contains thinking_blocks and reasoning_content fields (same text, two representations — thinking_blocks is Anthropic-native, reasoning_content is litellm-normalized).
   - OpenClaw keeps thinking blocks in context by default — dropThinkingBlocks() is only for specific providers (GitHub Copilot Claude). Our system matches this default.
   - thinkingSignature is a tamper-proof token validated by the API on re-submission — if missing/malformed/cross-provider, the API rejects the request. Downgrade to empty text is the safety valve.
+---
+
+## 2026-03-23 - Compaction output type mismatch fix (openai.py)
+- **Bug**: After compaction, `repair_tool_use_result_pairing()` creates synthetic `tool_result` entries (Anthropic format). `_normalize_messages_for_gpt54()` converted ALL of them to `function_call_output`, but OpenAI's Responses API requires `computer_call_output` for `computer_call` items → API error: "No tool output found for computer call".
+- **Fix**: Added `_call_type_map` dict to `_normalize_messages_for_gpt54()` that tracks whether each call_id is a `computer_call` or `function_call`. Modified `tool_result` conversion to emit `computer_call_output` (with 1x1 placeholder PNG) when the original call was a `computer_call`, matching the format `_repair_orphaned_calls()` already uses.
+- Files changed:
+  - submodules/cua/libs/python/agent/agent/loops/openai.py
+- **Status**: Unit tested (call/output types pair correctly). VM test pending — needs venv rebuild first.
+- **Learnings for future iterations:**
+  - The compaction pipeline has TWO parallel repair paths: `repair_tool_use_result_pairing()` (Anthropic role-based format, in context.py) and `_repair_orphaned_calls()` (OpenAI flat items format, in openai.py). Both must produce format-correct output for their respective APIs.
+  - `computer_call_output` requires a `computer_screenshot` object with `image_url` (base64 PNG), not a text string. Use the same 1x1 white PNG placeholder as `_repair_orphaned_calls()`.
+  - `_normalize_messages_for_gpt54()` runs BEFORE `_repair_orphaned_calls()`, so it must produce correctly-typed outputs or the repair function will create duplicates.
+  - Background Bash tasks cannot run `uv run` — the subprocess environment doesn't resolve the project venv correctly. Long-running agent loops must be started from the user's terminal.
+---
+
+## 2026-03-24 - Compaction fix: output type and format for GPT 5.4 Responses API (partial US-OC-038)
+- **Bug 1 (session.py)**: `_unnest_tool_blocks()` always emitted `function_call_output` for all tool results, even those matching a `computer_call`. Fixed by threading a `call_type_map` (call_id → "function_call"|"computer_call") built in `convert_to_responses_api_items()` and passing it to `_unnest_tool_blocks()` so the correct output type is emitted.
+- **Bug 2 (openai.py — computer_call in role-based messages)**: Role-based `computer_call` blocks from compaction/replay were emitted as top-level `computer_call` items requiring a valid screenshot, which OpenAI validates and rejects for placeholder PNGs. Fixed by converting them to `output_text` descriptions instead. Fresh `computer_call` items from the current run still pass through unchanged as top-level items (handled by existing code path at line 108).
+- **Bug 3 (openai.py — `role: "tool"` normalization)**: The Responses API only accepts roles `assistant/system/developer/user`. When compaction produces role-based `tool` messages, they were emitted with `role: "tool"` causing API errors. Fixed by normalizing to `role: "user"`.
+- **Bug 4 (openai.py — `_repair_orphaned_calls`)**: Was synthesizing invalid placeholder PNGs for orphaned `computer_call` items. Now drops orphaned computer_calls entirely (can't synthesize valid screenshots) while still adding synthetic `function_call_output` for orphaned `function_call` items.
+- **Test fixes**: Updated 4 tests in `test_normalize_messages_gpt54.py` and `test_openclaw_replay.py` that reflected old behavior (role-based computer_calls → top-level items). Updated to assert new text-description behavior.
+- **Verified**: 100-step VM run triggered 2 compactions successfully without API errors.
+- Files changed:
+  - submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py
+  - submodules/cua/libs/python/agent/agent/loops/openai.py
+  - tests/test_normalize_messages_gpt54.py
+  - tests/test_openclaw_replay.py
+  - .gitignore (add traces/ to ignore)
+- **Learnings for future iterations:**
+  - OpenAI Responses API validates `computer_call_output` image data — placeholder 1x1 PNGs are rejected. The only safe option for compacted/replayed computer_call results is to omit image data entirely (convert both call and result to text).
+  - role: "tool" is NOT a valid Responses API role. Always normalize to "user" before sending. The Anthropic SDK emits "tool" role for tool results; OpenAI does not accept it.
+  - Two separate compaction repair paths exist: `convert_to_responses_api_items()` in session.py (role-based → Responses API flat items, used for replay) and `_normalize_messages_for_gpt54()` in openai.py (mixed format → GPT 5.4 format, used at send time). Both must be correct — a bug in either causes API failures.
+  - `_repair_orphaned_calls` runs after `_normalize_messages_for_gpt54`, so the normalization step must not introduce new orphaned calls (previously it would expand role-based computer_calls to top-level items that then needed orphan repair, creating a repair loop).
 ---

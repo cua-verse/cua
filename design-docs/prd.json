@@ -554,7 +554,7 @@
       ],
       "priority": 26,
       "passes": false,
-      "notes": "Memory flush and compaction are summarization tasks that typically benefit less from deep thinking. Both default to \"off\" even when the main loop uses thinking. CLI flags --flush-thinking-level and --compaction-thinking-level are not needed now \u2014 code-level config via ThinkingConfig fields is sufficient. Thinking blocks in transcript: group_step_output() in transcript.py must capture type=\"thinking\" blocks from CUA output items so they appear in transcript.jsonl. Token estimation in context.py must count thinking block chars \u2014 matches OpenClaw's tool-result-char-estimator.ts which includes thinking in char estimates. Without this, compaction underestimates context usage when thinking is enabled."
+      "notes": "Implemented most of the story: solver/openclaw agent now support separate main/flush/compaction thinking levels, with flush/compaction inheriting the main level by default; `run_magic_tower.sh` forwards the three flags; memory flush and compaction summarization pass provider-specific thinking params through to `litellm.acompletion`; transcript grouping preserves textual thinking blocks; token-estimation tests now explicitly cover thinking-block chars. Real VM testing with GPT-5.4 shows that clean sessions work with thinking enabled and produce reasoning items in trajectory logs, but replay of opaque OpenAI Responses reasoning items (`type: reasoning`, `summary: []`) is still not fully safe across persisted sessions. Interim guards were added in `agent/loops/openai.py`, but provider-safe replay remains follow-up work for US-OC-038/039/041."
     },
     {
       "id": "US-OC-021",
