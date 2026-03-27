@@ -957,7 +957,7 @@
         "Level 2: CONTEXT_WINDOW_OVERRIDE=25000 bash run_magic_tower.sh 50 openai/gpt-5.4 \u2014 compaction fires, post-compaction items are canonical, agent continues"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "This is story 1 of 3 for the canonical format initiative. Scope is intentionally narrow: define the schema + adapt compaction output. Do NOT touch the loops yet \u2014 that's US-OC-039. The canonical format should be a superset that losslessly represents both Anthropic completion format and OpenAI Responses API format. Key design decision: the format should use flat items (like Responses API) rather than role-based messages (like Anthropic), because flat items are strictly more expressive and don't require content-array unpacking."
     },
     {

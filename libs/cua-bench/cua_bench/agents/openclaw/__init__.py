@@ -18,9 +18,23 @@ Components:
   - build_replay_messages / sanitize_history / limit_history_turns: transcript replay (US-OC-012)
   - run_memory_flush: standalone memory flush module (US-OC-028)
   - ThinkLevel / ThinkingConfig / resolve_thinking_default: thinking level system (US-OC-019)
+  - CanonicalMessage / ContentBlock types / converters: canonical message format (US-OC-038)
 """
 
 from .agent_loop import OpenClawComputerAgent
+from .canonical import (
+    CanonicalMessage,
+    CompactionSummaryBlock,
+    ComputerCallBlock,
+    ContentBlock,
+    FunctionCallBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    canonical_to_anthropic_messages,
+    canonical_to_responses_api,
+    normalize_to_canonical,
+)
 from .context import (
     CompactionResult,
     ContextOverflowCallback,
@@ -62,6 +76,17 @@ from .transcript import group_step_output
 
 __all__ = [
     "OpenClawComputerAgent",
+    "CanonicalMessage",
+    "CompactionSummaryBlock",
+    "ComputerCallBlock",
+    "ContentBlock",
+    "FunctionCallBlock",
+    "TextBlock",
+    "ThinkingBlock",
+    "ToolResultBlock",
+    "canonical_to_anthropic_messages",
+    "canonical_to_responses_api",
+    "normalize_to_canonical",
     "CompactionResult",
     "ContextFile",
     "DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR",

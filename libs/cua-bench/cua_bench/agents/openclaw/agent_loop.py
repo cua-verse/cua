@@ -406,9 +406,15 @@ class OpenClawComputerAgent(ComputerAgent):
 
         # Rebuild items from compacted state
         kept_messages = all_messages[compaction_result.first_kept_message_index:]
-        compacted_items = self._build_compacted_items(
+        canonical_messages = self._build_compacted_items(
             compaction_result.summary, kept_messages
         )
+
+        # Bridge: canonical → Responses API items (loops expect flat items).
+        # Temporary — US-OC-039 will make loops call sanitize_items() themselves.
+        from .canonical import canonical_to_responses_api
+        compacted_items = canonical_to_responses_api(canonical_messages)
+
         items.clear()
         items.extend(compacted_items)
         new_items.clear()
@@ -427,50 +433,59 @@ class OpenClawComputerAgent(ComputerAgent):
 
     def _build_compacted_items(
         self, summary: str, kept_messages: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """Build a new items list from compaction output.
+    ) -> list:
+        """Build a canonical message list from compaction output.
 
-        Produces: [user(summary), ...kept_messages].
+        Produces: [user(CompactionSummaryBlock), ...normalized_kept, user(continue)].
         The summary provides continuity context; kept messages preserve recent
-        conversation verbatim.
+        conversation verbatim in canonical form.
+
+        Repair runs on untyped dicts BEFORE canonical normalization — the
+        existing algorithm uses stop_reason at the message level and is
+        well-tested.  US-OC-039 may later move repair into the canonical
+        pipeline.
 
         Args:
             summary: The compaction summary text.
             kept_messages: Messages after first_kept_message_index from the
                 original message list (the recent portion preserved by compaction).
+
+        Returns:
+            Typed canonical messages (US-OC-038).  The caller
+            (``_compact_in_place``) converts these to Responses API items
+            before writing to the loop's items list.
         """
-        items: List[Dict[str, Any]] = []
+        from .canonical import (
+            CanonicalMessage,
+            CompactionSummaryBlock,
+            TextBlock,
+            normalize_to_canonical,
+        )
 
-        # Summary as context
+        items: List[CanonicalMessage] = []
+
+        # Summary as canonical message with CompactionSummaryBlock
         if summary:
-            items.append({
-                "role": "user",
-                "content": (
-                    "## Prior Context (Compacted)\n"
-                    "The following is a summary of earlier conversation history that was "
-                    "compacted to save context space. Use this to maintain continuity.\n\n"
-                    f"{summary}"
-                ),
-            })
+            items.append(CanonicalMessage(
+                role="user",
+                content=[CompactionSummaryBlock(type="compaction_summary", text=summary)],
+            ))
 
-        # Kept messages (the recent portion preserved by compaction)
-        # Repair orphaned tool_use/tool_result pairs that may arise when
-        # compaction splits at arbitrary boundaries (matches OpenClaw's
-        # session-transcript-repair.ts pattern).
+        # Kept messages: repair (role-based dicts) then normalize to canonical
         if kept_messages:
             from .context import repair_tool_use_result_pairing
             repair_result = repair_tool_use_result_pairing(kept_messages)
-            items.extend(repair_result.messages)
+            items.extend(normalize_to_canonical(repair_result.messages))
 
         # Ensure items don't end with role=assistant — models like Opus 4.6
         # don't support assistant message prefill and will reject the API call.
         # This can happen when kept_messages ends with the model's last response,
         # or after ImageRetentionCallback strips trailing screenshot pairs.
         if items and items[-1].get("role") == "assistant":
-            items.append({
-                "role": "user",
-                "content": "[Continue from where you left off.]",
-            })
+            items.append(CanonicalMessage(
+                role="user",
+                content=[TextBlock(type="text", text="[Continue from where you left off.]")],
+            ))
 
         return items
 

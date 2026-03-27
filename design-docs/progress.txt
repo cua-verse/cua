@@ -928,3 +928,26 @@
   - Two separate compaction repair paths exist: `convert_to_responses_api_items()` in session.py (role-based → Responses API flat items, used for replay) and `_normalize_messages_for_gpt54()` in openai.py (mixed format → GPT 5.4 format, used at send time). Both must be correct — a bug in either causes API failures.
   - `_repair_orphaned_calls` runs after `_normalize_messages_for_gpt54`, so the normalization step must not introduce new orphaned calls (previously it would expand role-based computer_calls to top-level items that then needed orphan repair, creating a repair loop).
 ---
+
+## 2026-03-27 - US-OC-038
+- Defined canonical internal message format (`canonical.py`) with typed TypedDict classes:
+  - `CanonicalMessage` (role + content: list[ContentBlock] + optional stop_reason)
+  - `ContentBlock` union: TextBlock, FunctionCallBlock, ComputerCallBlock, ToolResultBlock, ThinkingBlock, CompactionSummaryBlock
+  - `COMPACTION_PREAMBLE` constant for the "Prior Context (Compacted)" header
+- Implemented `normalize_to_canonical()` — converts untyped role-based dicts to CanonicalMessage list (handles string content, singular action → list, block type dispatch)
+- Implemented `canonical_to_responses_api()` — flat OpenAI Responses API items from canonical messages (with `_ensure_tool_adjacency`)
+- Implemented `canonical_to_anthropic_messages()` — Anthropic completion format from canonical messages
+- Adapted `_build_compacted_items()` in `agent_loop.py` to return `list[CanonicalMessage]`; added bridge in `_compact_in_place` that converts canonical → Responses API items (temporary, US-OC-039 will centralize)
+- Exported all canonical types from `openclaw/__init__.py`
+- Updated `tests/test_message_ordering.py` to use CanonicalMessage directly and assert on typed content blocks
+- Files changed:
+  - submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/canonical.py (new)
+  - submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py
+  - submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py
+  - tests/test_message_ordering.py
+- **Learnings for future iterations:**
+  - `CanonicalMessage` uses TypedDict so dict-access patterns (`.get("role")`) still work — old code that indexes by string key continues to work during transition
+  - `CompactionSummaryBlock` is a distinct type from TextBlock so downstream sanitization passes can identify and skip/transform compaction summaries without text-matching heuristics
+  - The bridge pattern (`canonical_to_responses_api()` called in `_compact_in_place`) allows incremental migration: US-OC-039 will move the conversion into the loops themselves
+  - `canonical_to_responses_api` handles computer_call blocks by converting them to text messages (no image data) — matches the existing `_normalize_messages_for_gpt54` behavior that OpenAI validates image data in computer_call_output and rejects placeholders
+---
