@@ -3,8 +3,11 @@ ComputerAgent - Main agent class that selects and runs agent loops
 """
 
 import asyncio
+import hashlib
 import inspect
 import json
+import random
+import time
 from pathlib import Path
 from typing import (
     Any,
@@ -21,6 +24,7 @@ from typing import (
 
 import litellm
 import litellm.utils
+from core.telemetry import is_telemetry_enabled, record_event
 from litellm.responses.utils import Usage
 
 from .adapters import (
@@ -65,6 +69,10 @@ def get_json(obj: Any, max_depth: int = 10) -> Any:
         if seen is None:
             seen = set()
 
+        # Handle bytes early
+        if isinstance(o, bytes):
+            return f"<bytes:{len(o)}>"
+
         # Use model_dump() if available
         if hasattr(o, "model_dump"):
             return o.model_dump()
@@ -82,12 +90,20 @@ def get_json(obj: Any, max_depth: int = 10) -> Any:
         if hasattr(o, "__class__") and "computer" in o.__class__.__name__.lower():
             return f"<computer:{o.__class__.__name__}>"
 
+        # Handle enums — just use their value
+        import enum
+
+        if isinstance(o, enum.Enum):
+            return o.value
+
         # Handle objects with __dict__
         if hasattr(o, "__dict__"):
             seen.add(obj_id)
             try:
                 result = {}
                 for k, v in o.__dict__.items():
+                    if k.startswith("__"):
+                        continue
                     if v is not None:
                         # Recursively serialize with updated depth and seen set
                         serialized_value = custom_serializer(v, depth + 1, seen.copy())
@@ -165,6 +181,77 @@ def get_output_call_ids(messages: List[Dict[str, Any]]) -> List[str]:
         ):
             call_ids.append(message.get("call_id"))
     return call_ids
+
+
+def hash_api_key(api_key: Optional[str]) -> Optional[str]:
+    """Hash API key using SHA256 for secure telemetry identification."""
+    if not api_key:
+        return None
+    return hashlib.sha256(api_key.encode()).hexdigest()
+
+
+def _is_retryable_error(exc: BaseException) -> bool:
+    """Return True if the exception is a transient error that warrants a retry."""
+    # asyncio / network timeouts
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    # liteLLM error types
+    try:
+        import litellm.exceptions as _le
+
+        retryable_types = (
+            _le.RateLimitError,
+            _le.ServiceUnavailableError,
+            _le.APIConnectionError,
+            _le.Timeout,
+            _le.InternalServerError,
+        )
+        if isinstance(exc, retryable_types):
+            return True
+    except Exception:
+        pass
+    # Generic heuristic: 429 / 5xx in the message
+    msg = str(exc).lower()
+    if any(k in msg for k in ("timeout", "rate limit", "503", "502", "429", "connection")):
+        return True
+    return False
+
+
+async def _predict_step_with_retry(
+    agent_loop,
+    loop_kwargs: dict,
+    hooks: dict,
+    max_retries: int = 3,
+    base_delay: float = 2.0,
+) -> Any:
+    """
+    Call agent_loop.predict_step() with exponential backoff retries on transient errors.
+
+    Args:
+        agent_loop: The agent loop instance.
+        loop_kwargs: Keyword arguments for predict_step.
+        hooks: Dict of lifecycle hook callables (_on_api_start, etc.).
+        max_retries: Maximum number of retry attempts (total attempts = max_retries + 1).
+        base_delay: Base delay in seconds for the first retry; doubles each attempt.
+    """
+    if max_retries is None:
+        max_retries = 0
+    last_exc: Optional[BaseException] = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await agent_loop.predict_step(**loop_kwargs, **hooks)
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries and _is_retryable_error(exc):
+                delay = base_delay * (2**attempt) + random.uniform(0, 1)
+                print(
+                    f"[cua-agent] Transient error on step (attempt {attempt + 1}/{max_retries + 1}): "
+                    f"{type(exc).__name__}: {exc}. Retrying in {delay:.1f}s …"
+                )
+                await asyncio.sleep(delay)
+            else:
+                raise
+    raise last_exc  # unreachable, but satisfies type checkers
 
 
 class ComputerAgent:
@@ -300,6 +387,9 @@ class ComputerAgent:
             self.agent_loop = config_info.agent_class()
             self.agent_config_info = config_info
 
+        # Note: Tool resolution is deferred to _initialize_computers() because
+        # Computer.interface may not be available until the computer is started
+
         # Add telemetry callbacks AFTER agent_loop is set so they can capture the correct agent_type
         if self.telemetry_enabled:
             # PostHog telemetry (product analytics)
@@ -309,16 +399,146 @@ class ComputerAgent:
                 self.callbacks.append(TelemetryCallback(self, **self.telemetry_enabled))
 
             # OpenTelemetry callback (operational metrics - Four Golden Signals)
-            # This is enabled alongside PostHog when telemetry_enabled is True
-            # Users can disable via CUA_TELEMETRY_DISABLED=true env var
+            # Users can disable via CUA_TELEMETRY_ENABLED=false env var
             self.callbacks.append(OtelCallback(self))
 
         self.tool_schemas = []
         self.computer_handler = None
 
+        # Track agent initialization with args provided
+        if self.telemetry_enabled and is_telemetry_enabled():
+            # Collect which args were explicitly provided (non-default values)
+            args_provided = []
+            if tools:
+                args_provided.append("tools")
+            if custom_loop:
+                args_provided.append("custom_loop")
+            if only_n_most_recent_images:
+                args_provided.append("only_n_most_recent_images")
+            if callbacks:
+                args_provided.append("callbacks")
+            if instructions:
+                args_provided.append("instructions")
+            if verbosity is not None:
+                args_provided.append("verbosity")
+            if trajectory_dir:
+                args_provided.append("trajectory_dir")
+            if max_retries != 3:  # non-default
+                args_provided.append("max_retries")
+            if screenshot_delay != 0.5:  # non-default
+                args_provided.append("screenshot_delay")
+            if use_prompt_caching:
+                args_provided.append("use_prompt_caching")
+            if max_trajectory_budget:
+                args_provided.append("max_trajectory_budget")
+            if not telemetry_enabled:  # explicitly disabled
+                args_provided.append("telemetry_enabled")
+            if trust_remote_code:
+                args_provided.append("trust_remote_code")
+            if api_key:
+                args_provided.append("api_key")
+            if api_base:
+                args_provided.append("api_base")
+            if additional_generation_kwargs:
+                args_provided.extend(additional_generation_kwargs.keys())
+
+            event_data = {
+                "model": model,
+                "args_provided": args_provided,
+            }
+            # Add hashed API key
+            if api_key:
+                event_data["api_key_hash"] = hash_api_key(api_key)
+
+            record_event("agent_init", event_data)
+
+    async def _resolve_tools(self, tools: List[Any], required_type: Optional[str]) -> List[Any]:
+        """
+        Resolve tools based on model's required tool_type.
+
+        - If model requires specific type (e.g., "browser"), auto-wrap Computer and warn
+        - If model is flexible (no tool_type), pass through unchanged
+
+        Args:
+            tools: List of tools passed to the agent
+            required_type: The tool type required by the model ("browser", "mobile", or None)
+
+        Returns:
+            List of resolved tools, potentially with Computer wrapped to BrowserTool
+        """
+        import logging
+        import warnings
+
+        from .tools.browser_tool import BrowserTool
+
+        logger = logging.getLogger(__name__)
+
+        if not required_type:
+            return tools  # Flexible model, no wrapping
+
+        resolved = []
+        for tool in tools:
+            if required_type == "browser":
+                if isinstance(tool, BrowserTool):
+                    # Already correct tool type, no warning needed
+                    resolved.append(tool)
+                elif is_agent_computer(tool):
+                    # Need to wrap Computer to BrowserTool
+                    # Get the interface from the computer object
+                    # Use try/except because Computer.interface raises if not initialized
+                    interface = None
+                    try:
+                        interface = tool.interface
+                    except (RuntimeError, AttributeError):
+                        # Computer not initialized - initialize it now
+                        logger.info(
+                            "Computer not initialized, initializing for BrowserTool wrapping..."
+                        )
+                        if hasattr(tool, "__aenter__"):
+                            await tool.__aenter__()
+                            try:
+                                interface = tool.interface
+                            except (RuntimeError, AttributeError):
+                                pass
+
+                    if interface is None:
+                        # Try cua_computer for cuaComputerHandler
+                        if hasattr(tool, "cua_computer"):
+                            interface = tool
+                        else:
+                            # Fallback: use the tool itself as interface
+                            interface = tool
+
+                    warnings.warn(
+                        "Model requires browser tools. "
+                        "Auto-wrapping Computer to BrowserTool. "
+                        "Pass BrowserTool explicitly to silence this warning.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                    logger.info(
+                        "Auto-wrapping Computer to BrowserTool for model requiring browser tools"
+                    )
+                    resolved.append(BrowserTool(interface=interface))
+                else:
+                    # Custom tool, pass through unchanged
+                    resolved.append(tool)
+            # Future: elif required_type == "mobile": ...
+            else:
+                # Unknown tool type, pass through
+                resolved.append(tool)
+
+        return resolved
+
     async def _initialize_computers(self):
-        """Initialize computer objects"""
+        """Initialize computer objects and resolve tools based on model requirements."""
         if not self.tool_schemas:
+            # Resolve tools based on model's required tool_type
+            # This is done here (not in __init__) because Computer.interface
+            # may not be available until the computer is started
+            tool_type = self.agent_config_info.tool_type if self.agent_config_info else None
+            self.tools = await self._resolve_tools(self.tools, tool_type)
+
             # Process tools and create tool schemas
             self.tool_schemas = self._process_tools()
 
@@ -547,8 +767,6 @@ class ComputerAgent:
                 # Extract action arguments (all fields except 'type')
                 action_args = {k: v for k, v in action.items() if k != "type"}
 
-                # print(f"{action_type}({action_args})")
-
                 # Execute the computer action
                 computer_method = getattr(computer, action_type, None)
                 action_result = None
@@ -557,6 +775,22 @@ class ComputerAgent:
                     action_result = await computer_method(**action_args)
                 else:
                     raise ToolError(f"Unknown computer action: {action_type}")
+
+                # Track computer action execution
+                if self.telemetry_enabled and is_telemetry_enabled():
+                    record_event(
+                        "computer_action_executed",
+                        {
+                            "action_type": action_type,
+                        },
+                    )
+                    record_event(
+                        "agent_tool_executed",
+                        {
+                            "tool_type": "computer",
+                            "tool_name": action_type,
+                        },
+                    )
 
                 # Check if this was a terminate action
                 is_terminate = action_type == "terminate" or (
@@ -635,6 +869,16 @@ class ComputerAgent:
                         result = await function(**args)
                     else:
                         result = await asyncio.to_thread(function, **args)
+
+                # Track function tool execution
+                if self.telemetry_enabled and is_telemetry_enabled():
+                    record_event(
+                        "agent_tool_executed",
+                        {
+                            "tool_type": "function",
+                            "tool_name": item.get("name"),
+                        },
+                    )
 
                 # Create function call output
                 call_output = {
@@ -727,7 +971,9 @@ class ComputerAgent:
                 "tools": self.tool_schemas,
                 "stream": False,
                 "computer_handler": self.computer_handler,
-                "max_retries": self.max_retries,
+                # Inner liteLLM retries are disabled here; _predict_step_with_retry
+                # is the sole retry layer so the two don't stack.
+                "max_retries": 0,
                 "use_prompt_caching": self.use_prompt_caching,
                 **merged_kwargs,
             }
@@ -762,13 +1008,17 @@ class ComputerAgent:
                     )
             # ---------------------------------
 
-            # Run agent loop iteration
-            result = await self.agent_loop.predict_step(
-                **loop_kwargs,
-                _on_api_start=self._on_api_start,
-                _on_api_end=self._on_api_end,
-                _on_usage=self._on_usage,
-                _on_screenshot=self._on_screenshot,
+            # Run agent loop iteration (with automatic retry on transient errors)
+            result = await _predict_step_with_retry(
+                self.agent_loop,
+                loop_kwargs,
+                hooks={
+                    "_on_api_start": self._on_api_start,
+                    "_on_api_end": self._on_api_end,
+                    "_on_usage": self._on_usage,
+                    "_on_screenshot": self._on_screenshot,
+                },
+                max_retries=self.max_retries,
             )
             result = get_json(result)
 

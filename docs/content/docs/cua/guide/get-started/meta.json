@@ -5,11 +5,9 @@
   "icon": "Rocket",
   "pages": [
     "what-is-cua",
-    "what-is-computer-use-agent",
-    "what-is-desktop-sandbox",
-    "set-up-sandbox",
-    "using-computer-sdk",
+    "quickstart",
+    "using-sandbox-sdk",
     "using-agent-sdk",
-    "using-cloud-cli"
+    "migrating-from-computer-sdk"
   ]
 }

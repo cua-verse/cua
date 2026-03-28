@@ -7,6 +7,13 @@ from .decorators import evaluate_task, setup_task, solve_task, tasks_config
 from .desktop import Desktop
 from .environment import Environment
 from .replay import replay_trajectory
+from .runners import (
+    BenchmarkResult,
+    TaskResult,
+    run_benchmark,
+    run_interactive,
+    run_single_task,
+)
 from .types import (
     Action,
     ClickAction,
@@ -15,6 +22,8 @@ from .types import (
     DragAction,
     HotkeyAction,
     KeyAction,
+    MiddleClickAction,
+    MoveToAction,
     RightClickAction,
     ScrollAction,
     TypeAction,
@@ -25,28 +34,41 @@ from .types import (
 MobileSession = DesktopSession
 
 __all__ = [
+    # Core
     "Task",
     "make",
     "interact",
+    "Environment",
+    # Decorators
     "tasks_config",
     "setup_task",
     "solve_task",
     "evaluate_task",
-    "Environment",
+    # Session types
     "Desktop",
     "DesktopSession",
     "MobileSession",
+    # Action types
     "Action",
     "ClickAction",
-    "DragAction",
-    "KeyAction",
-    "HotkeyAction",
-    "TypeAction",
-    "WaitAction",
-    "DoneAction",
-    "ScrollAction",
     "RightClickAction",
     "DoubleClickAction",
+    "MiddleClickAction",
+    "DragAction",
+    "MoveToAction",
+    "ScrollAction",
+    "TypeAction",
+    "KeyAction",
+    "HotkeyAction",
+    "WaitAction",
+    "DoneAction",
+    # Utilities
     "repr_to_action",
     "replay_trajectory",
+    # Runners
+    "run_benchmark",
+    "run_single_task",
+    "run_interactive",
+    "BenchmarkResult",
+    "TaskResult",
 ]

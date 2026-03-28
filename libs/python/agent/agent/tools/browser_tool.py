@@ -33,6 +33,7 @@ class BrowserTool(BaseComputerTool):
         """
         self.interface = interface
         self._facts = []  # Store memorized facts
+        self._automation = None  # Cached automation interface
 
         # Get initial screenshot to determine dimensions
         self.viewport_width = None
@@ -55,6 +56,27 @@ class BrowserTool(BaseComputerTool):
             pass
 
         super().__init__(cfg)
+
+    @property
+    def automation(self):
+        """
+        Get the automation interface for keyboard/mouse actions.
+
+        Handles both interface structures:
+        - Nested: interface.interface (wrapper with .interface property)
+        - Direct: interface itself IS the automation handler
+        """
+        if self._automation is not None:
+            return self._automation
+
+        # Try nested structure first (interface.interface)
+        if hasattr(self.interface, "interface") and self.interface.interface is not None:
+            self._automation = self.interface.interface
+        else:
+            # Direct structure - interface IS the automation handler
+            self._automation = self.interface
+
+        return self._automation
 
     async def _initialize_dimensions(self):
         """Initialize viewport and resized dimensions from screenshot."""
@@ -148,7 +170,8 @@ class BrowserTool(BaseComputerTool):
 * history_back: Go back to the previous page in the browser history.
 * pause_and_memorize_fact: Pause and memorize a fact for future reference.
 * wait: Wait specified seconds for the change to happen.
-* terminate: Terminate the current task and report its completion status.""",
+* terminate: Terminate the current task and report its completion status.
+* screenshot: Take a screenshot of the current screen.""",
                     "enum": [
                         "key",
                         "type",
@@ -161,14 +184,20 @@ class BrowserTool(BaseComputerTool):
                         "pause_and_memorize_fact",
                         "wait",
                         "terminate",
+                        "screenshot",
                     ],
                     "type": "string",
                 },
-                "keys": {"description": "Required only by action=key.", "type": "array"},
+                "keys": {
+                    "description": "Required only by action=key.",
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
                 "text": {"description": "Required only by action=type.", "type": "string"},
                 "coordinate": {
                     "description": "(x, y) coordinates for mouse actions. Required only by action=left_click, action=mouse_move, and action=type.",
                     "type": "array",
+                    "items": {"type": "number"},
                 },
                 "pixels": {
                     "description": "Amount of scrolling. Positive = up, Negative = down. Required only by action=scroll.",
@@ -260,6 +289,8 @@ class BrowserTool(BaseComputerTool):
                 return await self._action_wait(params)
             elif action == "terminate":
                 return await self._action_terminate(params)
+            elif action == "screenshot":
+                return await self._action_screenshot(params)
             else:
                 return {"success": False, "error": f"Unknown action: {action}"}
         except Exception as e:
@@ -274,7 +305,7 @@ class BrowserTool(BaseComputerTool):
 
         # Convert keys to proper format and press via hotkey
         try:
-            await self.interface.interface.hotkey(*keys)
+            await self.automation.hotkey(*keys)
             return {"success": True, "message": f"Pressed keys: {keys}"}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -299,7 +330,7 @@ class BrowserTool(BaseComputerTool):
         if not coordinate or len(coordinate) != 2:
             return {"success": False, "error": "coordinate parameter [x, y] is required"}
 
-        await self.interface.interface.move_cursor(coordinate[0], coordinate[1])
+        await self.automation.move_cursor(coordinate[0], coordinate[1])
         return {"success": True, "message": f"Moved cursor to {coordinate}"}
 
     async def _action_left_click(self, params: dict) -> dict:
@@ -315,8 +346,9 @@ class BrowserTool(BaseComputerTool):
 
     async def _action_scroll(self, params: dict) -> dict:
         """Scroll the page."""
-        pixels = params.get("pixels", 0)
-        if pixels == 0:
+        pixels = params.get("pixels")
+        # Handle None explicitly - default to 0 means "no scroll requested"
+        if pixels is None or pixels == 0:
             return {"success": False, "error": "pixels parameter is required"}
 
         # Positive = up (negative delta_y), Negative = down (positive delta_y)
@@ -345,7 +377,7 @@ class BrowserTool(BaseComputerTool):
         """Go back in browser history."""
         # Press Alt+Left arrow key combination
         try:
-            await self.interface.interface.hotkey("Alt", "ArrowLeft")
+            await self.automation.hotkey("Alt", "ArrowLeft")
             return {"success": True, "message": "Navigated back in history"}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -365,7 +397,10 @@ class BrowserTool(BaseComputerTool):
 
     async def _action_wait(self, params: dict) -> dict:
         """Wait for specified seconds."""
-        time = params.get("time", 0)
+        time = params.get("time")
+        # Handle None or missing time - default to 3 seconds (matches FARA behavior)
+        if time is None:
+            time = 3
         if time <= 0:
             return {"success": False, "error": "time parameter must be positive"}
 
@@ -374,7 +409,10 @@ class BrowserTool(BaseComputerTool):
 
     async def _action_terminate(self, params: dict) -> dict:
         """Terminate and report status."""
-        status = params.get("status", "success")
+        status = params.get("status")
+        # Handle None or missing status - default to "success"
+        if status is None:
+            status = "success"
         message = f"Task terminated with status: {status}"
 
         if self._facts:
@@ -382,22 +420,67 @@ class BrowserTool(BaseComputerTool):
 
         return {"success": True, "status": status, "message": message, "terminated": True}
 
+    async def _action_screenshot(self, params: dict) -> dict:
+        """Take a screenshot of the current screen."""
+        try:
+            screenshot_b64 = await self.screenshot()
+            return {"success": True, "screenshot": screenshot_b64}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     # Legacy methods for backward compatibility
     async def visit_url(self, url: str) -> dict:
         """Navigate to a URL."""
         return await self._action_visit_url({"url": url})
 
-    async def click(self, x: int, y: int) -> dict:
-        """Click at coordinates."""
-        return await self._action_left_click({"coordinate": [x, y]})
+    async def click(self, x: int = None, y: int = None, button: str = "left", **kwargs) -> dict:
+        """Click at coordinates. Supports both positional (x, y) and kwargs (button, x, y).
+
+        This is compatible with the normalized format from OperatorNormalizerCallback
+        which transforms actions like {"type": "left_click", "coordinate": [x, y]}
+        into {"type": "click", "button": "left", "x": x, "y": y}.
+        """
+        if x is None or y is None:
+            return {"success": False, "error": "x and y coordinates are required"}
+        if button == "right":
+            return await self.interface.playwright_exec(
+                "click", {"x": x, "y": y, "button": "right"}
+            )
+        elif button == "middle" or button == "wheel":
+            return await self.interface.playwright_exec(
+                "click", {"x": x, "y": y, "button": "middle"}
+            )
+        else:
+            # Default to left click
+            return await self._action_left_click({"coordinate": [x, y]})
 
     async def type(self, text: str) -> dict:
         """Type text into the focused element."""
         return await self._action_type({"text": text})
 
-    async def scroll(self, delta_x: int, delta_y: int) -> dict:
-        """Scroll the page."""
-        return await self._action_scroll({"pixels": -delta_y})
+    async def scroll(
+        self,
+        delta_x: int = None,
+        delta_y: int = None,
+        scroll_x: int = None,
+        scroll_y: int = None,
+        x: int = None,
+        y: int = None,
+        pixels: int = None,
+        coordinate=None,
+        **kwargs,
+    ) -> dict:
+        """Scroll the page. Supports multiple formats:
+        - Legacy: scroll(delta_x, delta_y)
+        - Normalized: scroll(scroll_x=0, scroll_y=100, x=500, y=300)
+        - FARA: scroll(pixels=100, coordinate=[500, 300])
+        """
+        # Determine scroll amounts from various input formats
+        dx = scroll_x or delta_x or 0
+        dy = scroll_y or delta_y or (-(pixels or 0))  # pixels: positive=up, negative=down
+
+        result = await self.interface.playwright_exec("scroll", {"delta_x": dx, "delta_y": dy})
+        return result
 
     async def web_search(self, query: str) -> dict:
         """Navigate to a Google search for the query."""
@@ -426,48 +509,69 @@ class BrowserTool(BaseComputerTool):
     # These methods accept parameters in the format that FARA model outputs
     # and agent.py passes via **action_args
 
-    async def left_click(self, coordinate=None, **kwargs) -> dict:
-        """Left click at coordinates. FARA-compatible."""
-        return await self._action_left_click({"coordinate": coordinate})
+    async def left_click(self, coordinate=None, x: int = None, y: int = None, **kwargs) -> dict:
+        """Left click at coordinates. Supports coordinate array or x/y kwargs."""
+        # Accept either coordinate array or x/y kwargs
+        if coordinate and len(coordinate) >= 2:
+            x, y = coordinate[0], coordinate[1]
+        if x is None or y is None:
+            return {"success": False, "error": "coordinate parameter [x, y] or x/y kwargs required"}
+        return await self._action_left_click({"coordinate": [x, y]})
 
-    async def right_click(self, coordinate=None, **kwargs) -> dict:
-        """Right click at coordinates. FARA-compatible."""
-        if not coordinate or len(coordinate) != 2:
-            return {"success": False, "error": "coordinate parameter [x, y] is required"}
-        # Use playwright_exec for right click
-        result = await self.interface.playwright_exec(
-            "click", {"x": coordinate[0], "y": coordinate[1], "button": "right"}
-        )
+    async def right_click(self, coordinate=None, x: int = None, y: int = None, **kwargs) -> dict:
+        """Right click at coordinates. Supports coordinate array or x/y kwargs."""
+        # Accept either coordinate array or x/y kwargs
+        if coordinate and len(coordinate) >= 2:
+            x, y = coordinate[0], coordinate[1]
+        if x is None or y is None:
+            return {"success": False, "error": "coordinate parameter [x, y] or x/y kwargs required"}
+        result = await self.interface.playwright_exec("click", {"x": x, "y": y, "button": "right"})
         return result
 
-    async def middle_click(self, coordinate=None, **kwargs) -> dict:
-        """Middle click at coordinates. FARA-compatible."""
-        if not coordinate or len(coordinate) != 2:
-            return {"success": False, "error": "coordinate parameter [x, y] is required"}
-        result = await self.interface.playwright_exec(
-            "click", {"x": coordinate[0], "y": coordinate[1], "button": "middle"}
-        )
+    async def middle_click(self, coordinate=None, x: int = None, y: int = None, **kwargs) -> dict:
+        """Middle click at coordinates. Supports coordinate array or x/y kwargs."""
+        # Accept either coordinate array or x/y kwargs
+        if coordinate and len(coordinate) >= 2:
+            x, y = coordinate[0], coordinate[1]
+        if x is None or y is None:
+            return {"success": False, "error": "coordinate parameter [x, y] or x/y kwargs required"}
+        result = await self.interface.playwright_exec("click", {"x": x, "y": y, "button": "middle"})
         return result
 
-    async def double_click(self, coordinate=None, **kwargs) -> dict:
-        """Double click at coordinates. FARA-compatible."""
-        if not coordinate or len(coordinate) != 2:
-            return {"success": False, "error": "coordinate parameter [x, y] is required"}
-        result = await self.interface.playwright_exec(
-            "dblclick", {"x": coordinate[0], "y": coordinate[1]}
-        )
+    async def double_click(self, coordinate=None, x: int = None, y: int = None, **kwargs) -> dict:
+        """Double click at coordinates. Supports coordinate array or x/y kwargs."""
+        # Accept either coordinate array or x/y kwargs
+        if coordinate and len(coordinate) >= 2:
+            x, y = coordinate[0], coordinate[1]
+        if x is None or y is None:
+            return {"success": False, "error": "coordinate parameter [x, y] or x/y kwargs required"}
+        result = await self.interface.playwright_exec("dblclick", {"x": x, "y": y})
         return result
 
-    async def triple_click(self, coordinate=None, **kwargs) -> dict:
-        """Triple click at coordinates. FARA-compatible."""
-        if not coordinate or len(coordinate) != 2:
-            return {"success": False, "error": "coordinate parameter [x, y] is required"}
+    async def triple_click(
+        self, coordinate=None, x: int = None, y: int = None, button: str = None, **kwargs
+    ) -> dict:
+        """Triple click at coordinates. Supports coordinate array or x/y kwargs."""
+        # Accept either coordinate array or x/y kwargs
+        if coordinate and len(coordinate) >= 2:
+            x, y = coordinate[0], coordinate[1]
+        if x is None or y is None:
+            return {"success": False, "error": "coordinate parameter [x, y] or x/y kwargs required"}
         # Triple click is approximated as double click
-        return await self.double_click(coordinate=coordinate)
+        return await self.double_click(x=x, y=y)
 
-    async def mouse_move(self, coordinate=None, **kwargs) -> dict:
-        """Move mouse to coordinates. FARA-compatible."""
-        return await self._action_mouse_move({"coordinate": coordinate})
+    async def mouse_move(self, coordinate=None, x: int = None, y: int = None, **kwargs) -> dict:
+        """Move mouse to coordinates. Supports coordinate array or x/y kwargs."""
+        # Accept either coordinate array or x/y kwargs
+        if coordinate and len(coordinate) >= 2:
+            x, y = coordinate[0], coordinate[1]
+        if x is None or y is None:
+            return {"success": False, "error": "coordinate parameter [x, y] or x/y kwargs required"}
+        return await self._action_mouse_move({"coordinate": [x, y]})
+
+    async def move(self, x: int = None, y: int = None, **kwargs) -> dict:
+        """Move mouse to coordinates. Alias for mouse_move with x/y kwargs."""
+        return await self.mouse_move(x=x, y=y)
 
     async def left_click_drag(
         self, coordinate=None, start_coordinate=None, end_coordinate=None, **kwargs
@@ -475,17 +579,17 @@ class BrowserTool(BaseComputerTool):
         """Drag from start to end coordinates. FARA-compatible."""
         if start_coordinate and end_coordinate:
             # Use start/end coordinates if provided
-            await self.interface.interface.move_cursor(start_coordinate[0], start_coordinate[1])
-            await self.interface.interface.mouse_down(start_coordinate[0], start_coordinate[1])
-            await self.interface.interface.move_cursor(end_coordinate[0], end_coordinate[1])
-            await self.interface.interface.mouse_up(end_coordinate[0], end_coordinate[1])
+            await self.automation.move_cursor(start_coordinate[0], start_coordinate[1])
+            await self.automation.mouse_down(start_coordinate[0], start_coordinate[1])
+            await self.automation.move_cursor(end_coordinate[0], end_coordinate[1])
+            await self.automation.mouse_up(end_coordinate[0], end_coordinate[1])
             return {
                 "success": True,
                 "message": f"Dragged from {start_coordinate} to {end_coordinate}",
             }
         elif coordinate:
             # Just move to coordinate
-            await self.interface.interface.move_cursor(coordinate[0], coordinate[1])
+            await self.automation.move_cursor(coordinate[0], coordinate[1])
             return {"success": True, "message": f"Moved to {coordinate}"}
         return {
             "success": False,
@@ -494,6 +598,10 @@ class BrowserTool(BaseComputerTool):
 
     async def key(self, keys=None, **kwargs) -> dict:
         """Press keys. FARA-compatible."""
+        return await self._action_key({"keys": keys})
+
+    async def keypress(self, keys=None, **kwargs) -> dict:
+        """Press keys. Alias for key() - used by OperatorNormalizerCallback."""
         return await self._action_key({"keys": keys})
 
     async def hscroll(self, pixels=None, coordinate=None, **kwargs) -> dict:

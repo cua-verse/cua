@@ -3,14 +3,51 @@ title: Custom Tools
 description: Extend agent capabilities with your own tools
 ---
 
+import { Callout } from 'fumadocs-ui/components/callout';
+
 **Custom tools** let you extend what your agent can do beyond the built-in Computer and Browser tools. Define functions that the agent can call to perform specific tasks like calculations, API calls, file operations, or any custom logic.
+
+## Built-in Tools
+
+Before creating custom tools, understand the built-in tool types:
+
+| Tool          | Actions                            | Use Case                   |
+| ------------- | ---------------------------------- | -------------------------- |
+| `Computer`    | click, type, scroll, screenshot    | Generic desktop automation |
+| `BrowserTool` | visit_url, web_search, click, type | Browser-focused tasks      |
+
+### Model Tool Requirements
+
+Some models are trained for specific toolsets. For example, FARA requires browser tools:
+
+```python
+# When you pass Computer to FARA, it auto-wraps to BrowserTool
+agent = ComputerAgent(model="cua/microsoft/fara-7b", tools=[computer])
+# Warning: "Model requires browser tools. Auto-wrapping Computer to BrowserTool."
+```
+
+To silence the warning, pass the correct tool explicitly:
+
+```python
+from agent.tools.browser_tool import BrowserTool
+
+browser_tool = BrowserTool(interface=computer.interface)
+agent = ComputerAgent(model="cua/microsoft/fara-7b", tools=[browser_tool])
+# No warning
+```
+
+General models like Claude work with any tools you provide - no auto-wrapping occurs.
+
+<Callout type="info">
+  The Computer is always your base environment. Tools are built on top of it for specific use cases.
+</Callout>
 
 ## Simple Function Tools
 
 The easiest way to add a tool is to pass a function with a docstring:
 
 ```python
-from agent import ComputerAgent
+from cua import ComputerAgent
 
 def calculate(a: int, b: int) -> int:
     """Calculate the sum of two integers"""
@@ -36,7 +73,7 @@ The agent can now call `calculate` and `get_weather` alongside computer actions.
 For tools that should run inside the sandbox rather than on your host machine, use the `@sandboxed` decorator:
 
 ```python
-from computer.helpers import sandboxed
+from cua import sandboxed
 
 @sandboxed()
 def read_file(path: str) -> str:
@@ -68,7 +105,7 @@ See [Sandboxed Python](/cua/guide/advanced/sandboxed-python) for more details.
 For more control over tool schema and behavior, extend `BaseTool`:
 
 ```python
-from agent.tools import BaseTool, register_tool
+from cua.tools import BaseTool, register_tool
 from typing import Union
 
 @register_tool("database_query")
@@ -165,9 +202,9 @@ Sync functions are automatically run in a thread pool to avoid blocking.
 Pass multiple tools of different types:
 
 ```python
-from agent import ComputerAgent
-from agent.tools import BrowserTool
-from computer.helpers import sandboxed
+from cua import ComputerAgent
+from cua.tools import BrowserTool
+from cua import sandboxed
 
 # Built-in tool
 browser = BrowserTool(interface=computer)
@@ -198,7 +235,7 @@ The agent decides which tool to use based on the task.
 Tools can raise exceptions, which are passed back to the model:
 
 ```python
-from agent.tools import ToolError
+from cua.tools import ToolError
 
 def divide(a: float, b: float) -> float:
     """Divide a by b"""
@@ -214,8 +251,7 @@ The model sees the error message and can adjust its approach.
 Here's a complete example with file management tools:
 
 ```python
-from agent import ComputerAgent
-from computer.helpers import sandboxed
+from cua import ComputerAgent, sandboxed
 
 @sandboxed()
 def list_files(directory: str = ".") -> list:

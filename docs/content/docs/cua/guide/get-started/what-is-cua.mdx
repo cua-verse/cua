@@ -1,68 +1,97 @@
 ---
 title: What is Cua?
-description: Learn about Cua, the open-source platform for building computer-use agents
+description: Open-source sandboxes and agent framework for computer-use AI
 ---
 
-Cua is an open-source platform for building, benchmarking, and deploying agents that can use any computer, with isolated, self-hostable sandboxes (Docker, QEMU, Apple Vz).
+Cua lets you spin up isolated desktop environments — Linux, macOS, Windows, Android — and build agents that can see and control them. One SDK, any OS, cloud or local.
 
-<div className="not-prose relative rounded-xl overflow-hidden my-8 w-full">
-  <img src="/docs/img/hero.png" alt="Cua" className="w-full h-auto rounded-xl" />
-</div>
+```python
+import asyncio
+from cua import Sandbox, Image, ComputerAgent
 
-## The Cua Stack
+async def main():
+    async with Sandbox.ephemeral(Image.linux(), local=True) as sb:
+        agent = ComputerAgent(
+            model="cua/anthropic/claude-sonnet-4-5",
+            tools=[sb],
+        )
+        async for result in agent.run([{
+            "role": "user",
+            "content": "Open Firefox and search for 'open source computer use'",
+        }]):
+            for item in result["output"]:
+                if item["type"] == "message":
+                    print(item["content"][0]["text"])
 
-Cua consists of three main components:
+asyncio.run(main())
+```
 
-<div className="not-prose relative rounded-xl overflow-hidden my-8 w-full">
-  <img src="/docs/img/cua-architecture.png" alt="Cua Architecture" className="w-full h-auto rounded-xl" />
-</div>
+## Install
 
-### 1. Desktop Sandboxes
+```bash
+pip install cua
+```
 
-Isolated virtual environments where your agents can safely execute tasks. Cua supports:
+No account needed to run locally with Docker. For cloud sandboxes and hosted models, get a free API key at [cua.ai](https://cua.ai/signin).
 
-- **Cloud Sandboxes** - Managed Linux, Windows, and macOS environments hosted by Cua
-- **Local Sandboxes** - Docker containers, QEMU VMs, macOS VMs via Lume, or Windows Sandbox on your own machine
+## What it includes
 
-### 2. Computer Framework
+**Sandbox SDK** — create and control sandboxes programmatically. Same API everywhere:
 
-A unified SDK for controlling desktop environments programmatically:
+```python
+async with Sandbox.ephemeral(Image.linux()) as sb:   # cloud Linux container
+async with Sandbox.ephemeral(Image.macos()) as sb:   # cloud macOS VM
+async with Sandbox.ephemeral(Image.windows()) as sb: # cloud Windows VM
+async with Sandbox.ephemeral(Image.android()) as sb: # cloud Android VM
+async with Sandbox.ephemeral(Image.linux(), local=True) as sb:  # local Docker
+```
 
-- Take screenshots and observe the screen
-- Simulate mouse clicks, movements, and scrolling
-- Type text and press keyboard shortcuts
-- Run code and shell commands
-- Works identically across all sandbox types
+Inside any sandbox:
 
-### 3. Agent Framework
+```python
+await sb.shell.run("npm install")          # run shell commands
+await sb.screenshot()                      # capture the screen
+await sb.mouse.click(x, y)                # click
+await sb.keyboard.type("hello")            # type
+await sb.keyboard.press("ctrl+c")         # key combos
+await sb.mobile.tap(x, y)                 # Android touch
+async with sb.tunnel.forward(3000) as t:  # forward ports
+    print(t.url)
+```
 
-Build agents that see screens, click buttons, and complete tasks autonomously. Run isolated code execution environments for AI coding assistants like Claude Code, Codex CLI, or OpenCode.
+**Agent SDK** — plug any vision-language model into a computer-use loop:
 
-- **100+ vision-language model options** through Cua VLM Router or direct provider access
-- **Pre-built agent loops** optimized for computer-use tasks
-- **Composable architecture** for combining grounding and planning models
-- **Built-in telemetry** for monitoring agent performance
+```python
+agent = ComputerAgent(
+    model="cua/anthropic/claude-sonnet-4-5",  # or openai, gemini, qwen, ...
+    tools=[sb],
+)
+async for result in agent.run(messages): ...
+```
 
-## Why Cua?
+**Image builder** — configure the environment before the sandbox starts:
 
-Cua provides isolated, reproducible environments for AI agents to operate safely:
+```python
+img = (
+    Image.linux()
+    .apt_install("curl", "ffmpeg")
+    .pip_install("playwright")
+    .env(API_KEY="...")
+    .run("playwright install chromium")
+)
+async with Sandbox.ephemeral(img) as sb: ...
+```
 
-- **Secure execution** - Run AI coding assistants and computer-use agents in sandboxed environments
-- **Self-hostable** - Deploy locally with Docker, QEMU, or Apple Virtualization
-- **Cross-platform** - Same API across Linux, Windows, and macOS sandboxes
-- **Visual understanding** - Agents see screens, adapt to UI changes, and complete complex tasks
+## Use cases
 
-## Use Cases
+- **AI coding assistants** — safe isolated environments for Claude Code, Codex, and similar tools
+- **Browser and desktop automation** — agents that interact with any real UI
+- **Cross-platform testing** — run the same test against Linux, macOS, Windows, and Android
+- **Benchmarking** — evaluate agents on OSWorld, ScreenSpot, and custom task sets
 
-Cua is ideal for:
+## Next
 
-- **AI coding assistants** - Isolated code execution environments for Claude Code, Codex CLI, OpenCode, and other AI coding tools
-- **Computer-use agents** - Build agents that interact with any desktop application autonomously
-- **Workflow automation** - Automate repetitive tasks across any application
-- **Testing** - Run end-to-end tests that interact with real UIs
-- **Benchmarks** - Evaluate agents on OSWorld, ScreenSpot, and other standardized tasks
-- **Research** - Build, evaluate, and train computer-use AI agents
-
-## Getting Started
-
-Ready to build your first agent? Continue to [Set Up a Sandbox](/cua/guide/get-started/set-up-sandbox) to set up your environment and run your first automation.
+- [Quickstart](/cua/guide/get-started/quickstart) — running in 5 minutes
+- [Sandbox Lifecycle](/cua/guide/sandbox/lifecycle) — ephemeral, persistent, connect
+- [Images](/cua/guide/sandbox/images) — customizing your environment
+- [Examples](/cua/examples/sandboxes/linux) — runnable samples for every OS

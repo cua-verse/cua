@@ -1,6 +1,6 @@
 [project]
 name = "cua-bench"
-version = "0.2.3"
+version = "0.2.8"
 description = "Toolkit for computer-use RL environments and benchmarks"
 readme = "README.md"
 license = "MIT"
@@ -53,13 +53,13 @@ dependencies = [
     "docker>=7.0.0",
     # CUA SDK
     "cua-computer>=0.4.19",
-    "cua-core",
+    "cua-core>=0.1.18",
 ]
 
 [project.optional-dependencies]
 # Full installation with all features
 all = [
-    "cua-bench[browser,agents,cloud]",
+    "cua-bench[browser,agents,cloud,otel]",
 ]
 
 # Browser automation (for simulated environments)
@@ -73,6 +73,13 @@ agents = [
     "anthropic>=0.26.0",
 ]
 
+# OpenTelemetry tracing and metrics export
+otel = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20.0",
+]
+
 # Cloud batch execution (Google Cloud)
 cloud = [
     "google-cloud-batch>=0.17.0",
@@ -80,6 +87,7 @@ cloud = [
     "google-cloud-storage>=2.10.0",
     "gcloud-aio-storage>=9.0.0",
     "grpcio>=1.60.0",
+    "cua-bench[otel]",
 ]
 
 # API server (for custom environments)
@@ -101,6 +109,14 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "ruff>=0.1.0",
+]
+
+# RL training
+rl = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "transformers>=4.57.0,<5.0",
+    "verl"
 ]
 
 [project.urls]

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import { Telemetry } from '@trycua/core';
 import pino from 'pino';
@@ -5,6 +6,14 @@ import type { OSType } from '../../types';
 import type { BaseComputerConfig, Display, VMProviderType } from '../types';
 
 const logger = pino({ name: 'computer.provider_base' });
+
+/**
+ * Hash API key using SHA256 for secure telemetry identification.
+ */
+function hashApiKey(apiKey: string | undefined): string | undefined {
+  if (!apiKey) return undefined;
+  return createHash('sha256').update(apiKey).digest('hex');
+}
 
 /**
  * Base Computer class with shared functionality
@@ -18,6 +27,7 @@ export abstract class BaseComputer {
   constructor(config: BaseComputerConfig) {
     this.name = config.name;
     this.osType = config.osType;
+    this.vmProvider = config.vmProvider;
     this.telemetry = new Telemetry();
     this.telemetry.recordEvent('module_init', {
       module: 'computer',
@@ -29,7 +39,27 @@ export abstract class BaseComputer {
       os: os.platform(),
       os_version: os.version(),
       node_version: process.version,
+      provider_type: config.vmProvider ?? 'unknown',
     });
+
+    // Track which config args were provided
+    const argsProvided: string[] = ['name', 'osType']; // required args
+    const apiKey = 'apiKey' in config ? (config as { apiKey?: string }).apiKey : undefined;
+    if (apiKey) argsProvided.push('apiKey');
+    if ('apiBase' in config) argsProvided.push('apiBase');
+    if (config.vmProvider) argsProvided.push('vmProvider');
+
+    const initEventData: Record<string, unknown> = {
+      os_type: config.osType,
+      args_provided: argsProvided,
+      provider_type: config.vmProvider ?? 'unknown',
+    };
+    // Add hashed API key
+    if (apiKey) {
+      initEventData.api_key_hash = hashApiKey(apiKey);
+    }
+
+    this.telemetry.recordEvent('ts_computer_init', initEventData);
   }
 
   /**

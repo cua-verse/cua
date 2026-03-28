@@ -29,7 +29,7 @@ final class MockVNCService: VNCService {
         return nil
     }
 
-    func start(port: Int, virtualMachine: Any?) async throws {
+    func start(port: Int, password: String? = nil, virtualMachine: Any?) async throws {
         isRunning = true
         url = "vnc://localhost:\(port)"
         _attachedVM = virtualMachine
@@ -75,7 +75,7 @@ final class MockVNCService: VNCService {
         // No-op for testing
     }
 
-    func sendText(_ text: String) async throws {
+    func sendText(_ text: String, delayMs: Int?) async throws {
         // No-op for testing
     }
 
