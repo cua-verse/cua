@@ -17,16 +17,21 @@ Field conventions match OpenClaw / Anthropic:
 
 US-OC-038: Canonical Internal Message Format.
 US-OC-039: sanitize_items() pipeline — repair, ordering, format conversion.
+US-OC-041: TranscriptPolicy + thinking sanitization passes.
 
 Reference:
   - openclaw/src/agents/pi-embedded-runner/google.ts — sanitizeSessionHistory pipeline
   - openclaw/src/agents/session-transcript-repair.ts — repair passes on AgentMessage[]
+  - openclaw/src/agents/transcript-policy.ts — TranscriptPolicy flags
+  - openclaw/src/agents/pi-embedded-runner/thinking.ts — dropThinkingBlocks
+  - openclaw/src/agents/pi-embedded-helpers/openai.ts — downgradeOpenAIReasoningBlocks
   - session.py:819-1080 — convert_to_responses_api_items (pattern reference)
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any, Literal, Union
 
 from typing_extensions import NotRequired, TypedDict
@@ -133,6 +138,96 @@ COMPACTION_PREAMBLE = (
     "The following is a summary of earlier conversation history that was "
     "compacted to save context space. Use this to maintain continuity.\n\n"
 )
+
+# ---------------------------------------------------------------------------
+# TranscriptPolicy (US-OC-041)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TranscriptPolicy:
+    """Per-provider flags controlling which sanitization passes run.
+
+    Mirrors OpenClaw's TranscriptPolicy (transcript-policy.ts). Each flag
+    gates a pure pass in :func:`sanitize_items`. All default to safe
+    no-ops so adding a new provider only requires setting the flags it needs.
+
+    Reference: openclaw/src/agents/transcript-policy.ts
+    """
+
+    drop_thinking_blocks: bool = False
+    """Strip type="thinking" content blocks from assistant messages.
+    Needed for providers that reject replayed thinking blocks (e.g. Anthropic
+    when signatures are invalid, GitHub Copilot Claude)."""
+
+    sanitize_thinking_signatures: bool = False
+    """Remove thinkingSignature fields from thinking blocks.
+    Needed for cross-provider replay where signatures are provider-specific
+    tamper-proof tokens that the target API will reject."""
+
+    downgrade_openai_reasoning: bool = False
+    """Drop orphaned OpenAI reasoning blocks (thinking blocks with a valid
+    OpenAI reasoning signature but no following non-thinking content).
+    Without this, o3/o4 model thinking blocks cause API rejection on replay."""
+
+    repair_tool_use_result_pairing: bool = True
+    """Repair orphaned tool call / result pairs. Enabled for all providers."""
+
+    validate_anthropic_turns: bool = True
+    """Ensure valid Anthropic turn structure (no trailing assistant message)."""
+
+
+def get_transcript_policy(model: str) -> TranscriptPolicy:
+    """Resolve TranscriptPolicy from a litellm model string.
+
+    Uses the same provider-detection pattern as
+    :func:`thinking.resolve_thinking_params`.
+
+    Args:
+        model: litellm model identifier (e.g. "anthropic/claude-sonnet-4-20250514",
+            "openai/gpt-5.4").
+
+    Reference: openclaw/src/agents/transcript-policy.ts:resolveTranscriptPolicy
+    """
+    model_lower = model.lower()
+
+    if "anthropic/" in model_lower or "claude" in model_lower:
+        return TranscriptPolicy(
+            drop_thinking_blocks=True,
+            sanitize_thinking_signatures=False,
+            downgrade_openai_reasoning=False,
+            repair_tool_use_result_pairing=True,
+            validate_anthropic_turns=True,
+        )
+
+    if (
+        "openai/" in model_lower
+        or "gpt" in model_lower
+        or model_lower.startswith("o")
+    ):
+        return TranscriptPolicy(
+            drop_thinking_blocks=False,
+            sanitize_thinking_signatures=False,
+            downgrade_openai_reasoning=True,
+            repair_tool_use_result_pairing=True,
+            validate_anthropic_turns=False,
+        )
+
+    if (
+        "gemini" in model_lower
+        or "google" in model_lower
+        or "vertex" in model_lower
+    ):
+        return TranscriptPolicy(
+            drop_thinking_blocks=False,
+            sanitize_thinking_signatures=True,
+            downgrade_openai_reasoning=False,
+            repair_tool_use_result_pairing=True,
+            validate_anthropic_turns=False,
+        )
+
+    return TranscriptPolicy()
+
 
 # ---------------------------------------------------------------------------
 # Ingestion: untyped dicts → canonical
@@ -758,26 +853,274 @@ def ensure_valid_ordering(
     return messages
 
 
+# ---------------------------------------------------------------------------
+# Thinking sanitization passes (US-OC-041)
+# ---------------------------------------------------------------------------
+
+
+def drop_thinking_blocks(
+    messages: list[CanonicalMessage],
+) -> list[CanonicalMessage]:
+    """Strip type="thinking" content blocks from assistant messages.
+
+    If an assistant message becomes empty after stripping, it is replaced
+    with a synthetic ``TextBlock(type="text", text="")`` to preserve turn
+    structure (some providers require strict user/assistant alternation).
+
+    Returns the original list when nothing was changed (callers can use
+    reference equality to skip downstream work).
+
+    Reference: openclaw/src/agents/pi-embedded-runner/thinking.ts:dropThinkingBlocks
+    """
+    touched = False
+    out: list[CanonicalMessage] = []
+
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            out.append(msg)
+            continue
+
+        next_content: list[ContentBlock] = []
+        changed = False
+        for block in msg.get("content", []):
+            if isinstance(block, dict) and block.get("type") == "thinking":
+                touched = True
+                changed = True
+                continue
+            next_content.append(block)
+
+        if not changed:
+            out.append(msg)
+            continue
+
+        content = (
+            next_content
+            if next_content
+            else [TextBlock(type="text", text="")]
+        )
+        new_msg = dict(msg)
+        new_msg["content"] = content
+        out.append(new_msg)  # type: ignore[arg-type]
+
+    return out if touched else messages
+
+
+def sanitize_thinking_signatures(
+    messages: list[CanonicalMessage],
+) -> list[CanonicalMessage]:
+    """Remove thinkingSignature fields from thinking blocks.
+
+    The signature is a tamper-proof token validated by the API on
+    re-submission — if it comes from a different provider or session,
+    the API rejects the request.  Stripping it allows cross-provider
+    transcript replay.
+
+    Returns the original list when nothing was changed.
+
+    Reference: openclaw/src/agents/transcript-policy.ts (sanitizeThinkingSignatures flag)
+    """
+    touched = False
+    out: list[CanonicalMessage] = []
+
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            out.append(msg)
+            continue
+
+        next_content: list[ContentBlock] = []
+        changed = False
+        for block in msg.get("content", []):
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "thinking"
+                and "thinkingSignature" in block
+            ):
+                touched = True
+                changed = True
+                new_block = dict(block)
+                del new_block["thinkingSignature"]
+                next_content.append(new_block)  # type: ignore[arg-type]
+            else:
+                next_content.append(block)
+
+        if not changed:
+            out.append(msg)
+        else:
+            new_msg = dict(msg)
+            new_msg["content"] = next_content
+            out.append(new_msg)  # type: ignore[arg-type]
+
+    return out if touched else messages
+
+
+def _parse_openai_reasoning_signature(value: Any) -> bool:
+    """Check if a thinkingSignature is a valid OpenAI reasoning signature.
+
+    OpenAI reasoning signatures are JSON objects with ``id`` and ``type``
+    fields.  Returns True if the value parses as such.
+
+    Reference: openclaw/src/agents/pi-embedded-helpers/openai.ts:parseOpenAIReasoningSignature
+    """
+    if not value:
+        return False
+    candidate = None
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if not (trimmed.startswith("{") and trimmed.endswith("}")):
+            return False
+        try:
+            candidate = json.loads(trimmed)
+        except (json.JSONDecodeError, ValueError):
+            return False
+    elif isinstance(value, dict):
+        candidate = value
+    else:
+        return False
+
+    return (
+        isinstance(candidate, dict)
+        and isinstance(candidate.get("id"), str)
+        and isinstance(candidate.get("type"), str)
+    )
+
+
+def _has_following_non_thinking_block(
+    content: list[ContentBlock], index: int
+) -> bool:
+    """Check if there is a non-thinking block after the given index.
+
+    Reference: openclaw/src/agents/pi-embedded-helpers/openai.ts:hasFollowingNonThinkingBlock
+    """
+    for i in range(index + 1, len(content)):
+        block = content[i]
+        if not isinstance(block, dict):
+            return True
+        if block.get("type") != "thinking":
+            return True
+    return False
+
+
+def downgrade_openai_reasoning(
+    messages: list[CanonicalMessage],
+) -> list[CanonicalMessage]:
+    """Drop orphaned OpenAI reasoning blocks from assistant messages.
+
+    A thinking block is "orphaned" if it has a valid OpenAI reasoning
+    signature (JSON ``{id, type}``) but no following non-thinking block
+    in the same assistant message.  Such blocks cause API rejection on
+    replay because the Responses API validates reasoning items against
+    server-side state.
+
+    Thinking blocks *without* a valid OpenAI signature are left untouched
+    (they may be from Anthropic or other providers).
+
+    If all blocks in an assistant message are dropped, the entire message
+    is removed (matching OpenClaw behavior).
+
+    Returns the original list when nothing was changed.
+
+    Reference: openclaw/src/agents/pi-embedded-helpers/openai.ts:downgradeOpenAIReasoningBlocks
+    """
+    touched = False
+    out: list[CanonicalMessage] = []
+
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            out.append(msg)
+            continue
+
+        content = msg.get("content", [])
+        next_content: list[ContentBlock] = []
+        changed = False
+
+        for i, block in enumerate(content):
+            if not isinstance(block, dict) or block.get("type") != "thinking":
+                next_content.append(block)
+                continue
+
+            sig = block.get("thinkingSignature")
+            if not _parse_openai_reasoning_signature(sig):
+                # Not an OpenAI reasoning block — keep it
+                next_content.append(block)
+                continue
+
+            if _has_following_non_thinking_block(content, i):
+                # Part of a valid call chain — keep it
+                next_content.append(block)
+                continue
+
+            # Orphaned OpenAI reasoning — drop it
+            touched = True
+            changed = True
+
+        if not changed:
+            out.append(msg)
+            continue
+
+        if not next_content:
+            # All blocks dropped — remove the message entirely
+            continue
+
+        new_msg = dict(msg)
+        new_msg["content"] = next_content
+        out.append(new_msg)  # type: ignore[arg-type]
+
+    return out if touched else messages
+
+
 def sanitize_items(
     messages: list[CanonicalMessage],
     target: Literal["openai-responses", "anthropic"],
+    *,
+    policy: TranscriptPolicy | None = None,
 ) -> list[dict[str, Any]]:
     """Convert canonical messages to provider-specific format.
 
     Modeled on OpenClaw's sanitizeSessionHistory — linear pipeline of pure passes:
       1. repair_orphaned_pairs — fix split call/result pairs
-      2. ensure_valid_ordering — no trailing assistant message
-      3. Format conversion — canonical → target format
+      2. drop_thinking_blocks — strip thinking content (if policy flag set)
+      3. sanitize_thinking_signatures — remove signatures (if policy flag set)
+      4. downgrade_openai_reasoning — drop orphaned reasoning (if policy flag set)
+      5. ensure_valid_ordering — no trailing assistant message
+      6. Format conversion — canonical → target format
 
     Args:
         messages: Canonical messages (from normalize_to_canonical).
         target: Provider format to convert to.
+        policy: TranscriptPolicy controlling which passes run. If None,
+            a default policy is resolved from the target format.
 
     Returns:
         Provider-specific messages/items ready for the API.
     """
-    messages = repair_orphaned_pairs(messages)
-    messages = ensure_valid_ordering(messages)
+    if policy is None:
+        if target == "anthropic":
+            policy = TranscriptPolicy(
+                drop_thinking_blocks=True,
+                validate_anthropic_turns=True,
+            )
+        elif target == "openai-responses":
+            policy = TranscriptPolicy(
+                downgrade_openai_reasoning=True,
+                validate_anthropic_turns=False,
+            )
+        else:
+            policy = TranscriptPolicy()
+
+    if policy.repair_tool_use_result_pairing:
+        messages = repair_orphaned_pairs(messages)
+
+    if policy.drop_thinking_blocks:
+        messages = drop_thinking_blocks(messages)
+
+    if policy.sanitize_thinking_signatures:
+        messages = sanitize_thinking_signatures(messages)
+
+    if policy.downgrade_openai_reasoning:
+        messages = downgrade_openai_reasoning(messages)
+
+    if policy.validate_anthropic_turns:
+        messages = ensure_valid_ordering(messages)
 
     if target == "openai-responses":
         return canonical_to_responses_api(messages)

@@ -13,6 +13,30 @@
 
 ---
 
+## 2026-03-29 - US-OC-041: TranscriptPolicy + Thinking Sanitization Passes
+- Implemented TranscriptPolicy dataclass with 5 boolean flags: drop_thinking_blocks, sanitize_thinking_signatures, downgrade_openai_reasoning, repair_tool_use_result_pairing, validate_anthropic_turns
+- Added get_transcript_policy(model) — resolves per-provider from litellm model string (same pattern as thinking.py)
+- Three new sanitization passes in canonical.py:
+  - drop_thinking_blocks: strips thinking blocks, preserves turn with empty text (matches OpenClaw's dropThinkingBlocks)
+  - sanitize_thinking_signatures: removes thinkingSignature fields for cross-provider replay
+  - downgrade_openai_reasoning: drops orphaned OpenAI reasoning (valid sig + no following content)
+- Extended sanitize_items() to accept optional policy= kwarg; default policies resolve from target format
+- Updated 2 existing tests (Anthropic now drops thinking by default, OpenAI no longer enforces trailing user message)
+- Added 31 new tests covering policy defaults, per-provider resolution, all three passes, and pipeline integration
+- Created 3 new PRD stories: US-OC-043 (tool call ID sanitization), US-OC-044 (dual-ID format), US-OC-045 (write-time tool result guard)
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/canonical.py`
+  - `tests/test_canonical_format.py`
+  - `tests/test_sanitize_items.py`
+  - `docs/plan/US-OC-041-transcript-policy.md`
+  - `prd.json`
+- **Learnings for future iterations:**
+  - OpenClaw's TranscriptPolicy has 12+ flags but most are for providers we don't support yet — start with the 5 that matter and extend via new stories
+  - Default policy per adapter target is cleaner than resolving from model string in sanitize_items — caller can still override with explicit policy
+  - Write-time tool result guard is preferred over sanitize-time repair for long-lived sessions (user confirmed) — future US-OC-045
+
+---
+
 ## 2026-03-23 - US-OC-020: Deep investigation of OpenAI reasoning replay constraints
 - Investigated and reverted overly aggressive `_drop_opaque_reasoning_segments` in openai.py:
   - Original code dropped everything from opaque reasoning until next user message — catastrophic for CUA (single user message → wipes entire history)
