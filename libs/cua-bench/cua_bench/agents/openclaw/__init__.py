@@ -19,6 +19,7 @@ Components:
   - run_memory_flush: standalone memory flush module (US-OC-028)
   - ThinkLevel / ThinkingConfig / resolve_thinking_default: thinking level system (US-OC-019)
   - CanonicalMessage / ContentBlock types / converters: canonical message format (US-OC-038)
+  - sanitize_items / repair_orphaned_pairs / ensure_valid_ordering: sanitize pipeline (US-OC-039)
 """
 
 from .agent_loop import OpenClawComputerAgent
@@ -33,7 +34,10 @@ from .canonical import (
     ToolResultBlock,
     canonical_to_anthropic_messages,
     canonical_to_responses_api,
+    ensure_valid_ordering,
     normalize_to_canonical,
+    repair_orphaned_pairs,
+    sanitize_items,
 )
 from .context import (
     CompactionResult,
@@ -86,7 +90,10 @@ __all__ = [
     "ToolResultBlock",
     "canonical_to_anthropic_messages",
     "canonical_to_responses_api",
+    "ensure_valid_ordering",
     "normalize_to_canonical",
+    "repair_orphaned_pairs",
+    "sanitize_items",
     "CompactionResult",
     "ContextFile",
     "DEFAULT_MEMORY_FLUSH_RESERVE_TOKENS_FLOOR",

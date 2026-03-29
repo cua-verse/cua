@@ -34,6 +34,7 @@ from agent.agent import ComputerAgent, get_json, get_output_call_ids
 from agent.responses import replace_failed_computer_calls_with_function_calls
 from litellm.responses.utils import Usage
 
+from .canonical import sanitize_items
 from .context import ContextOverflowCallback, compact_messages, is_context_overflow_error
 from .memory import MemoryStore
 from .memory_flush import run_memory_flush
@@ -44,6 +45,8 @@ from .session import (
     SessionManager,
     should_run_memory_flush,
 )
+
+
 
 
 class OpenClawComputerAgent(ComputerAgent):
@@ -410,10 +413,9 @@ class OpenClawComputerAgent(ComputerAgent):
             compaction_result.summary, kept_messages
         )
 
-        # Bridge: canonical → Responses API items (loops expect flat items).
-        # Temporary — US-OC-039 will make loops call sanitize_items() themselves.
-        from .canonical import canonical_to_responses_api
-        compacted_items = canonical_to_responses_api(canonical_messages)
+        # Convert canonical → Responses API format via sanitize pipeline.
+        # Both loops expect Responses API items as input.
+        compacted_items = sanitize_items(canonical_messages, target="openai-responses")
 
         items.clear()
         items.extend(compacted_items)
@@ -436,14 +438,14 @@ class OpenClawComputerAgent(ComputerAgent):
     ) -> list:
         """Build a canonical message list from compaction output.
 
-        Produces: [user(CompactionSummaryBlock), ...normalized_kept, user(continue)].
+        Produces: [user(CompactionSummaryBlock), ...normalized_kept].
         The summary provides continuity context; kept messages preserve recent
         conversation verbatim in canonical form.
 
         Repair runs on untyped dicts BEFORE canonical normalization — the
         existing algorithm uses stop_reason at the message level and is
-        well-tested.  US-OC-039 may later move repair into the canonical
-        pipeline.
+        well-tested.  The sanitize_items() pipeline (US-OC-039) then applies
+        canonical-level repair, ordering, and format conversion.
 
         Args:
             summary: The compaction summary text.
@@ -452,13 +454,12 @@ class OpenClawComputerAgent(ComputerAgent):
 
         Returns:
             Typed canonical messages (US-OC-038).  The caller
-            (``_compact_in_place``) converts these to Responses API items
-            before writing to the loop's items list.
+            (``_compact_in_place``) runs ``sanitize_items()`` to convert
+            to provider-specific format.
         """
         from .canonical import (
             CanonicalMessage,
             CompactionSummaryBlock,
-            TextBlock,
             normalize_to_canonical,
         )
 
@@ -477,15 +478,8 @@ class OpenClawComputerAgent(ComputerAgent):
             repair_result = repair_tool_use_result_pairing(kept_messages)
             items.extend(normalize_to_canonical(repair_result.messages))
 
-        # Ensure items don't end with role=assistant — models like Opus 4.6
-        # don't support assistant message prefill and will reject the API call.
-        # This can happen when kept_messages ends with the model's last response,
-        # or after ImageRetentionCallback strips trailing screenshot pairs.
-        if items and items[-1].get("role") == "assistant":
-            items.append(CanonicalMessage(
-                role="user",
-                content=[TextBlock(type="text", text="[Continue from where you left off.]")],
-            ))
+        # Note: trailing-assistant check moved to ensure_valid_ordering()
+        # in the sanitize_items() pipeline (US-OC-039).
 
         return items
 

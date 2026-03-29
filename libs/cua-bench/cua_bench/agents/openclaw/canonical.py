@@ -1,4 +1,4 @@
-"""Canonical internal message format for the OpenClaw agent harness.
+"""Canonical internal message format and sanitize_items() pipeline.
 
 Defines typed role-based messages and content blocks that serve as the single
 internal representation for all pipeline passes (repair, sanitization,
@@ -16,6 +16,7 @@ Field conventions match OpenClaw / Anthropic:
   - ``call_id`` is Responses API only — adapters map ``id`` → ``call_id``
 
 US-OC-038: Canonical Internal Message Format.
+US-OC-039: sanitize_items() pipeline — repair, ordering, format conversion.
 
 Reference:
   - openclaw/src/agents/pi-embedded-runner/google.ts — sanitizeSessionHistory pipeline
@@ -141,24 +142,184 @@ COMPACTION_PREAMBLE = (
 def normalize_to_canonical(
     messages: list[dict[str, Any]],
 ) -> list[CanonicalMessage]:
-    """Convert untyped role-based dicts to typed canonical messages.
+    """Convert untyped dicts to typed canonical messages.
+
+    Handles two input formats:
+      1. **Role-based messages** (``{role, content}``): from compaction, session
+         replay, and Anthropic completion format.
+      2. **Flat Responses API items** (``{type: "function_call", call_id, ...}``):
+         from the OpenAI Responses API loop's items list.
+
+    Flat items are detected by having a ``type`` field without a ``role`` field
+    (or ``type == "message"``). They are converted to canonical messages and
+    grouped: consecutive assistant-role blocks merge into one message, and
+    consecutive tool-role blocks merge into one message.
 
     Normalizes:
       - String content → ``[TextBlock]``
       - ``action: {…}`` → ``actions: [{…}]``
       - Preserves ``stop_reason`` on messages that have it
+      - Strips ``acknowledged_safety_checks`` from ``computer_call_output``
     """
     result: list[CanonicalMessage] = []
     for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        blocks = _normalize_content(content, role)
-        canonical: CanonicalMessage = {"role": role, "content": blocks}
-        stop_reason = msg.get("stop_reason")
-        if stop_reason:
-            canonical["stop_reason"] = stop_reason
-        result.append(canonical)
+        if _is_flat_responses_item(msg):
+            _ingest_flat_item(msg, result)
+        else:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            blocks = _normalize_content(content, role)
+            canonical: CanonicalMessage = {"role": role, "content": blocks}
+            stop_reason = msg.get("stop_reason")
+            if stop_reason:
+                canonical["stop_reason"] = stop_reason
+            result.append(canonical)
     return result
+
+
+def _is_flat_responses_item(msg: dict[str, Any]) -> bool:
+    """Check if a dict is a flat Responses API item (not a role-based message).
+
+    Flat items have a ``type`` field and either no ``role`` field or
+    ``type == "message"`` (Responses API wraps role-based content in a
+    message item).
+    """
+    if "type" not in msg:
+        return False
+    msg_type = msg["type"]
+    # {type: "message", role: ..., content: [...]} — Responses API message wrapper
+    if msg_type == "message":
+        return True
+    # Has type but no role — flat item (function_call, computer_call, etc.)
+    if "role" not in msg:
+        return True
+    return False
+
+
+def _ingest_flat_item(
+    item: dict[str, Any], result: list[CanonicalMessage]
+) -> None:
+    """Convert a flat Responses API item to canonical and append/merge into result.
+
+    Groups consecutive same-role blocks into one message.
+    """
+    item_type = item.get("type", "")
+
+    if item_type == "message":
+        # {type: "message", role: "user"|"assistant", content: [{type: "input_text"|"output_text", ...}]}
+        role = item.get("role", "user")
+        content = item.get("content", [])
+        blocks = _normalize_responses_content(content, role)
+        if blocks:
+            _append_or_merge(result, role, blocks)
+        return
+
+    if item_type == "function_call":
+        block = FunctionCallBlock(
+            type="function_call",
+            id=item.get("call_id", item.get("id", "")),
+            name=item.get("name", ""),
+            arguments=item.get("arguments", ""),
+        )
+        _append_or_merge(result, "assistant", [block])
+        return
+
+    if item_type == "computer_call":
+        block = ComputerCallBlock(
+            type="computer_call",
+            id=item.get("call_id", item.get("id", "")),
+            actions=_normalize_actions(item),
+        )
+        _append_or_merge(result, "assistant", [block])
+        return
+
+    if item_type == "function_call_output":
+        block = ToolResultBlock(
+            type="tool_result",
+            tool_use_id=item.get("call_id", ""),
+            content=item.get("output", ""),
+        )
+        _append_or_merge(result, "tool", [block])
+        return
+
+    if item_type == "computer_call_output":
+        # Strip acknowledged_safety_checks — not part of canonical format
+        output = item.get("output", item.get("content", ""))
+        if isinstance(output, dict):
+            output = json.dumps(output)
+        elif not isinstance(output, str):
+            output = str(output)
+        block = ToolResultBlock(
+            type="tool_result",
+            tool_use_id=item.get("call_id", ""),
+            content=output,
+        )
+        _append_or_merge(result, "tool", [block])
+        return
+
+    if item_type == "reasoning":
+        # OpenAI reasoning items — convert to ThinkingBlock
+        summary = item.get("summary", [])
+        text = ""
+        if isinstance(summary, list):
+            text = " ".join(
+                s.get("text", "") for s in summary if isinstance(s, dict)
+            )
+        elif isinstance(summary, str):
+            text = summary
+        block = ThinkingBlock(type="thinking", thinking=text)
+        _append_or_merge(result, "assistant", [block])
+        return
+
+    # Unknown flat item type — preserve as text in a user message
+    text = json.dumps(item)[:500]
+    block = TextBlock(type="text", text=f"[{item_type}: {text}]")
+    _append_or_merge(result, "user", [block])
+
+
+def _normalize_responses_content(
+    content: Any, role: str
+) -> list[ContentBlock]:
+    """Normalize Responses API message content to canonical blocks.
+
+    Handles Responses API content types: ``input_text``, ``output_text``,
+    ``input_image``, ``computer_screenshot``, ``refusal``, ``summary_text``.
+    """
+    if isinstance(content, str):
+        return [TextBlock(type="text", text=content)]
+
+    if not isinstance(content, list):
+        return [TextBlock(type="text", text=str(content))]
+
+    blocks: list[ContentBlock] = []
+    for block in content:
+        if not isinstance(block, dict):
+            blocks.append(TextBlock(type="text", text=str(block)))
+            continue
+
+        btype = block.get("type", "")
+        if btype in ("input_text", "output_text", "text", "summary_text"):
+            blocks.append(TextBlock(type="text", text=block.get("text", "")))
+        elif btype == "refusal":
+            blocks.append(TextBlock(type="text", text=f"[refusal: {block.get('refusal', '')}]"))
+        elif btype in ("input_image", "computer_screenshot"):
+            # Image blocks in Responses API — preserve as text reference
+            # (actual images are handled by the screenshot pipeline, not replayed)
+            blocks.append(TextBlock(type="text", text=f"[{btype}]"))
+        else:
+            # Unknown Responses API content type — preserve as text
+            blocks.append(TextBlock(type="text", text=block.get("text", str(block))))
+    return blocks
+
+
+def _append_or_merge(
+    result: list[CanonicalMessage], role: str, blocks: list[ContentBlock]
+) -> None:
+    """Append blocks to the last message if same role, otherwise create new message."""
+    if result and result[-1]["role"] == role:
+        result[-1]["content"].extend(blocks)
+    else:
+        result.append(CanonicalMessage(role=role, content=list(blocks)))
 
 
 def _normalize_content(
@@ -226,6 +387,12 @@ def _normalize_content(
             if sig:
                 tb_thinking["thinkingSignature"] = sig
             blocks.append(tb_thinking)
+
+        elif btype == "compaction_summary":
+            blocks.append(CompactionSummaryBlock(
+                type="compaction_summary",
+                text=block.get("text", ""),
+            ))
 
         else:
             # Unknown block type — preserve as text
@@ -386,6 +553,238 @@ def _ensure_tool_adjacency(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     result.extend(deferred)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Sanitize pipeline (US-OC-039)
+# ---------------------------------------------------------------------------
+
+SYNTHETIC_TOOL_RESULT_CONTENT = (
+    "[compacted — result no longer available]"
+)
+"""Synthetic content for tool results inserted by repair_orphaned_pairs."""
+
+_SKIP_SYNTHESIS_STOP_REASONS = frozenset({"error", "aborted"})
+"""Stop reasons where we skip synthesizing tool results (the call was interrupted)."""
+
+
+def repair_orphaned_pairs(
+    messages: list[CanonicalMessage],
+    *,
+    synthesize: bool = True,
+) -> list[CanonicalMessage]:
+    """Repair orphaned tool call / result pairs in canonical messages.
+
+    Consolidates logic from:
+      - context.py:repair_tool_use_result_pairing (role-based, synthesis + stop_reason)
+      - openai.py:_repair_orphaned_calls (flat items, drop computer_calls)
+
+    Algorithm (3-pass, matching OpenClaw's session-transcript-repair.ts):
+      1. Collect call IDs from assistant messages (FunctionCallBlock/ComputerCallBlock)
+      2. Match ToolResultBlocks by tool_use_id. Drop orphaned results and duplicates.
+      3. Insert synthetic ToolResultBlock for unmatched function_calls (skip if
+         stop_reason is "error"/"aborted"). Drop unmatched computer_calls entirely
+         (can't synthesize valid screenshots).
+
+    Args:
+        messages: Canonical messages to repair.
+        synthesize: If True (default), insert synthetic error results for unmatched
+            function_calls. If False, drop unmatched calls instead (replay mode).
+    """
+    if not messages:
+        return []
+
+    # --- Pass 1: Collect call IDs and result IDs ---
+    call_ids: dict[str, tuple[str, str | None]] = {}  # id → (block_type, stop_reason)
+    result_ids: set[str] = set()
+    has_duplicate_results = False
+    _result_id_counts: dict[str, int] = {}
+
+    for msg in messages:
+        role = msg.get("role", "")
+        stop_reason = msg.get("stop_reason")
+        for block in msg.get("content", []):
+            btype = block.get("type", "")
+            if btype in ("function_call", "computer_call"):
+                bid = block.get("id", "")
+                if bid:
+                    call_ids[bid] = (btype, stop_reason)
+            elif btype == "tool_result":
+                rid = block.get("tool_use_id", "")
+                if rid:
+                    result_ids.add(rid)
+                    _result_id_counts[rid] = _result_id_counts.get(rid, 0) + 1
+                    if _result_id_counts[rid] > 1:
+                        has_duplicate_results = True
+
+    valid_call_id_set = set(call_ids.keys())
+    matched_ids = valid_call_id_set & result_ids
+    orphaned_calls = {
+        cid: info for cid, info in call_ids.items() if cid not in matched_ids
+    }
+    orphaned_results = result_ids - valid_call_id_set
+
+    # Fast path: nothing to repair
+    if not orphaned_calls and not orphaned_results and not has_duplicate_results:
+        return messages
+
+    # --- Pass 2: Filter messages, dropping orphaned/duplicate results ---
+    seen_result_ids: set[str] = set()
+    filtered: list[CanonicalMessage] = []
+
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", [])
+
+        if role == "tool":
+            new_blocks: list[ContentBlock] = []
+            for block in content:
+                if block.get("type") == "tool_result":
+                    rid = block.get("tool_use_id", "")
+                    # Drop orphaned results (no matching call)
+                    if rid and rid in orphaned_results:
+                        continue
+                    # Drop duplicates
+                    if rid in seen_result_ids:
+                        continue
+                    if rid:
+                        seen_result_ids.add(rid)
+                new_blocks.append(block)
+            if new_blocks:
+                new_msg = dict(msg)
+                new_msg["content"] = new_blocks
+                filtered.append(new_msg)
+        elif role == "assistant" and not synthesize:
+            # Drop orphaned calls when not synthesizing (replay mode)
+            new_blocks_a: list[ContentBlock] = []
+            for block in content:
+                btype = block.get("type", "")
+                if btype in ("function_call", "computer_call"):
+                    bid = block.get("id", "")
+                    if bid in orphaned_calls:
+                        continue
+                new_blocks_a.append(block)
+            if new_blocks_a:
+                new_msg = dict(msg)
+                new_msg["content"] = new_blocks_a
+                filtered.append(new_msg)
+        else:
+            filtered.append(msg)
+
+    if not synthesize:
+        return filtered
+
+    # --- Pass 3: Insert synthetic results for unmatched calls ---
+    final: list[CanonicalMessage] = []
+    for msg in filtered:
+        final.append(msg)
+        role = msg.get("role", "")
+        if role != "assistant":
+            continue
+
+        stop_reason = msg.get("stop_reason")
+        synthetic_blocks: list[ContentBlock] = []
+
+        for block in msg.get("content", []):
+            btype = block.get("type", "")
+            if btype not in ("function_call", "computer_call"):
+                continue
+            bid = block.get("id", "")
+            if bid not in orphaned_calls:
+                continue
+
+            call_type, _ = orphaned_calls[bid]
+
+            if call_type == "computer_call":
+                # Can't synthesize valid screenshots — drop by removing from
+                # the assistant message content
+                continue
+
+            if stop_reason in _SKIP_SYNTHESIS_STOP_REASONS:
+                continue
+
+            synthetic_blocks.append(ToolResultBlock(
+                type="tool_result",
+                tool_use_id=bid,
+                content=SYNTHETIC_TOOL_RESULT_CONTENT,
+                is_error=True,
+            ))
+
+        if synthetic_blocks:
+            final.append(CanonicalMessage(
+                role="tool",
+                content=synthetic_blocks,
+            ))
+
+    # Final cleanup: remove orphaned computer_calls from assistant messages
+    cleaned: list[CanonicalMessage] = []
+    for msg in final:
+        role = msg.get("role", "")
+        if role == "assistant":
+            new_blocks_c: list[ContentBlock] = []
+            for block in msg.get("content", []):
+                btype = block.get("type", "")
+                if btype == "computer_call":
+                    bid = block.get("id", "")
+                    if bid in orphaned_calls:
+                        continue
+                new_blocks_c.append(block)
+            if new_blocks_c:
+                new_msg = dict(msg)
+                new_msg["content"] = new_blocks_c
+                cleaned.append(new_msg)
+        else:
+            cleaned.append(msg)
+
+    return cleaned
+
+
+def ensure_valid_ordering(
+    messages: list[CanonicalMessage],
+) -> list[CanonicalMessage]:
+    """Ensure messages don't end with role=assistant.
+
+    Non-prefill models (like Opus 4.6) reject API calls where the last message
+    is from the assistant. Appends a user continuation message if needed.
+    """
+    if not messages:
+        return messages
+    if messages[-1].get("role") == "assistant":
+        messages = list(messages)
+        messages.append(CanonicalMessage(
+            role="user",
+            content=[TextBlock(type="text", text="[Continue from where you left off.]")],
+        ))
+    return messages
+
+
+def sanitize_items(
+    messages: list[CanonicalMessage],
+    target: Literal["openai-responses", "anthropic"],
+) -> list[dict[str, Any]]:
+    """Convert canonical messages to provider-specific format.
+
+    Modeled on OpenClaw's sanitizeSessionHistory — linear pipeline of pure passes:
+      1. repair_orphaned_pairs — fix split call/result pairs
+      2. ensure_valid_ordering — no trailing assistant message
+      3. Format conversion — canonical → target format
+
+    Args:
+        messages: Canonical messages (from normalize_to_canonical).
+        target: Provider format to convert to.
+
+    Returns:
+        Provider-specific messages/items ready for the API.
+    """
+    messages = repair_orphaned_pairs(messages)
+    messages = ensure_valid_ordering(messages)
+
+    if target == "openai-responses":
+        return canonical_to_responses_api(messages)
+    elif target == "anthropic":
+        return canonical_to_anthropic_messages(messages)
+    else:
+        raise ValueError(f"Unknown adapter target: {target}")
 
 
 # ---------------------------------------------------------------------------

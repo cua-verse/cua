@@ -972,7 +972,8 @@
         ],
         "depends": "US-OC-038 (canonical format must exist first)",
         "reference": "../openclaw/src/agents/pi-embedded-runner/google.ts (sanitizeSessionHistory \u2014 multi-pass pipeline with TranscriptPolicy flags)",
-        "pattern": "Model the adapter as a pipeline of passes (like OpenClaw's sanitizeSessionHistory): strip unsupported fields \u2192 convert content block types \u2192 repair orphans \u2192 validate. Each pass is a pure function on the canonical items list."
+        "pattern": "Model the adapter as a pipeline of passes (like OpenClaw's sanitizeSessionHistory): strip unsupported fields \u2192 convert content block types \u2192 repair orphans \u2192 validate. Each pass is a pure function on the canonical items list.",
+        "planFile": "docs/plan/US-OC-039-sanitize-items-pipeline.md"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
@@ -985,8 +986,8 @@
         "Level 2: CONTEXT_WINDOW_OVERRIDE=25000 bash run_magic_tower.sh 50 openai/gpt-5.4 \u2014 compaction + post-compaction works via the new pipeline"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": "Story 2 of 3 for canonical format. The key insight from OpenClaw: sanitizeSessionHistory is a linear pipeline of pure passes. Each pass operates on the same item type. Our adapter follows the same pattern: each pass takes List[CanonicalItem] and returns List[CanonicalItem], with a final to_openai_responses() or to_anthropic_messages() converter at the end. Scope is core pipeline only: repair_orphaned_pairs, ensure_valid_ordering, format conversion. TranscriptPolicy and thinking sanitization passes (drop_thinking_blocks, sanitize_thinking_signatures, downgrade_openai_reasoning) are split out to US-OC-041."
+      "passes": true,
+      "notes": "File: agents/openclaw/canonical.py. Added: normalize_to_canonical flat-item ingestion, repair_orphaned_pairs (consolidated from context.py + openai.py), ensure_valid_ordering, sanitize_items pipeline. Wired into agent_loop.py run() before predict_step and in _compact_in_place. Deleted _normalize_messages_for_gpt54 and _repair_orphaned_calls from openai.py. 45 new tests in test_sanitize_items.py, 579 total pass."
     },
     {
       "id": "US-OC-040",

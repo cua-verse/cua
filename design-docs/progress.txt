@@ -951,3 +951,35 @@
   - The bridge pattern (`canonical_to_responses_api()` called in `_compact_in_place`) allows incremental migration: US-OC-039 will move the conversion into the loops themselves
   - `canonical_to_responses_api` handles computer_call blocks by converting them to text messages (no image data) — matches the existing `_normalize_messages_for_gpt54` behavior that OpenAI validates image data in computer_call_output and rejects placeholders
 ---
+---
+
+## 2026-03-29 - US-OC-039
+- Implemented `sanitize_items()` pipeline in `canonical.py` (US-OC-039):
+  - `repair_orphaned_pairs()` — 3-pass algorithm consolidating repair logic from context.py + openai.py:
+    - Pass 1: collect call IDs and result IDs, detect duplicates
+    - Pass 2: filter messages, dropping orphaned/duplicate results
+    - Pass 3: insert synthetic ToolResultBlock for unmatched function_calls; drop unmatched computer_calls
+    - `synthesize=False` mode for replay (drops orphaned calls instead)
+  - `ensure_valid_ordering()` — appends user continuation message if last message is role=assistant
+  - `sanitize_items(messages, target)` — linear pipeline: repair_orphaned_pairs → ensure_valid_ordering → format conversion
+  - `normalize_to_canonical()` extended to handle flat Responses API items (function_call, computer_call, etc.) via `_is_flat_responses_item` + `_ingest_flat_item`
+  - `_normalize_responses_content()` normalizes Responses API content types (input_text, output_text, etc.) to canonical TextBlock
+  - `_append_or_merge()` helper for grouping consecutive same-role blocks
+- Deleted `_normalize_messages_for_gpt54` and `_repair_orphaned_calls` from `libs/python/agent/agent/loops/openai.py` (superseded by pipeline)
+- Wired `sanitize_items()` into `agent_loop.py _compact_in_place` (replacing the old bridge that called `canonical_to_responses_api` directly)
+- Removed trailing-assistant check from `_build_compacted_items()` (moved to `ensure_valid_ordering()`)
+- Added `compaction_summary` block type handling in `_normalize_content()` (previously fell through to unknown)
+- Deleted `tests/test_normalize_messages_gpt54.py` (covered by new pipeline tests)
+- Added `tests/test_sanitize_items.py` with 45 tests; full suite 579/579 pass
+- Files changed:
+  - submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/canonical.py
+  - submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py
+  - submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py
+  - submodules/cua/libs/python/agent/agent/loops/openai.py
+  - tests/test_sanitize_items.py (new)
+  - tests/test_normalize_messages_gpt54.py (deleted)
+  - prd.json (story passes: true)
+- **Learnings for future iterations:**
+  - `repair_orphaned_pairs` 3-pass algorithm is cleaner than trying to repair in a single pass: collect → filter → synthesize
+  - Flat Responses API items and role-based messages can both be ingested by `normalize_to_canonical()` now — the `_is_flat_responses_item` heuristic (has `type` but no `role`, or `type == "message"`) handles the distinction cleanly
+  - computer_calls from compaction/replay cannot be synthesized (no valid screenshot), so they are dropped rather than producing synthetic outputs — this is the same decision made in OpenClaw
