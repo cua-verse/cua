@@ -413,9 +413,11 @@ class OpenClawComputerAgent(ComputerAgent):
             compaction_result.summary, kept_messages
         )
 
-        # Convert canonical → Responses API format via sanitize pipeline.
-        # Both loops expect Responses API items as input.
-        compacted_items = sanitize_items(canonical_messages, target="openai-responses")
+        # Convert canonical → provider-specific format via sanitize pipeline.
+        from agent.model_config import get_model_config
+
+        model_config = get_model_config(self.model)
+        compacted_items = sanitize_items(canonical_messages, target=model_config.adapter_target)
 
         items.clear()
         items.extend(compacted_items)

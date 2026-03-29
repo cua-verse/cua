@@ -9,9 +9,18 @@ import sys
 from . import loops
 from .agent import ComputerAgent
 from .decorators import register_agent
+from .model_config import ModelConfig, get_model_config, register_model_config
 from .types import AgentResponse, Messages
 
-__all__ = ["register_agent", "ComputerAgent", "Messages", "AgentResponse"]
+__all__ = [
+    "register_agent",
+    "ComputerAgent",
+    "Messages",
+    "AgentResponse",
+    "ModelConfig",
+    "get_model_config",
+    "register_model_config",
+]
 
 __version__ = "0.4.0"
 

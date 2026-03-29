@@ -1012,7 +1012,7 @@
         "Level 2: bash run_magic_tower.sh 15 openai/computer-use-preview \u2014 passes (regression)"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Story 3 of 3. This is the payoff: after this story, adding a new model means adding one ModelConfig entry. The config drives both the adapter pipeline (US-OC-039) and the tool/screenshot handling. Compare to OpenClaw's model.ts which resolves model configs from a provider catalog. Keep the config simple \u2014 a flat dict, not a class hierarchy. The @register_agent decorator system in CUA already does model matching; this story extends it with format metadata rather than replacing it."
     },
     {

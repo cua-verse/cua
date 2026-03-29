@@ -8,7 +8,6 @@ Source: OpenAI computer use docs (https://developers.openai.com/api/docs/guides/
 import asyncio
 import base64
 import json
-import re
 from io import BytesIO
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
@@ -16,21 +15,19 @@ import litellm
 from PIL import Image
 
 from ..decorators import register_agent
+from ..model_config import get_model_config
 from ..types import AgentCapability, AgentResponse, Messages, Tools
-
-
-def _is_gpt54(model: str) -> bool:
-    """Check if the model is GPT 5.4 (uses the newer computer tool format)."""
-    return bool(re.search(r"gpt-5\.4", model, re.IGNORECASE))
 
 
 async def _map_computer_tool_to_openai(computer_handler: Any, model: str) -> Dict[str, Any]:
     """Map a computer tool to the appropriate OpenAI tool schema.
 
+    Uses ModelConfig.tool_schema_type to determine the correct schema.
     GPT 5.4 uses {"type": "computer"} — no display dimensions or environment needed.
     computer-use-preview uses {"type": "computer_use_preview", display_width, display_height, environment}.
     """
-    if _is_gpt54(model):
+    config = get_model_config(model)
+    if config.tool_schema_type == "computer":
         # GPT 5.4: simple schema, model infers dimensions from screenshots
         return {"type": "computer"}
 
@@ -46,7 +43,7 @@ async def _map_computer_tool_to_openai(computer_handler: Any, model: str) -> Dic
         environment = "windows"
 
     return {
-        "type": "computer_use_preview",
+        "type": config.tool_schema_type,
         "display_width": width,
         "display_height": height,
         "environment": environment,
@@ -65,15 +62,6 @@ async def _prepare_tools_for_openai(tool_schemas: List[Dict[str, Any]], model: s
             openai_tools.append({"type": "function", **schema["function"]})
 
     return openai_tools
-
-
-def get_screenshot_output_type(model: str) -> str:
-    """Return the screenshot output type for computer_call_output items.
-
-    GPT 5.4 expects "computer_screenshot" with detail="original".
-    computer-use-preview expects "input_image".
-    """
-    return "computer_screenshot" if _is_gpt54(model) else "input_image"
 
 
 @register_agent(models=r".*(^|/)(computer-use-preview|gpt-5\.4)")
@@ -122,8 +110,8 @@ class OpenAIComputerUseConfig:
         """
         tools = tools or []
 
-        # Set screenshot output type based on model
-        self.screenshot_output_type = get_screenshot_output_type(model)
+        # Set screenshot output type based on model config registry
+        self.screenshot_output_type = get_model_config(model).screenshot_output_type
 
         # Prepare tools for OpenAI API (model-aware)
         openai_tools = await _prepare_tools_for_openai(tools, model)
@@ -220,12 +208,13 @@ Task: Click {instruction}. Output ONLY a click action on the target element.""",
             # Fallback to default dimensions if image parsing fails
             display_width, display_height = 1920, 1080
 
-        # Prepare computer tool for click actions (model-aware)
-        if _is_gpt54(model):
+        # Prepare computer tool for click actions (model-aware via config registry)
+        click_config = get_model_config(model)
+        if click_config.tool_schema_type == "computer":
             computer_tool = {"type": "computer"}
         else:
             computer_tool = {
-                "type": "computer_use_preview",
+                "type": click_config.tool_schema_type,
                 "display_width": display_width,
                 "display_height": display_height,
                 "environment": "windows",
