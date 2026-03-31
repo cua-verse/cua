@@ -876,7 +876,7 @@ def convert_to_responses_api_items(
         # --- List content (content blocks) ---
         if isinstance(content, list):
             if role == "assistant":
-                unnested = _unnest_assistant_blocks(content)
+                unnested = _unnest_assistant_blocks(content, call_type_map)
                 # Record call types for later tool result matching
                 for item in unnested:
                     itype = item.get("type", "")
@@ -948,7 +948,10 @@ def _ensure_tool_adjacency(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
-def _unnest_assistant_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _unnest_assistant_blocks(
+    blocks: list[dict[str, Any]],
+    call_type_map: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     """Unnest an assistant message's content blocks into Responses API items.
 
     Text blocks are collected into a single ``message`` item; structured blocks
@@ -956,6 +959,8 @@ def _unnest_assistant_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any
     structured block is flushed as a separate message item so ordering is
     preserved.
     """
+    if call_type_map is None:
+        call_type_map = {}
     items: list[dict[str, Any]] = []
     pending_text: list[dict[str, Any]] = []
 
@@ -993,10 +998,21 @@ def _unnest_assistant_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any
                     "content": pending_text,
                 })
                 pending_text = []
+            call_id = block.get("id", block.get("call_id", ""))
+            if call_id:
+                call_type_map[call_id] = "computer_call"
+            actions = block.get("actions")
+            if not isinstance(actions, list):
+                action = block.get("action")
+                actions = [action] if isinstance(action, dict) else []
+            action_desc = json.dumps(actions)[:200] if actions else "details unavailable"
             items.append({
-                "type": "computer_call",
-                "call_id": block.get("id", block.get("call_id", "")),
-                "action": block.get("action", {}),
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": f"[computer action: {action_desc}]",
+                }],
             })
 
         else:
@@ -1038,9 +1054,12 @@ def _unnest_tool_blocks(
             call_id = block.get("tool_use_id", block.get("call_id", ""))
             if call_type_map.get(call_id) == "computer_call":
                 items.append({
-                    "type": "computer_call_output",
-                    "call_id": call_id,
-                    "output": "[screenshot from prior turn — no longer available]",
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": f"[computer result: {block.get('content', '')[:200]}]",
+                    }],
                 })
             else:
                 items.append({

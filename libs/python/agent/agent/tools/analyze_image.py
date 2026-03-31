@@ -18,7 +18,7 @@ import base64
 import logging
 import re
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import litellm
 
@@ -98,10 +98,12 @@ class AnalyzeImageTool(BaseTool):
         self,
         interface: "BaseComputerInterface",
         model: str | None = None,
+        thinking_params: Optional[dict[str, Any]] = None,
         cfg: Optional[dict] = None,
     ):
         self.interface = interface
         self.model = model or "anthropic/claude-sonnet-4-20250514"
+        self.thinking_params = thinking_params or {}
         super().__init__(cfg)
 
     @property
@@ -147,15 +149,19 @@ class AnalyzeImageTool(BaseTool):
         params_dict = self._verify_json_format_args(params)
 
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop is not None and loop.is_running():
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     future = executor.submit(
                         asyncio.run, self._execute(params_dict)
                     )
                     result = future.result()
             else:
-                result = loop.run_until_complete(self._execute(params_dict))
+                result = asyncio.run(self._execute(params_dict))
             return result
         except Exception as e:
             logger.error(f"Error in analyze_image: {e}")
@@ -323,6 +329,7 @@ class AnalyzeImageTool(BaseTool):
                 messages=messages,
                 max_tokens=1024,
                 timeout=60,
+                **self.thinking_params,
             )
             return response.choices[0].message.content
         except Exception as e:

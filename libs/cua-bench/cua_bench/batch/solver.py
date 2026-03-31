@@ -113,6 +113,7 @@ def parse_args(argv: list[str]) -> dict:
         "thinking_level": None,
         "flush_thinking_level": None,
         "compaction_thinking_level": None,
+        "vision_thinking_level": None,
     }
 
     if len(argv) < 2:
@@ -149,6 +150,8 @@ def parse_args(argv: list[str]) -> dict:
             args["flush_thinking_level"] = argv[i + 1]
         elif arg == "--compaction-thinking-level" and i + 1 < len(argv):
             args["compaction_thinking_level"] = argv[i + 1]
+        elif arg == "--vision-thinking-level" and i + 1 < len(argv):
+            args["vision_thinking_level"] = argv[i + 1]
 
     return args
 
@@ -541,6 +544,12 @@ def initialize_agent(args, agent_class):
         agent_kwargs["summary_model"] = args["summary_model"]
     if args.get("thinking_level"):
         agent_kwargs["thinking_level"] = args["thinking_level"]
+    if args.get("flush_thinking_level"):
+        agent_kwargs["flush_thinking_level"] = args["flush_thinking_level"]
+    if args.get("compaction_thinking_level"):
+        agent_kwargs["compaction_thinking_level"] = args["compaction_thinking_level"]
+    if args.get("vision_thinking_level"):
+        agent_kwargs["vision_thinking_level"] = args["vision_thinking_level"]
     return agent_class(**agent_kwargs)
 
 

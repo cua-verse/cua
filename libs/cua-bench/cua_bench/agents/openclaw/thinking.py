@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 
 class ThinkLevel(str, Enum):
@@ -55,23 +55,36 @@ class ThinkingConfig:
         level: Thinking level for the main agent loop.
         flush_level: Thinking level for memory flush LLM calls (US-OC-020).
         compaction_level: Thinking level for compaction summarization calls (US-OC-020).
+        vision_level: Thinking level for vision helper calls. Defaults to off unless
+            explicitly configured, so VLM analysis does not opt into helper thinking
+            by inheritance.
     """
 
     level: ThinkLevel = ThinkLevel.OFF
     flush_level: ThinkLevel = ThinkLevel.OFF
     compaction_level: ThinkLevel = ThinkLevel.OFF
+    vision_level: ThinkLevel = ThinkLevel.OFF
 
     def to_api_params(self, model: str) -> dict[str, Any]:
         """Return provider-specific kwargs for the main agent loop."""
-        return resolve_thinking_params(self.level, model)
+        return resolve_thinking_params(self.level, model, transport="responses")
 
     def flush_params(self, model: str) -> dict[str, Any]:
-        """Return provider-specific kwargs for memory flush calls."""
-        return resolve_thinking_params(self.flush_level, model)
+        """Return provider-specific kwargs for memory flush helper calls."""
+        transport: Literal["responses", "chat"] = (
+            "responses" if _is_openai_model(model) else "chat"
+        )
+        return resolve_thinking_params(self.flush_level, model, transport=transport)
 
     def compaction_params(self, model: str) -> dict[str, Any]:
         """Return provider-specific kwargs for compaction summarization calls."""
-        return resolve_thinking_params(self.compaction_level, model)
+        return resolve_thinking_params(
+            self.compaction_level, model, transport="chat"
+        )
+
+    def vision_params(self, model: str) -> dict[str, Any]:
+        """Return provider-specific kwargs for vision helper calls."""
+        return resolve_thinking_params(self.vision_level, model, transport="chat")
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +172,12 @@ _GEMINI_LEVELS: dict[ThinkLevel, str] = {
 }
 
 
-def resolve_thinking_params(level: ThinkLevel, model: str) -> dict[str, Any]:
+def resolve_thinking_params(
+    level: ThinkLevel,
+    model: str,
+    *,
+    transport: Literal["responses", "chat"] = "responses",
+) -> dict[str, Any]:
     """Map ThinkLevel to provider-specific API params.
 
     Based on OpenClaw's extra-params.ts provider mappings. Returns a dict
@@ -168,6 +186,9 @@ def resolve_thinking_params(level: ThinkLevel, model: str) -> dict[str, Any]:
     Args:
         level: Desired thinking level.
         model: litellm model string (e.g. "anthropic/claude-sonnet-4-20250514").
+        transport: Call transport. ``responses`` is the main OpenAI runtime;
+            ``chat`` covers helper ``litellm.acompletion()`` paths such as
+            memory flush and compaction summarization.
 
     Returns:
         Dict of provider-specific kwargs, or empty dict if level is OFF.
@@ -182,8 +203,8 @@ def resolve_thinking_params(level: ThinkLevel, model: str) -> dict[str, Any]:
         return _anthropic_params(level)
 
     # OpenAI models
-    if "openai/" in model_lower or "gpt" in model_lower or model_lower.startswith("o"):
-        return _openai_params(level)
+    if _is_openai_model(model_lower):
+        return _openai_params(level, transport=transport)
 
     # Gemini / Google models
     if "gemini" in model_lower or "google" in model_lower or "vertex" in model_lower:
@@ -199,10 +220,31 @@ def _anthropic_params(level: ThinkLevel) -> dict[str, Any]:
     return {"thinking": {"type": "enabled", "budget_tokens": budget}}
 
 
-def _openai_params(level: ThinkLevel) -> dict[str, Any]:
-    """OpenAI: reasoning={effort: low|medium|high, summary: concise}."""
+def _openai_params(
+    level: ThinkLevel,
+    *,
+    transport: Literal["responses", "chat"] = "responses",
+) -> dict[str, Any]:
+    """OpenAI param mapping by transport.
+
+    The main agent loop uses the Responses API, which accepts ``reasoning``.
+    Helper paths use ``litellm.acompletion()``, which accepts LiteLLM's
+    ``reasoning_effort`` kwarg instead of Responses-style ``reasoning``.
+    """
     effort = _OPENAI_EFFORT.get(level, "medium")
+    if transport != "responses":
+        return {"reasoning_effort": effort}
     return {"reasoning": {"effort": effort, "summary": "concise"}}
+
+
+def _is_openai_model(model: str) -> bool:
+    """Heuristic for OpenAI-family models used by the harness."""
+    model_lower = model.lower()
+    return (
+        "openai/" in model_lower
+        or "gpt" in model_lower
+        or model_lower.startswith("o")
+    )
 
 
 def _gemini_params(level: ThinkLevel) -> dict[str, Any]:

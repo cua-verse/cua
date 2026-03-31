@@ -51,16 +51,23 @@ class OpenClawAgent(BaseAgent):
             level = resolve_thinking_default(self.model)
         flush_level_str = kwargs.get("flush_thinking_level")
         compaction_level_str = kwargs.get("compaction_thinking_level")
+        vision_level_str = kwargs.get("vision_thinking_level")
         flush_level = ThinkLevel(flush_level_str) if flush_level_str is not None else level
         compaction_level = (
             ThinkLevel(compaction_level_str)
             if compaction_level_str is not None
             else level
         )
+        vision_level = (
+            ThinkLevel(vision_level_str)
+            if vision_level_str is not None
+            else ThinkLevel.OFF
+        )
         self.thinking_config = ThinkingConfig(
             level=level,
             flush_level=flush_level,
             compaction_level=compaction_level,
+            vision_level=vision_level,
         )
 
     @staticmethod
@@ -150,7 +157,12 @@ class OpenClawAgent(BaseAgent):
                 print(f"[Replay] Loaded {len(replay_messages)} items from prior transcript")
 
         # Tool assembly (US-OC-007)
-        tools = build_tools(session, memory_store, summary_model=self.summary_model)
+        tools = build_tools(
+            session,
+            memory_store,
+            summary_model=self.summary_model,
+            vision_thinking_params=self.thinking_config.vision_params(self.summary_model),
+        )
         tool_summaries = get_tool_summaries(tools)
         agents_md = (Path(__file__).parent / "openclaw" / "AGENTS.md").read_text()
 
@@ -228,6 +240,8 @@ class OpenClawAgent(BaseAgent):
             print("  Flush thinking level:", self.thinking_config.flush_level.value)
         if self.thinking_config.compaction_level != self.thinking_config.level:
             print("  Compaction thinking level:", self.thinking_config.compaction_level.value)
+        if self.thinking_config.vision_level.value != "off":
+            print("  Vision thinking level:", self.thinking_config.vision_level.value)
 
         # Single-loop execution (US-OC-017)
         # Compaction happens in-place inside OpenClawComputerAgent.run() — no

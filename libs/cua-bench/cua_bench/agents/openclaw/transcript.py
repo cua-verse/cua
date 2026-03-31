@@ -71,9 +71,20 @@ def group_step_output(
     for item in output_items:
         item_type = item.get("type")
         if item_type == "message":
-            for block in item.get("content", []):
+            content = item.get("content", [])
+            role = item.get("role")
+            if isinstance(content, str):
+                if role == "assistant" and content:
+                    assistant_content.append({"type": "text", "text": content})
+                continue
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
                 if block.get("text"):
-                    assistant_content.append({"type": "text", "text": block["text"]})
+                    if role != "user":
+                        assistant_content.append({"type": "text", "text": block["text"]})
                 elif block.get("type") == "thinking" and block.get("thinking"):
                     thinking_block = {
                         "type": "thinking",

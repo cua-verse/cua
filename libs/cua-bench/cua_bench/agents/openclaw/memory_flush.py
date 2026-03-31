@@ -93,26 +93,52 @@ async def run_memory_flush(
         {"role": "user", "content": flush_user_content},
     ]
 
-    print(f"[MemoryFlush] Running pre-compaction memory flush turn ({len(conversation_text)} chars context)")
-    try:
-        response = await litellm.acompletion(
+    async def _call_flush_model_chat(params: dict[str, Any] | None) -> Any:
+        return await litellm.acompletion(
             model=summary_model,
             messages=messages,
             tools=[memory_write_tool],
             max_tokens=1024,
             temperature=1.0,
-            **(thinking_params or {}),
+            **(params or {}),
         )
 
-        choice = response.choices[0]
-        reply_content = choice.message.content or ""
+    async def _call_flush_model_responses(params: dict[str, Any] | None) -> Any:
+        return await litellm.aresponses(
+            model=summary_model,
+            input=messages,
+            tools=[_to_responses_function_tool(memory_write_tool)],
+            max_tokens=1024,
+            temperature=1.0,
+            **(params or {}),
+        )
+
+    print(f"[MemoryFlush] Running pre-compaction memory flush turn ({len(conversation_text)} chars context)")
+    try:
+        if _is_openai_model(summary_model):
+            response = await _call_flush_model_responses(thinking_params)
+            response_payload = response.model_dump()
+            reply_content = _extract_responses_text(response_payload.get("output", []))
+            tool_calls = _extract_responses_tool_calls(response_payload.get("output", []))
+        else:
+            response = await _call_flush_model_chat(thinking_params)
+            choice = response.choices[0]
+            reply_content = choice.message.content or ""
+            tool_calls = [
+                {
+                    "name": tool_call.function.name,
+                    "arguments": tool_call.function.arguments,
+                }
+                for tool_call in (choice.message.tool_calls or [])
+            ]
 
         # Handle tool calls — the model may call memory_write
-        if choice.message.tool_calls:
-            for tool_call in choice.message.tool_calls:
-                if tool_call.function.name == "memory_write":
+        if tool_calls:
+            for tool_call in tool_calls:
+                if tool_call.get("name") == "memory_write":
                     try:
-                        args = _json.loads(tool_call.function.arguments)
+                        raw_arguments = tool_call.get("arguments", "{}")
+                        args = raw_arguments if isinstance(raw_arguments, dict) else _json.loads(raw_arguments)
                         content = args.get("content", "")
                         target = args.get("target", "session")
                         if content.strip():
@@ -145,6 +171,65 @@ async def run_memory_flush(
         print(f"[MemoryFlush] Failed (non-fatal): {e}")
         # Record flush even on failure to prevent retry loops
         session_mgr.record_memory_flush()
+
+
+def _is_openai_model(model: str) -> bool:
+    model_lower = model.lower()
+    return (
+        "openai/" in model_lower
+        or "gpt" in model_lower
+        or model_lower.startswith("o")
+    )
+
+
+def _to_responses_function_tool(tool: dict[str, Any]) -> dict[str, Any]:
+    """Convert chat-completions function schema to Responses function tool format."""
+    function = tool.get("function", {})
+    return {"type": "function", **function}
+
+
+def _extract_responses_text(output_items: Any) -> str:
+    """Extract assistant text from a Responses API output list."""
+    if not isinstance(output_items, list):
+        return ""
+
+    parts: list[str] = []
+    for item in output_items:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        content = item.get("content", [])
+        if isinstance(content, str):
+            if content:
+                parts.append(content)
+            continue
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") in {"output_text", "text"} and block.get("text"):
+                parts.append(block["text"])
+    return "\n".join(parts).strip()
+
+
+def _extract_responses_tool_calls(output_items: Any) -> list[dict[str, Any]]:
+    """Extract function tool calls from a Responses API output list."""
+    if not isinstance(output_items, list):
+        return []
+
+    tool_calls: list[dict[str, Any]] = []
+    for item in output_items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "function_call":
+            continue
+        tool_calls.append(
+            {
+                "name": item.get("name", ""),
+                "arguments": item.get("arguments", "{}"),
+            }
+        )
+    return tool_calls
 
 
 def _serialize_flush_context(session_mgr: SessionManager) -> str:

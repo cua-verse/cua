@@ -34,7 +34,7 @@ from agent.agent import ComputerAgent, get_json, get_output_call_ids
 from agent.responses import replace_failed_computer_calls_with_function_calls
 from litellm.responses.utils import Usage
 
-from .canonical import sanitize_items
+from .canonical import normalize_to_canonical, sanitize_items
 from .context import ContextOverflowCallback, compact_messages, is_context_overflow_error
 from .memory import MemoryStore
 from .memory_flush import run_memory_flush
@@ -160,6 +160,7 @@ class OpenClawComputerAgent(ComputerAgent):
 
             combined = items + new_items
             combined = replace_failed_computer_calls_with_function_calls(combined)
+            combined = self._sanitize_runtime_messages(combined)
             preprocessed = await self._on_llm_start(combined)
 
             # PRE-API memory flush (US-OC-028) — runs after _on_llm_start updates
@@ -206,7 +207,7 @@ class OpenClawComputerAgent(ComputerAgent):
 
             yield result
 
-            # Log step to transcript (US-OC-028 — moved from perform_task)
+            # Log model-emitted assistant content/tool calls to transcript.
             self._log_step_to_transcript(result)
 
             new_items += result.get("output", [])
@@ -217,6 +218,8 @@ class OpenClawComputerAgent(ComputerAgent):
                     item, self.computer_handler, ignore_call_ids=output_call_ids
                 )
                 new_items += partial_items
+                if partial_items:
+                    self._log_partial_items_to_transcript(partial_items)
                 if partial_items:
                     yield {
                         "output": partial_items,
@@ -358,6 +361,38 @@ class OpenClawComputerAgent(ComputerAgent):
         if tool_results:
             self.session_mgr.append_message("tool", tool_results)
 
+    def _log_partial_items_to_transcript(
+        self,
+        output_items: List[Dict[str, Any]],
+    ) -> None:
+        """Log tool execution outputs emitted after `_handle_item()`.
+
+        The main model result logs assistant text/tool calls. Actual tool outputs
+        (`function_call_output`, `computer_call_output`) are yielded later via
+        `partial_items`, so they must be appended separately or the transcript
+        loses call/result pairing.
+        """
+        from .transcript import group_step_output
+
+        assistant_content, tool_results = group_step_output(
+            output_items, self.trajectory_dir
+        )
+
+        # Post-tool helper messages can inject a local screenshot path as a user
+        # message. Persist that as user content instead of misclassifying it as
+        # assistant text.
+        for item in output_items:
+            if item.get("type") != "message" or item.get("role") != "user":
+                continue
+            content = item.get("content", "")
+            if isinstance(content, str):
+                self.session_mgr.append_message("user", content)
+
+        if assistant_content:
+            self.session_mgr.append_message("assistant", assistant_content)
+        if tool_results:
+            self.session_mgr.append_message("tool", tool_results)
+
     async def _compact_in_place(
         self,
         items: List[Dict[str, Any]],
@@ -413,11 +448,9 @@ class OpenClawComputerAgent(ComputerAgent):
             compaction_result.summary, kept_messages
         )
 
-        # Convert canonical → provider-specific format via sanitize pipeline.
-        from agent.model_config import get_model_config
-
-        model_config = get_model_config(self.model)
-        compacted_items = sanitize_items(canonical_messages, target=model_config.adapter_target)
+        # Convert canonical → provider-specific format via the same model-aware
+        # sanitize pipeline used on the normal per-turn send path.
+        compacted_items = sanitize_items(canonical_messages, model=self.model)
 
         items.clear()
         items.extend(compacted_items)
@@ -434,6 +467,31 @@ class OpenClawComputerAgent(ComputerAgent):
             f"[Compaction] In-place compaction #{self._compaction_count} complete "
             f"({compaction_result.tokens_before}->~{len(compacted_items)} items)"
         )
+
+    def _sanitize_runtime_messages(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Normalize and sanitize outgoing history using the live model policy.
+
+        This mirrors OpenClaw's runtime send-path invariant: policy resolves
+        from the actual model, not just the adapter target, and the same
+        sanitize pipeline applies on normal turns and compaction rebuilds.
+        """
+        # Live in-run history is already in provider-native flat item format for
+        # OpenAI/Responses loops. Re-sanitizing that stream would downgrade
+        # computer_call/computer_call_output into text and cause the model to
+        # repeatedly request fresh screenshots.
+        if any(
+            isinstance(message, dict)
+            and "type" in message
+            and "role" not in message
+            for message in messages
+        ):
+            return messages
+
+        canonical_messages = normalize_to_canonical(messages)
+        return sanitize_items(canonical_messages, model=self.model)
 
     def _build_compacted_items(
         self, summary: str, kept_messages: List[Dict[str, Any]]

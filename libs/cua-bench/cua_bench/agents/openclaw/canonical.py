@@ -155,6 +155,15 @@ class TranscriptPolicy:
     Reference: openclaw/src/agents/transcript-policy.ts
     """
 
+    sanitize_mode: Literal["full", "images-only"] = "images-only"
+    """OpenClaw-style sanitize intent.
+
+    ``images-only`` keeps non-image content untouched unless an explicit pass
+    below is enabled. ``full`` indicates the provider needs broader transcript
+    normalization. Current AgentHLE passes are still flag-driven, but runtime
+    resolution should preserve this intent for parity with OpenClaw.
+    """
+
     drop_thinking_blocks: bool = False
     """Strip type="thinking" content blocks from assistant messages.
     Needed for providers that reject replayed thinking blocks (e.g. Anthropic
@@ -193,6 +202,7 @@ def get_transcript_policy(model: str) -> TranscriptPolicy:
 
     if "anthropic/" in model_lower or "claude" in model_lower:
         return TranscriptPolicy(
+            sanitize_mode="full",
             drop_thinking_blocks=True,
             sanitize_thinking_signatures=False,
             downgrade_openai_reasoning=False,
@@ -206,6 +216,7 @@ def get_transcript_policy(model: str) -> TranscriptPolicy:
         or model_lower.startswith("o")
     ):
         return TranscriptPolicy(
+            sanitize_mode="images-only",
             drop_thinking_blocks=False,
             sanitize_thinking_signatures=False,
             downgrade_openai_reasoning=True,
@@ -219,6 +230,7 @@ def get_transcript_policy(model: str) -> TranscriptPolicy:
         or "vertex" in model_lower
     ):
         return TranscriptPolicy(
+            sanitize_mode="full",
             drop_thinking_blocks=False,
             sanitize_thinking_signatures=True,
             downgrade_openai_reasoning=False,
@@ -1070,8 +1082,9 @@ def downgrade_openai_reasoning(
 
 def sanitize_items(
     messages: list[CanonicalMessage],
-    target: Literal["openai-responses", "anthropic"],
+    target: Literal["openai-responses", "anthropic"] | None = None,
     *,
+    model: str | None = None,
     policy: TranscriptPolicy | None = None,
 ) -> list[dict[str, Any]]:
     """Convert canonical messages to provider-specific format.
@@ -1086,21 +1099,37 @@ def sanitize_items(
 
     Args:
         messages: Canonical messages (from normalize_to_canonical).
-        target: Provider format to convert to.
-        policy: TranscriptPolicy controlling which passes run. If None,
-            a default policy is resolved from the target format.
+        target: Provider format to convert to. If omitted, resolves from the
+            model registry.
+        model: Optional live model string. When provided and ``policy`` is not,
+            policy resolves via :func:`get_transcript_policy` instead of using
+            target-only defaults.
+        policy: TranscriptPolicy controlling which passes run. If None, a
+            model-resolved or target-default policy is used.
 
     Returns:
         Provider-specific messages/items ready for the API.
     """
+    if target is None:
+        if model is None:
+            raise ValueError("sanitize_items() requires target or model")
+        from agent.model_config import get_model_config
+
+        target = get_model_config(model).adapter_target
+
+    if policy is None and model is not None:
+        policy = get_transcript_policy(model)
+
     if policy is None:
         if target == "anthropic":
             policy = TranscriptPolicy(
+                sanitize_mode="full",
                 drop_thinking_blocks=True,
                 validate_anthropic_turns=True,
             )
         elif target == "openai-responses":
             policy = TranscriptPolicy(
+                sanitize_mode="images-only",
                 downgrade_openai_reasoning=True,
                 validate_anthropic_turns=False,
             )
