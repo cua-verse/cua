@@ -2,7 +2,11 @@
 
 import asyncio
 import base64
+import json
+import os
 import sys
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List
 
@@ -32,6 +36,28 @@ def _is_retryable_api_error(exc: BaseException) -> bool:
         pass
     msg = str(exc).lower()
     return any(k in msg for k in ("timeout", "rate limit", "503", "502", "429", "connection"))
+
+
+def _event_log_path() -> Path | None:
+    raw = os.environ.get("AGENTHLE_EVENT_LOG_PATH")
+    return Path(raw) if raw else None
+
+
+def _emit_agenthle_event(event: str, **fields: Any) -> None:
+    path = _event_log_path()
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ts": datetime.now(UTC).isoformat(),
+        "component": "cua_agent",
+        "event": event,
+        "run_id": os.environ.get("AGENTHLE_RUN_ID"),
+        "variant_index": os.environ.get("AGENTHLE_VARIANT_INDEX"),
+        **fields,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
 
 if TYPE_CHECKING:
@@ -82,12 +108,20 @@ class CuaAgent(BaseAgent):
         # Screenshot function (required)
         async def screenshot():
             """Take a screenshot and return as base64 string."""
+            started = time.perf_counter()
             screenshot_bytes = await session.screenshot()
+            _emit_agenthle_event(
+                "computer_tool_completed",
+                tool="screenshot",
+                duration_s=time.perf_counter() - started,
+                bytes=len(screenshot_bytes),
+            )
             return base64.b64encode(screenshot_bytes).decode("utf-8")
 
         # Click function
         async def click(x: int, y: int, button: str = "left"):
             """Click at coordinates with specified button."""
+            started = time.perf_counter()
             if button == "left":
                 action = ClickAction(x=x, y=y)
             elif button == "right":
@@ -97,37 +131,76 @@ class CuaAgent(BaseAgent):
             else:
                 raise ValueError(f"Unknown button type: {button}")
             await session.execute_action(action)
+            _emit_agenthle_event(
+                "computer_tool_completed",
+                tool="click",
+                button=button,
+                x=x,
+                y=y,
+                duration_s=time.perf_counter() - started,
+            )
 
         # Double click function
         async def double_click(x: int, y: int):
             """Double click at coordinates."""
+            started = time.perf_counter()
             action = DoubleClickAction(x=x, y=y)
             await session.execute_action(action)
+            _emit_agenthle_event(
+                "computer_tool_completed",
+                tool="double_click",
+                x=x,
+                y=y,
+                duration_s=time.perf_counter() - started,
+            )
 
         # Type function
         async def type_text(text: str):
             """Type text."""
+            started = time.perf_counter()
             action = TypeAction(text=text)
             await session.execute_action(action)
+            _emit_agenthle_event(
+                "computer_tool_completed",
+                tool="type",
+                text_length=len(text),
+                duration_s=time.perf_counter() - started,
+            )
 
         # Keypress function
         async def keypress(keys):
             """Press key combination."""
+            started = time.perf_counter()
             if isinstance(keys, str):
                 action = KeyAction(key=keys)
             else:
                 action = HotkeyAction(keys=list(keys))
             await session.execute_action(action)
+            _emit_agenthle_event(
+                "computer_tool_completed",
+                tool="keypress",
+                keys=keys,
+                duration_s=time.perf_counter() - started,
+            )
 
         # Move function
         async def move(x: int, y: int):
             """Move cursor to coordinates."""
+            started = time.perf_counter()
             action = MoveToAction(x=x, y=y)
             await session.execute_action(action)
+            _emit_agenthle_event(
+                "computer_tool_completed",
+                tool="move",
+                x=x,
+                y=y,
+                duration_s=time.perf_counter() - started,
+            )
 
         # Scroll function
         async def scroll(x: int, y: int, scroll_x: int, scroll_y: int):
             """Scroll at coordinates."""
+            started = time.perf_counter()
             if scroll_y < 0:
                 direction = "up"
                 amount = abs(scroll_y)
@@ -136,22 +209,45 @@ class CuaAgent(BaseAgent):
                 amount = abs(scroll_y)
             action = ScrollAction(direction=direction, amount=amount)
             await session.execute_action(action)
+            _emit_agenthle_event(
+                "computer_tool_completed",
+                tool="scroll",
+                x=x,
+                y=y,
+                scroll_x=scroll_x,
+                scroll_y=scroll_y,
+                duration_s=time.perf_counter() - started,
+            )
 
         # Drag function
         async def drag(path: List[Dict[str, int]]):
             """Drag along specified path."""
+            started = time.perf_counter()
             if len(path) < 2:
                 raise ValueError("Path must have at least 2 points")
             start = path[0]
             end = path[-1]
             action = DragAction(from_x=start["x"], from_y=start["y"], to_x=end["x"], to_y=end["y"])
             await session.execute_action(action)
+            _emit_agenthle_event(
+                "computer_tool_completed",
+                tool="drag",
+                points=len(path),
+                duration_s=time.perf_counter() - started,
+            )
 
         # Wait function
         async def wait(ms: int = 1000):
             """Wait for specified milliseconds."""
+            started = time.perf_counter()
             action = WaitAction(seconds=ms / 1000.0)
             await session.execute_action(action)
+            _emit_agenthle_event(
+                "computer_tool_completed",
+                tool="wait",
+                ms=ms,
+                duration_s=time.perf_counter() - started,
+            )
 
         # Get dimensions
         async def get_dimensions():
@@ -251,13 +347,26 @@ class CuaAgent(BaseAgent):
             try:
                 step = 0
                 task_completed = False
-
-                async for result in agent.run(instruction):
+                stream = agent.run(instruction).__aiter__()
+                while True:
+                    turn_started = time.perf_counter()
+                    try:
+                        result = await stream.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    turn_duration = time.perf_counter() - turn_started
                     sys.stdout.flush()  # Flush output
 
                     step += 1
                     for k in total_usage:
                         total_usage[k] += result["usage"].get(k, 0)
+                    _emit_agenthle_event(
+                        "agent_turn_completed",
+                        step=step,
+                        model=self.model,
+                        duration_s=turn_duration,
+                        usage=result["usage"],
+                    )
 
                     # Record agent step to tracer
                     if tracer:

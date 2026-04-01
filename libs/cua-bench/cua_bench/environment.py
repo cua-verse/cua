@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import inspect
+import json
+import os
 import time
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Literal, Optional, Tuple
 
@@ -33,6 +36,28 @@ async def _call_function(func, *args, **kwargs):
         return await result
     else:
         return result
+
+
+def _event_log_path() -> Optional[Path]:
+    raw = os.environ.get("AGENTHLE_EVENT_LOG_PATH")
+    return Path(raw) if raw else None
+
+
+def _emit_agenthle_event(event: str, **fields: Any) -> None:
+    path = _event_log_path()
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ts": datetime.now(UTC).isoformat(),
+        "component": "native_runtime",
+        "event": event,
+        "run_id": os.environ.get("AGENTHLE_RUN_ID"),
+        "variant_index": os.environ.get("AGENTHLE_VARIANT_INDEX"),
+        **fields,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
 
 class MaxStepsExceeded(Exception):
@@ -223,7 +248,9 @@ class Environment:
             )
 
         # Record reset event
+        reset_started = time.perf_counter()
         screenshot = await self.session.screenshot()
+        reset_screenshot_s = time.perf_counter() - reset_started
         if self.tracing is not None:
             # Try to capture a session snapshot of windows/state
             try:
@@ -244,6 +271,12 @@ class Environment:
                 },
                 [screenshot],
             )
+        _emit_agenthle_event(
+            "env_reset_completed",
+            task=repr(self.current_task),
+            screenshot_s=reset_screenshot_s,
+            total_s=time.perf_counter() - reset_started,
+        )
 
         return screenshot, self.current_task
 
@@ -261,8 +294,12 @@ class Environment:
             raise MaxStepsExceeded("Max steps exceeded")
 
         # record step:before
+        step_started = time.perf_counter()
+        before_screenshot_s = None
         if self.tracing is not None and dry_run in (False, "before"):
+            before_started = time.perf_counter()
             before_screenshot = await self.session.screenshot()
+            before_screenshot_s = time.perf_counter() - before_started
             try:
                 before_snapshot = await self.session.get_snapshot()  # type: ignore[attr-defined]
                 before_snapshot_payload = asdict(before_snapshot)
@@ -283,11 +320,14 @@ class Environment:
                 return before_screenshot
 
         # execute high-level action via session
+        action_s = None
         if not dry_run:
             if self.print_actions:
                 print(f"Executing action: {action}")
             try:
+                action_started = time.perf_counter()
                 await self.session.execute_action(action)
+                action_s = time.perf_counter() - action_started
             except Exception as e:
                 # Track step failure
                 if _telemetry_available:
@@ -302,7 +342,9 @@ class Environment:
                 raise
 
         # take screenshot, record trace event, and return
+        after_started = time.perf_counter()
         screenshot = await self.session.screenshot()
+        after_screenshot_s = time.perf_counter() - after_started
         if self.tracing is not None and dry_run in (False, "after"):
             try:
                 snapshot = await self.session.get_snapshot()  # type: ignore[attr-defined]
@@ -323,6 +365,16 @@ class Environment:
 
         # Increment step counter
         self.step_count += 1
+        _emit_agenthle_event(
+            "env_step_completed",
+            step_index=self.step_count,
+            action=repr(action),
+            dry_run=dry_run,
+            before_screenshot_s=before_screenshot_s,
+            action_s=action_s,
+            after_screenshot_s=after_screenshot_s,
+            step_total_s=time.perf_counter() - step_started,
+        )
 
         return screenshot
 

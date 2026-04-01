@@ -820,6 +820,42 @@ class RemoteDesktopSession:
         await self._ensure_computer()
         return await self.interface.list_dir(path)
 
+    async def exists(self, path: str) -> bool:
+        """Check if a file or directory exists.
+
+        AgentHLE tasks historically use `session.exists(...)` rather than the
+        lower-level file/directory split exposed by cua-computer.
+        """
+        await self._ensure_computer()
+        if await self.interface.file_exists(path):
+            return True
+        return await self.interface.directory_exists(path)
+
+    async def makedirs(self, path: str) -> None:
+        """Create a directory in the remote environment."""
+        await self._ensure_computer()
+        await self.interface.create_dir(path)
+
+    async def remove_file(self, path: str) -> None:
+        """Delete a file or directory from the remote environment.
+
+        Tasks often use `remove_file()` for both files and directories, so keep
+        the fallback recursive delete behavior that the external runner already
+        relies on.
+        """
+        await self._ensure_computer()
+        try:
+            await self.interface.delete_file(path)
+            return
+        except Exception:
+            pass
+
+        escaped_path = path.replace("'", "''")
+        await self.run_command(
+            f'powershell -Command "Remove-Item -Path \'{escaped_path}\' -Recurse -Force -ErrorAction SilentlyContinue"',
+            check=False,
+        )
+
     async def run_command(
         self,
         command: str,
