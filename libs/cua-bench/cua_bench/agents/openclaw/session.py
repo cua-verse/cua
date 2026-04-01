@@ -565,6 +565,33 @@ _THINKING_BLOCK_RE = re.compile(r"<THINKING>.*?</THINKING>", re.DOTALL)
 _BASE64_IMAGE_RE = re.compile(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]{100,}")
 
 
+def _get_openai_reasoning_signature(value: Any) -> dict[str, str] | None:
+    """Parse a persisted OpenAI thinkingSignature back into id/type metadata."""
+    if not value:
+        return None
+    candidate = None
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if not (trimmed.startswith("{") and trimmed.endswith("}")):
+            return None
+        try:
+            candidate = json.loads(trimmed)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    elif isinstance(value, dict):
+        candidate = value
+    else:
+        return None
+
+    if not isinstance(candidate, dict):
+        return None
+    item_id = candidate.get("id")
+    item_type = candidate.get("type")
+    if not isinstance(item_id, str) or not isinstance(item_type, str):
+        return None
+    return {"id": item_id, "type": item_type}
+
+
 def build_replay_messages(entries: list[TranscriptEntry]) -> list[dict[str, Any]]:
     """Convert transcript entries into API message dicts for replay.
 
@@ -1013,6 +1040,29 @@ def _unnest_assistant_blocks(
                     "type": "output_text",
                     "text": f"[computer action: {action_desc}]",
                 }],
+            })
+
+        elif btype == "thinking":
+            signature = _get_openai_reasoning_signature(block.get("thinkingSignature"))
+            if signature is None:
+                continue
+            if pending_text:
+                items.append({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": pending_text,
+                })
+                pending_text = []
+            summary = []
+            if block.get("thinking"):
+                summary = [{
+                    "type": "summary_text",
+                    "text": block.get("thinking", ""),
+                }]
+            items.append({
+                "type": signature["type"],
+                "id": signature["id"],
+                "summary": summary,
             })
 
         else:

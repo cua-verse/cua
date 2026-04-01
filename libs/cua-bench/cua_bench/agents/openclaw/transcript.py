@@ -9,6 +9,7 @@ Reference:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,21 @@ def _extract_reasoning_text(item: dict[str, Any]) -> str:
             return "\n".join(parts)
     reasoning = item.get("reasoning", "")
     return reasoning if isinstance(reasoning, str) else ""
+
+
+def _extract_reasoning_signature(item: dict[str, Any]) -> str | None:
+    """Build an OpenClaw-style thinkingSignature for a Responses reasoning item."""
+    signature = item.get("thinkingSignature")
+    if isinstance(signature, str) and signature.strip():
+        return signature
+
+    item_id = item.get("id")
+    item_type = item.get("type")
+    if not isinstance(item_id, str) or not item_id.startswith("rs_"):
+        return None
+    if not isinstance(item_type, str) or not item_type.startswith("reasoning"):
+        return None
+    return json.dumps({"id": item_id, "type": item_type}, separators=(",", ":"))
 
 
 def _find_latest_screenshot(trajectory_dir: Path | None) -> str:
@@ -85,24 +101,28 @@ def group_step_output(
                 if block.get("text"):
                     if role != "user":
                         assistant_content.append({"type": "text", "text": block["text"]})
-                elif block.get("type") == "thinking" and block.get("thinking"):
+                elif block.get("type") == "thinking":
+                    signature = block.get("thinkingSignature")
+                    if not block.get("thinking") and signature is None:
+                        continue
                     thinking_block = {
                         "type": "thinking",
-                        "thinking": block["thinking"],
+                        "thinking": block.get("thinking", ""),
                     }
                     if block.get("id"):
                         thinking_block["id"] = block["id"]
-                    if block.get("thinkingSignature") is not None:
-                        thinking_block["thinkingSignature"] = block["thinkingSignature"]
+                    if signature is not None:
+                        thinking_block["thinkingSignature"] = signature
                     assistant_content.append(thinking_block)
         elif item_type == "reasoning":
             thinking_text = _extract_reasoning_text(item)
-            if thinking_text:
+            thinking_signature = _extract_reasoning_signature(item)
+            if thinking_text or thinking_signature is not None:
                 thinking_block = {"type": "thinking", "thinking": thinking_text}
                 if item.get("id"):
                     thinking_block["id"] = item["id"]
-                if item.get("thinkingSignature") is not None:
-                    thinking_block["thinkingSignature"] = item["thinkingSignature"]
+                if thinking_signature is not None:
+                    thinking_block["thinkingSignature"] = thinking_signature
                 assistant_content.append(thinking_block)
         elif item_type == "function_call":
             assistant_content.append({

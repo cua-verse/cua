@@ -623,9 +623,22 @@ def canonical_to_responses_api(
                     })
 
             elif btype == "thinking":
-                # Thinking blocks are not representable in Responses API items.
-                # Skipped — US-OC-041 will add thinking sanitization passes.
-                pass
+                signature = _get_openai_reasoning_signature(
+                    block.get("thinkingSignature")
+                )
+                if signature is None:
+                    continue
+                summary = []
+                if block.get("thinking"):
+                    summary = [{
+                        "type": "summary_text",
+                        "text": block["thinking"],
+                    }]
+                items.append({
+                    "type": signature["type"],
+                    "id": signature["id"],
+                    "summary": summary,
+                })
 
     return _ensure_tool_adjacency(items)
 
@@ -994,6 +1007,33 @@ def _parse_openai_reasoning_signature(value: Any) -> bool:
         and isinstance(candidate.get("id"), str)
         and isinstance(candidate.get("type"), str)
     )
+
+
+def _get_openai_reasoning_signature(value: Any) -> dict[str, str] | None:
+    """Parse an OpenAI reasoning signature payload into its id/type pair."""
+    if not value:
+        return None
+    candidate = None
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if not (trimmed.startswith("{") and trimmed.endswith("}")):
+            return None
+        try:
+            candidate = json.loads(trimmed)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    elif isinstance(value, dict):
+        candidate = value
+    else:
+        return None
+
+    if not isinstance(candidate, dict):
+        return None
+    item_id = candidate.get("id")
+    item_type = candidate.get("type")
+    if not isinstance(item_id, str) or not isinstance(item_type, str):
+        return None
+    return {"id": item_id, "type": item_type}
 
 
 def _has_following_non_thinking_block(
