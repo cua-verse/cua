@@ -26,9 +26,10 @@ class cuaComputerHandler(AsyncComputerHandler):
     # ==== Computer-Use-Preview Action Space ====
 
     async def get_environment(self) -> Literal["windows", "mac", "linux", "browser"]:
-        """Get the current environment type."""
-        # TODO: detect actual environment
-        return "linux"
+        """Get the current environment type from the Computer's os_type."""
+        os_type = getattr(self.cua_computer, "os_type", "linux")
+        mapping = {"macos": "mac", "windows": "windows", "linux": "linux"}
+        return mapping.get(os_type, "linux")
 
     async def get_dimensions(self) -> tuple[int, int]:
         """Get screen dimensions as (width, height)."""
