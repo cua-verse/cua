@@ -561,7 +561,7 @@ class RemoteDesktopSession:
                 clicks = 1
             if action.direction == "down":
                 clicks = -clicks
-            await iface.scroll(self._width // 2, self._height // 2, clicks)
+            await iface.scroll(0, clicks)
 
         elif isinstance(action, TypeAction):
             await iface.type_text(action.text)
@@ -748,12 +748,14 @@ class RemoteDesktopSession:
         self,
         command: str,
         *,
+        timeout: Optional[float] = None,
         check: bool = True,
     ) -> Dict[str, Any]:
         """Execute a shell command.
 
         Args:
             command: Shell command to execute
+            timeout: Optional timeout in seconds for waiting on the result.
             check: If True (default), raise an exception if the command fails
                    (non-zero return code). If False, return the result regardless.
 
@@ -764,7 +766,23 @@ class RemoteDesktopSession:
             RuntimeError: If check=True and command returns non-zero exit code
         """
         await self._ensure_computer()
-        result = await self.interface.run_command(command)
+        try:
+            # This timeout bounds the client wait; it does not forcibly stop
+            # the command if the remote process keeps running after timeout.
+            if timeout is not None:
+                result = await asyncio.wait_for(self.interface.run_command(command), timeout=timeout)
+            else:
+                result = await self.interface.run_command(command)
+        except asyncio.TimeoutError as exc:
+            timeout_message = f"Command timed out after {timeout} seconds"
+            if check:
+                raise RuntimeError(f"{timeout_message}.\nCommand: {command}") from exc
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": timeout_message,
+                "return_code": -1,
+            }
         # Convert CommandResult to dict
         return_code = result.return_code if hasattr(result, "return_code") else 0
         stdout = result.stdout if hasattr(result, "stdout") else str(result)
@@ -784,6 +802,120 @@ class RemoteDesktopSession:
             "stderr": stderr,
             "return_code": return_code,
         }
+
+    async def exists(self, path: str) -> bool:
+        """Check whether a file or directory exists in the environment."""
+        # Agenthle's high-level session API treats file and directory presence
+        # as one existence check, so combine both SDK predicates here.
+        return await self.file_exists(path) or await self.directory_exists(path)
+
+    async def makedirs(self, path: str) -> None:
+        """Create a directory tree if it does not already exist."""
+        await self._ensure_computer()
+        if not path:
+            return
+
+        @self._computer.python_command(use_system_python=True)
+        def _makedirs(path):
+            import os
+
+            os.makedirs(path, exist_ok=True)
+
+        await _makedirs(path)
+
+    async def remove_file(self, path: str) -> None:
+        """Remove a file or directory if it exists."""
+        await self._ensure_computer()
+        if not path:
+            return
+
+        @self._computer.python_command(use_system_python=True)
+        def _remove_path(path):
+            import os
+            import shutil
+
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            elif os.path.lexists(path):
+                os.remove(path)
+
+        await _remove_path(path)
+
+    async def copy_file(self, src: str, dst: str) -> None:
+        """Copy a file or directory to a target path."""
+        await self._ensure_computer()
+
+        @self._computer.python_command(use_system_python=True)
+        def _copy_path(src, dst):
+            import os
+            import shutil
+
+            def _copy_entry(source, destination):
+                if os.path.isdir(source) and not os.path.islink(source):
+                    os.makedirs(destination, exist_ok=True)
+                    for entry in os.listdir(source):
+                        _copy_entry(
+                            os.path.join(source, entry),
+                            os.path.join(destination, entry),
+                        )
+                    return
+
+                parent = os.path.dirname(destination)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                shutil.copy2(source, destination)
+
+            if not os.path.exists(src):
+                raise FileNotFoundError(f"Source path does not exist: {src}")
+
+            # The historical session API uses copy_file() for both individual
+            # files and whole project folders, so support both cases here.
+            if os.path.isdir(src) and not os.path.islink(src):
+                if os.path.exists(dst):
+                    if not os.path.isdir(dst):
+                        raise FileExistsError(
+                            f"Cannot copy directory '{src}' to existing file '{dst}'"
+                        )
+                    for entry in os.listdir(src):
+                        _copy_entry(os.path.join(src, entry), os.path.join(dst, entry))
+                else:
+                    parent = os.path.dirname(dst)
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
+                    _copy_entry(src, dst)
+                return
+
+            destination = os.path.join(dst, os.path.basename(src)) if os.path.isdir(dst) else dst
+            _copy_entry(src, destination)
+
+        await _copy_path(src, dst)
+
+    async def move_file(self, src: str, dst: str) -> None:
+        """Move a file or directory to a target path."""
+        await self._ensure_computer()
+
+        @self._computer.python_command(use_system_python=True)
+        def _move_path(src, dst):
+            import os
+            import shutil
+
+            if not os.path.exists(src):
+                raise FileNotFoundError(f"Source path does not exist: {src}")
+
+            if not os.path.isdir(dst):
+                parent = os.path.dirname(dst)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+            shutil.move(src, dst)
+
+        await _move_path(src, dst)
+
+    async def run_file(self, path: str) -> None:
+        """Open a URL or file with the environment's default handler."""
+        await self._ensure_computer()
+        # Use the default opener so URLs, documents, and project files all
+        # behave like a user double-clicking them in the desktop session.
+        await self.interface.open(path)
 
     async def read_file(self, path: str) -> str:
         """Read a text file from the environment."""
@@ -824,12 +956,14 @@ class RemoteDesktopSession:
         self,
         command: str,
         *,
+        timeout: Optional[float] = None,
         check: bool = True,
     ) -> Dict[str, Any]:
         """Execute a shell command (alias for shell_command).
 
         Args:
             command: Shell command to execute
+            timeout: Optional timeout in seconds for waiting on the result.
             check: If True (default), raise an exception if the command fails
                    (non-zero return code). If False, return the result regardless.
 
@@ -839,7 +973,7 @@ class RemoteDesktopSession:
         Raises:
             RuntimeError: If check=True and command returns non-zero exit code
         """
-        return await self.shell_command(command, check=check)
+        return await self.shell_command(command, timeout=timeout, check=check)
 
     async def launch_application(self, app_name: str) -> None:
         """Launch an application by name."""
