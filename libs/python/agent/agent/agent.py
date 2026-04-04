@@ -849,12 +849,88 @@ class ComputerAgent:
 
             if item_type == "function_call":
                 await self._on_function_call_start(item)
-                # Perform function call
-                function = self._get_tool(item.get("name"))
-                if not function:
-                    raise ToolError(f"Function {item.get('name')} not found")
 
+                func_name = item.get("name")
                 args = json.loads(item.get("arguments"))
+
+                # Route "computer" function calls to the computer handler
+                # (OpenAI models emit function_call with name="computer"
+                #  instead of the native computer_call format)
+                if func_name == "computer" and computer:
+                    action_type = args.get("action")
+                    if not action_type:
+                        raise ToolError("Missing 'action' in computer function call")
+
+                    # Execute computer action — filter args to only relevant ones
+                    # (OpenAI function_call includes all params with defaults)
+                    _ACTION_PARAMS = {
+                        "screenshot": [],
+                        "click": ["x", "y", "button"],
+                        "double_click": ["x", "y"],
+                        "right_click": ["x", "y"],
+                        "type": ["text"],
+                        "keypress": ["keys"],
+                        "scroll": ["x", "y", "scroll_x", "scroll_y"],
+                        "move": ["x", "y"],
+                        "drag": ["start_x", "start_y", "end_x", "end_y"],
+                        "wait": ["ms"],
+                        "terminate": ["status"],
+                    }
+                    allowed = _ACTION_PARAMS.get(action_type)
+                    if allowed is not None:
+                        action_args = {k: v for k, v in args.items() if k in allowed}
+                    else:
+                        action_args = {k: v for k, v in args.items() if k != "action"}
+                    computer_method = getattr(computer, action_type, None)
+                    action_result = None
+                    if computer_method:
+                        action_result = await computer_method(**action_args)
+                    else:
+                        raise ToolError(f"Unknown computer action: {action_type}")
+
+                    is_terminate = action_type == "terminate" or (
+                        isinstance(action_result, dict) and action_result.get("terminated")
+                    )
+
+                    if is_terminate:
+                        call_output = {
+                            "type": "function_call_output",
+                            "call_id": item.get("call_id"),
+                            "output": json.dumps(action_result if action_result else {"terminated": True}),
+                        }
+                    else:
+                        if self.screenshot_delay and self.screenshot_delay > 0:
+                            await asyncio.sleep(self.screenshot_delay)
+                        screenshot_base64 = await computer.screenshot()
+                        await self._on_screenshot(screenshot_base64, "screenshot_after")
+                        # Return function_call_output + user image message
+                        # (Responses API doesn't support images in function output,
+                        #  so we send a text ack + a separate user message with the screenshot)
+                        call_output = {
+                            "type": "function_call_output",
+                            "call_id": item.get("call_id"),
+                            "output": f"Action '{action_type}' executed. Screenshot attached.",
+                        }
+                        screenshot_msg = {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_image",
+                                    "image_url": f"data:image/png;base64,{screenshot_base64}",
+                                }
+                            ],
+                        }
+
+                    result = [call_output]
+                    if not is_terminate:
+                        result.append(screenshot_msg)
+                    await self._on_function_call_end(item, result)
+                    return result
+
+                # Regular function call (non-computer tools)
+                function = self._get_tool(func_name)
+                if not function:
+                    raise ToolError(f"Function {func_name} not found")
 
                 # Handle BaseTool instances
                 if isinstance(function, BaseTool):
@@ -876,7 +952,7 @@ class ComputerAgent:
                         "agent_tool_executed",
                         {
                             "tool_type": "function",
-                            "tool_name": item.get("name"),
+                            "tool_name": func_name,
                         },
                     )
 
