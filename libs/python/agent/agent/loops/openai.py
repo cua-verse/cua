@@ -144,21 +144,26 @@ def _is_native_computer_use_model(model: str) -> bool:
     return bool(re.search(r"computer-use-preview", model, re.IGNORECASE))
 
 
-async def _prepare_tools_for_openai(tool_schemas: List[Dict[str, Any]], model: str = "") -> Tools:
+async def _prepare_tools_for_openai(
+    tool_schemas: List[Dict[str, Any]], model: str = "", computer_handler: Any = None
+) -> Tools:
     """Prepare tools for OpenAI API format.
 
     Args:
         tool_schemas: List of tool schemas to prepare
         model: Model name to determine tool format
+        computer_handler: Initialized computer handler (preferred for dimensions/env)
     """
     openai_tools = []
     use_native = _is_native_computer_use_model(model)
 
     for schema in tool_schemas:
         if schema["type"] == "computer":
-            # Map computer tool to OpenAI format (native or function based on model)
+            # Prefer the initialized computer_handler over the raw Computer object
+            # for correct dimensions and environment detection
+            handler = computer_handler if computer_handler is not None else schema["computer"]
             computer_tool = await _map_computer_tool_to_openai(
-                schema["computer"], use_native_tool=use_native
+                handler, use_native_tool=use_native
             )
             openai_tools.append(computer_tool)
         elif schema["type"] == "function":
@@ -222,7 +227,7 @@ class OpenAIComputerUseConfig:
         tools = tools or []
 
         # Prepare tools for OpenAI API
-        openai_tools = await _prepare_tools_for_openai(tools, model=model)
+        openai_tools = await _prepare_tools_for_openai(tools, model=model, computer_handler=computer_handler)
 
         # Prepare API call kwargs
         api_kwargs = {
