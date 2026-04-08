@@ -25,6 +25,24 @@ from agent.tools.base import BaseTool
 from .memory import MemoryGetTool, MemorySearchTool, MemoryStore, MemoryWriteTool
 
 
+COMPUTER_TOOL_NAME = "computer"
+COMPUTER_TOOL_SUMMARY = (
+    "Observe the current desktop via screenshots and interact with it using "
+    "mouse and keyboard actions."
+)
+
+
+def _is_computer_tool(tool: Any) -> bool:
+    """Detect the primary CUA computer handler without relying on ``tool.name``.
+
+    The real ``computer.Computer`` object used by ``session._computer`` is not a
+    BaseTool subclass and does not reliably expose ``name='computer'``. Mirror
+    CUA's own class-name heuristic so prompt summaries match the actual runtime.
+    """
+    class_name = getattr(getattr(tool, "__class__", None), "__name__", "")
+    return "computer" in class_name.lower()
+
+
 def build_tools(
     session,
     memory_store: MemoryStore,
@@ -60,16 +78,16 @@ def build_tools(
 
 
 def get_tool_summaries(tools: list) -> dict[str, str]:
-    """Extract ``{name: description}`` from BaseTool instances, filtering out Computer.
-
-    The Computer object is duck-typed (not a BaseTool subclass) and has no
-    user-facing description useful for the system prompt.
-    """
-    return {
-        tool.name: tool.description
-        for tool in tools
-        if isinstance(tool, BaseTool)
-    }
+    """Extract prompt summaries for BaseTool instances plus the primary Computer tool."""
+    summaries: dict[str, str] = {}
+    for tool in tools:
+        name = getattr(tool, "name", None)
+        if isinstance(tool, BaseTool):
+            summaries[name] = tool.description
+            continue
+        if _is_computer_tool(tool) or name == COMPUTER_TOOL_NAME:
+            summaries[name or COMPUTER_TOOL_NAME] = COMPUTER_TOOL_SUMMARY
+    return summaries
 
 
 # ---------------------------------------------------------------------------
