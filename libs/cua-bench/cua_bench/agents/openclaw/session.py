@@ -10,6 +10,13 @@ Key differences from OpenClaw:
 - Single JSONL file per task (session headers mark run boundaries)
 - Run numbers derived from transcript session headers (not stored in state.json)
 - Task-scoped: sessions_dir/<task_id>/ vs OpenClaw's agent-scoped routing keys
+
+Reasoning retention policy (US-OC-046):
+  Thinking blocks (including thinkingSignature metadata) are retained in canonical
+  session logs at write time. Sanitization — drop, preserve, or downgrade — is
+  applied at replay time via TranscriptPolicy resolved from the target model, not
+  at write time. This preserves transcript fidelity while allowing provider-aware
+  cleanup on replay surfaces (compaction rebuild, session restore, history send).
 """
 
 import json
