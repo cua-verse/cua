@@ -3,6 +3,7 @@ ComputerAgent - Main agent class that selects and runs agent loops
 """
 
 import asyncio
+import hashlib
 import inspect
 import json
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import (
 
 import litellm
 import litellm.utils
+from core.telemetry import is_telemetry_enabled, record_event
 from litellm.responses.utils import Usage
 
 from .adapters import (
@@ -29,6 +31,7 @@ from .adapters import (
     HuggingFaceLocalAdapter,
     HumanAdapter,
     MLXVLMAdapter,
+    YutoriAdapter,
 )
 from .callbacks import (
     BudgetManagerCallback,
@@ -65,6 +68,10 @@ def get_json(obj: Any, max_depth: int = 10) -> Any:
         if seen is None:
             seen = set()
 
+        # Handle bytes early
+        if isinstance(o, bytes):
+            return f"<bytes:{len(o)}>"
+
         # Use model_dump() if available
         if hasattr(o, "model_dump"):
             return o.model_dump()
@@ -82,12 +89,19 @@ def get_json(obj: Any, max_depth: int = 10) -> Any:
         if hasattr(o, "__class__") and "computer" in o.__class__.__name__.lower():
             return f"<computer:{o.__class__.__name__}>"
 
+        # Handle enums — just use their value
+        import enum
+        if isinstance(o, enum.Enum):
+            return o.value
+
         # Handle objects with __dict__
         if hasattr(o, "__dict__"):
             seen.add(obj_id)
             try:
                 result = {}
                 for k, v in o.__dict__.items():
+                    if k.startswith("__"):
+                        continue
                     if v is not None:
                         # Recursively serialize with updated depth and seen set
                         serialized_value = custom_serializer(v, depth + 1, seen.copy())
@@ -167,6 +181,13 @@ def get_output_call_ids(messages: List[Dict[str, Any]]) -> List[str]:
     return call_ids
 
 
+def hash_api_key(api_key: Optional[str]) -> Optional[str]:
+    """Hash API key using SHA256 for secure telemetry identification."""
+    if not api_key:
+        return None
+    return hashlib.sha256(api_key.encode()).hexdigest()
+
+
 class ComputerAgent:
     """
     Main agent class that automatically selects the appropriate agent loop
@@ -230,7 +251,7 @@ class ComputerAgent:
         self.max_retries = max_retries
         self.screenshot_delay = screenshot_delay
         self.use_prompt_caching = use_prompt_caching
-        self.telemetry_enabled = False
+        self.telemetry_enabled = telemetry_enabled
         self.kwargs = additional_generation_kwargs
         self.trust_remote_code = trust_remote_code
         self.api_key = api_key
@@ -277,12 +298,14 @@ class ComputerAgent:
         mlx_adapter = MLXVLMAdapter()
         cua_adapter = CUAAdapter()
         azure_ml_adapter = AzureMLAdapter()
+        yutori_adapter = YutoriAdapter()
         litellm.custom_provider_map = [
             {"provider": "huggingface-local", "custom_handler": hf_adapter},
             {"provider": "human", "custom_handler": human_adapter},
             {"provider": "mlx", "custom_handler": mlx_adapter},
             {"provider": "cua", "custom_handler": cua_adapter},
             {"provider": "azure_ml", "custom_handler": azure_ml_adapter},
+            {"provider": "yutori", "custom_handler": yutori_adapter},
         ]
         litellm.suppress_debug_info = True
 
@@ -300,6 +323,9 @@ class ComputerAgent:
             self.agent_loop = config_info.agent_class()
             self.agent_config_info = config_info
 
+        # Note: Tool resolution is deferred to _initialize_computers() because
+        # Computer.interface may not be available until the computer is started
+
         # Add telemetry callbacks AFTER agent_loop is set so they can capture the correct agent_type
         if self.telemetry_enabled:
             # PostHog telemetry (product analytics)
@@ -309,22 +335,146 @@ class ComputerAgent:
                 self.callbacks.append(TelemetryCallback(self, **self.telemetry_enabled))
 
             # OpenTelemetry callback (operational metrics - Four Golden Signals)
-            # This is enabled alongside PostHog when telemetry_enabled is True
             # Users can disable via CUA_TELEMETRY_DISABLED=true env var
             self.callbacks.append(OtelCallback(self))
-
-        # Screenshot output format — determined by the agent loop.
-        # GPT 5.4 uses "computer_screenshot", others use "input_image".
-        self._screenshot_output_type = getattr(
-            self.agent_loop, "screenshot_output_type", "input_image"
-        )
 
         self.tool_schemas = []
         self.computer_handler = None
 
+        # Track agent initialization with args provided
+        if self.telemetry_enabled and is_telemetry_enabled():
+            # Collect which args were explicitly provided (non-default values)
+            args_provided = []
+            if tools:
+                args_provided.append("tools")
+            if custom_loop:
+                args_provided.append("custom_loop")
+            if only_n_most_recent_images:
+                args_provided.append("only_n_most_recent_images")
+            if callbacks:
+                args_provided.append("callbacks")
+            if instructions:
+                args_provided.append("instructions")
+            if verbosity is not None:
+                args_provided.append("verbosity")
+            if trajectory_dir:
+                args_provided.append("trajectory_dir")
+            if max_retries != 3:  # non-default
+                args_provided.append("max_retries")
+            if screenshot_delay != 0.5:  # non-default
+                args_provided.append("screenshot_delay")
+            if use_prompt_caching:
+                args_provided.append("use_prompt_caching")
+            if max_trajectory_budget:
+                args_provided.append("max_trajectory_budget")
+            if not telemetry_enabled:  # explicitly disabled
+                args_provided.append("telemetry_enabled")
+            if trust_remote_code:
+                args_provided.append("trust_remote_code")
+            if api_key:
+                args_provided.append("api_key")
+            if api_base:
+                args_provided.append("api_base")
+            if additional_generation_kwargs:
+                args_provided.extend(additional_generation_kwargs.keys())
+
+            event_data = {
+                "model": model,
+                "args_provided": args_provided,
+            }
+            # Add hashed API key
+            if api_key:
+                event_data["api_key_hash"] = hash_api_key(api_key)
+
+            record_event("agent_init", event_data)
+
+    async def _resolve_tools(self, tools: List[Any], required_type: Optional[str]) -> List[Any]:
+        """
+        Resolve tools based on model's required tool_type.
+
+        - If model requires specific type (e.g., "browser"), auto-wrap Computer and warn
+        - If model is flexible (no tool_type), pass through unchanged
+
+        Args:
+            tools: List of tools passed to the agent
+            required_type: The tool type required by the model ("browser", "mobile", or None)
+
+        Returns:
+            List of resolved tools, potentially with Computer wrapped to BrowserTool
+        """
+        import logging
+        import warnings
+
+        from .tools.browser_tool import BrowserTool
+
+        logger = logging.getLogger(__name__)
+
+        if not required_type:
+            return tools  # Flexible model, no wrapping
+
+        resolved = []
+        for tool in tools:
+            if required_type == "browser":
+                if isinstance(tool, BrowserTool):
+                    # Already correct tool type, no warning needed
+                    resolved.append(tool)
+                elif is_agent_computer(tool):
+                    # Need to wrap Computer to BrowserTool
+                    # Get the interface from the computer object
+                    # Use try/except because Computer.interface raises if not initialized
+                    interface = None
+                    try:
+                        interface = tool.interface
+                    except (RuntimeError, AttributeError):
+                        # Computer not initialized - initialize it now
+                        logger.info(
+                            "Computer not initialized, initializing for BrowserTool wrapping..."
+                        )
+                        if hasattr(tool, "__aenter__"):
+                            await tool.__aenter__()
+                            try:
+                                interface = tool.interface
+                            except (RuntimeError, AttributeError):
+                                pass
+
+                    if interface is None:
+                        # Try cua_computer for cuaComputerHandler
+                        if hasattr(tool, "cua_computer"):
+                            interface = tool
+                        else:
+                            # Fallback: use the tool itself as interface
+                            interface = tool
+
+                    warnings.warn(
+                        "Model requires browser tools. "
+                        "Auto-wrapping Computer to BrowserTool. "
+                        "Pass BrowserTool explicitly to silence this warning.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                    logger.info(
+                        "Auto-wrapping Computer to BrowserTool for model requiring browser tools"
+                    )
+                    resolved.append(BrowserTool(interface=interface))
+                else:
+                    # Custom tool, pass through unchanged
+                    resolved.append(tool)
+            # Future: elif required_type == "mobile": ...
+            else:
+                # Unknown tool type, pass through
+                resolved.append(tool)
+
+        return resolved
+
     async def _initialize_computers(self):
-        """Initialize computer objects"""
+        """Initialize computer objects and resolve tools based on model requirements."""
         if not self.tool_schemas:
+            # Resolve tools based on model's required tool_type
+            # This is done here (not in __init__) because Computer.interface
+            # may not be available until the computer is started
+            tool_type = self.agent_config_info.tool_type if self.agent_config_info else None
+            self.tools = await self._resolve_tools(self.tools, tool_type)
+
             # Process tools and create tool schemas
             self.tool_schemas = self._process_tools()
 
@@ -541,39 +691,47 @@ class ComputerAgent:
                 if not computer:
                     raise ValueError("Computer handler is required for computer calls")
 
-                # Perform computer actions — supports both single action
-                # (computer-use-preview) and batched actions array (GPT 5.4)
-                actions_list = item.get("actions")  # GPT 5.4: array
-                if not isinstance(actions_list, list):
-                    single_action = item.get("action")  # computer-use-preview: single
-                    if not single_action or not single_action.get("type"):
-                        print(
-                            f"Action type is empty or None: action={single_action}"
-                        )
-                        return []
-                    actions_list = [single_action]
-
-                # Execute each action sequentially
-                is_terminate = False
-                action_result = None
-                for action in actions_list:
-                    action_type = action.get("type")
-                    if not action_type:
-                        continue
-
-                    action_args = {k: v for k, v in action.items() if k != "type"}
-                    computer_method = getattr(computer, action_type, None)
-                    if computer_method:
-                        assert_callable_with(computer_method, **action_args)
-                        action_result = await computer_method(**action_args)
-                    else:
-                        raise ToolError(f"Unknown computer action: {action_type}")
-
-                    is_terminate = action_type == "terminate" or (
-                        isinstance(action_result, dict) and action_result.get("terminated")
+                # Perform computer actions
+                action = item.get("action")
+                action_type = action.get("type") if action else None
+                if not action_type:
+                    print(
+                        f"Action type is empty or None: action={action}, action_type={action_type}"
                     )
-                    if is_terminate:
-                        break
+                    return []
+
+                # Extract action arguments (all fields except 'type')
+                action_args = {k: v for k, v in action.items() if k != "type"}
+
+                # Execute the computer action
+                computer_method = getattr(computer, action_type, None)
+                action_result = None
+                if computer_method:
+                    assert_callable_with(computer_method, **action_args)
+                    action_result = await computer_method(**action_args)
+                else:
+                    raise ToolError(f"Unknown computer action: {action_type}")
+
+                # Track computer action execution
+                if self.telemetry_enabled and is_telemetry_enabled():
+                    record_event(
+                        "computer_action_executed",
+                        {
+                            "action_type": action_type,
+                        },
+                    )
+                    record_event(
+                        "agent_tool_executed",
+                        {
+                            "tool_type": "computer",
+                            "tool_name": action_type,
+                        },
+                    )
+
+                # Check if this was a terminate action
+                is_terminate = action_type == "terminate" or (
+                    isinstance(action_result, dict) and action_result.get("terminated")
+                )
 
                 # Take screenshot after action (skip for terminate)
                 if not is_terminate:
@@ -595,39 +753,24 @@ class ComputerAgent:
                     #     raise ValueError(f"Safety check failed: {check_message}")
 
                 # Create call output
-                # GPT 5.4 ("computer" tool) does not support acknowledged_safety_checks
-                use_safety_checks = self._screenshot_output_type != "computer_screenshot"
-
                 if is_terminate:
+                    # For terminate action, include the terminated flag
                     call_output = {
                         "type": "computer_call_output",
                         "call_id": item.get("call_id"),
+                        "acknowledged_safety_checks": acknowledged_checks,
                         "output": action_result if action_result else {"terminated": True},
                     }
-                    if use_safety_checks:
-                        call_output["acknowledged_safety_checks"] = acknowledged_checks
                 else:
-                    # Model-aware screenshot format: GPT 5.4 expects
-                    # "computer_screenshot" with detail="original",
-                    # computer-use-preview expects "input_image"
-                    if self._screenshot_output_type == "computer_screenshot":
-                        output_image = {
-                            "type": "computer_screenshot",
-                            "image_url": f"data:image/png;base64,{screenshot_base64}",
-                            "detail": "original",
-                        }
-                    else:
-                        output_image = {
-                            "type": "input_image",
-                            "image_url": f"data:image/png;base64,{screenshot_base64}",
-                        }
                     call_output = {
                         "type": "computer_call_output",
                         "call_id": item.get("call_id"),
-                        "output": output_image,
+                        "acknowledged_safety_checks": acknowledged_checks,
+                        "output": {
+                            "type": "input_image",
+                            "image_url": f"data:image/png;base64,{screenshot_base64}",
+                        },
                     }
-                    if use_safety_checks:
-                        call_output["acknowledged_safety_checks"] = acknowledged_checks
 
                 # # Additional URL safety checks for browser environments
                 # if await computer.get_environment() == "browser":
@@ -642,6 +785,112 @@ class ComputerAgent:
 
             if item_type == "function_call":
                 await self._on_function_call_start(item)
+
+                # Special handling for "computer" function calls (from GPT 5.4 etc)
+                # These need to be treated like computer_call items
+                if item.get("name") == "computer" and computer:
+                    args = json.loads(item.get("arguments", "{}"))
+                    action_type = args.get("action")
+                    if not action_type:
+                        raise ToolError("Computer function call missing 'action' argument")
+
+                    # Map action types to their relevant parameters
+                    action_param_map = {
+                        "screenshot": [],  # No parameters
+                        "click": ["x", "y", "button"],
+                        "double_click": ["x", "y"],
+                        "right_click": ["x", "y"],
+                        "type": ["text"],
+                        "keypress": ["keys"],
+                        "scroll": ["x", "y", "scroll_x", "scroll_y"],
+                        "move": ["x", "y"],
+                        "drag": ["start_x", "start_y", "end_x", "end_y"],
+                        "wait": ["seconds", "ms"],
+                        "terminate": ["status"],
+                    }
+
+                    # Extract only relevant action arguments, filtering out empty values
+                    relevant_params = action_param_map.get(action_type, [])
+                    action_args = {}
+                    for k, v in args.items():
+                        if k == "action":
+                            continue
+                        # Include if it's a relevant param OR if param map doesn't have this action
+                        if k in relevant_params or action_type not in action_param_map:
+                            # Filter out empty/default values but allow numeric zero (valid for coordinates/scroll)
+                            if v is not None and v != "" and v != []:
+                                action_args[k] = v
+
+                    # Execute the computer action
+                    computer_method = getattr(computer, action_type, None)
+                    action_result = None
+                    if computer_method:
+                        action_result = await computer_method(**action_args)
+                    else:
+                        raise ToolError(f"Unknown computer action: {action_type}")
+
+                    # Track computer action execution
+                    if self.telemetry_enabled and is_telemetry_enabled():
+                        record_event(
+                            "computer_action_executed",
+                            {"action_type": action_type},
+                        )
+                        record_event(
+                            "agent_tool_executed",
+                            {"tool_type": "computer", "tool_name": action_type},
+                        )
+
+                    # Check if this was a terminate action
+                    is_terminate = action_type == "terminate" or (
+                        isinstance(action_result, dict) and action_result.get("terminated")
+                    )
+
+                    # Take screenshot after action (skip for terminate)
+                    if not is_terminate:
+                        if self.screenshot_delay and self.screenshot_delay > 0:
+                            await asyncio.sleep(self.screenshot_delay)
+                        screenshot_base64 = await computer.screenshot()
+                        await self._on_screenshot(screenshot_base64, "screenshot_after")
+
+                    # Create function call output for GPT 5.4 etc
+                    # Note: function_call_output only supports text, so we include the
+                    # screenshot as a separate user message with image content
+                    if is_terminate:
+                        output_content = json.dumps(action_result if action_result else {"terminated": True})
+                        call_output = {
+                            "type": "function_call_output",
+                            "call_id": item.get("call_id"),
+                            "output": output_content,
+                        }
+                        result = [call_output]
+                    else:
+                        # Return both the function output AND a user message with the screenshot
+                        # This allows the model to see the screenshot result
+                        # Preserve actual action_result so failures/errors aren't masked
+                        if action_result is not None:
+                            output_content = json.dumps(action_result)
+                        else:
+                            output_content = json.dumps({"success": True, "screenshot_captured": True})
+                        call_output = {
+                            "type": "function_call_output",
+                            "call_id": item.get("call_id"),
+                            "output": output_content,
+                        }
+                        # Include screenshot as a user message with image content
+                        image_message = {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_image",
+                                    "image_url": f"data:image/png;base64,{screenshot_base64}",
+                                }
+                            ],
+                        }
+                        result = [call_output, image_message]
+
+                    await self._on_function_call_end(item, result)
+                    return result
+
                 # Perform function call
                 function = self._get_tool(item.get("name"))
                 if not function:
@@ -662,6 +911,16 @@ class ComputerAgent:
                         result = await function(**args)
                     else:
                         result = await asyncio.to_thread(function, **args)
+
+                # Track function tool execution
+                if self.telemetry_enabled and is_telemetry_enabled():
+                    record_event(
+                        "agent_tool_executed",
+                        {
+                            "tool_type": "function",
+                            "tool_name": item.get("name"),
+                        },
+                    )
 
                 # Create function call output
                 call_output = {
@@ -829,7 +1088,7 @@ class ComputerAgent:
                             prompt_tokens=0,
                             completion_tokens=0,
                             total_tokens=0,
-                        ).model_dump(),
+                        ),
                     }
 
         await self._on_run_end(loop_kwargs, old_items, new_items)

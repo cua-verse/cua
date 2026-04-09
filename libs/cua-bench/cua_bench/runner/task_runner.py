@@ -8,7 +8,6 @@ import asyncio
 import os
 import shutil
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -28,18 +27,6 @@ from .docker_utils import (
     stop_container,
     wait_for_container,
 )
-
-# =============================================================================
-# Provider Type Enum
-# =============================================================================
-
-class ProviderType(Enum):
-    """Provider type enumeration."""
-    SIMULATED = "simulated"
-    WEBTOP = "webtop"
-    NATIVE = "native"
-    COMPUTER = "computer"
-
 
 # =============================================================================
 # Configuration
@@ -223,6 +210,8 @@ class TaskRunner:
         remove_images_after: bool = False,
         # Provider type
         provider_type: Optional[str] = None,
+        # Dev mode: list of local package paths to mount and install
+        dev_paths: Optional[List[str]] = None,
     ) -> TaskResult:
         """Run a task with 2-container architecture.
 
@@ -259,40 +248,22 @@ class TaskRunner:
         if cleanup_before:
             await full_cleanup()
 
-        # Determine provider type
-        # Priority: explicit arg > env var > default native
-        provider_value = provider_type or os.environ.get("CUA_PROVIDER", "native")
-        try:
-            provider = ProviderType(provider_value)
-        except ValueError:
-            raise ValueError(f"Unknown provider type: {provider_value}")
-        
-        is_simulated = provider in (ProviderType.SIMULATED, ProviderType.WEBTOP)
-        is_computer = provider == ProviderType.COMPUTER
-        is_native = provider == ProviderType.NATIVE
-        # Pre-flight check: ensure required env vars for computer provider
-        if is_computer:
-            if not os.environ.get("CUA_ENV_API_URL"):
-                raise ValueError(
-                    "For computer provider, CUA_ENV_API_URL must be set. "
-                    "Example: export CUA_ENV_API_URL=http://localhost:5000"
-                )
+        # Determine if this is a simulated provider
+        is_simulated = provider_type in ("simulated", "webtop")
 
-        # Validate env_type (skip validation for simulated/computer since we don't manage the env)
-        if is_native and env_type not in ENV_CONFIGS:
+        # Validate env_type (skip validation for simulated since we don't use it)
+        if not is_simulated and env_type not in ENV_CONFIGS:
             raise ValueError(
                 f"Unknown env_type: {env_type}. Valid types: {list(ENV_CONFIGS.keys())}"
             )
 
-        config = ENV_CONFIGS.get(env_type, {}) if is_native else {}
-        golden_name = golden_name or env_type if is_native else None
+        config = ENV_CONFIGS.get(env_type, {}) if not is_simulated else {}
+        golden_name = golden_name or env_type if not is_simulated else "simulated"
 
         # Generate unique task ID
         task_id = generate_task_id()
-        
-        # Create network only for native provider
-        network_name = f"cua-task-{task_id}" if is_native else None
-        env_container_name = f"cua-env-{task_id}" if is_native else None
+        network_name = f"cua-task-{task_id}"
+        env_container_name = f"cua-env-{task_id}"
         agent_container_name = f"cua-agent-{task_id}"
 
         # Create task overlay for QEMU types (protects golden image)
@@ -303,25 +274,24 @@ class TaskRunner:
         # Track task for cleanup
         self._running_tasks[task_id] = {
             "network": network_name,
-            "env_container": env_container_name if is_native else None,
+            "env_container": env_container_name if not is_simulated else None,
             "agent_container": agent_container_name,
-            "env_image": config.get("image") if is_native else None,
+            "env_image": config.get("image") if not is_simulated else None,
             "agent_image": self.agent_image,
             "remove_images": remove_images_after,
             "overlay_path": overlay_path,
             "is_simulated": is_simulated,
-            "is_computer": is_computer,
         }
 
         # Track log streaming process for cleanup
         log_stream_process = None
 
         try:
-            if is_native:
-                # 1. Create network
-                await create_network(network_name)
+            # 1. Create network
+            await create_network(network_name)
 
-                # 2. Start environment container (skip for simulated/computer providers)
+            # 2. Start environment container (skip for simulated providers)
+            if not is_simulated:
                 await self._start_env_container(
                     task_id=task_id,
                     network_name=network_name,
@@ -350,7 +320,8 @@ class TaskRunner:
                 max_steps=max_steps,
                 oracle=oracle,
                 output_dir=output_dir,
-                provider=provider,
+                is_simulated=is_simulated,
+                dev_paths=dev_paths,
             )
 
             # 3.5. Start streaming agent logs to file if requested
@@ -432,6 +403,7 @@ class TaskRunner:
         # Task configuration
         env_path: Optional[Path] = None,
         task_index: int = 0,
+        setup_config: Optional[dict] = None,
         # Environment configuration
         memory: str = "8G",
         cpus: str = "8",
@@ -533,7 +505,8 @@ class TaskRunner:
         # Create network
         await create_network(network_name)
 
-        # Start environment container
+        # Start environment container with setup_config for display resolution
+        _setup_config = setup_config or {}
         await self._start_env_container(
             task_id=task_id,
             network_name=network_name,
@@ -545,6 +518,8 @@ class TaskRunner:
             vnc_port=vnc_port,
             api_port=api_port,
             overlay_path=overlay_path,
+            width=_setup_config.get("width"),
+            height=_setup_config.get("height"),
         )
 
         # Build URLs
@@ -579,11 +554,18 @@ class TaskRunner:
                             "_task_cfg": task_cfg,  # Store for evaluation
                         }
 
-                        # Create remote session
+                        # Extract setup_config from task if available
+                        setup_config = {}
+                        if hasattr(task_cfg, "computer") and task_cfg.computer:
+                            setup_config = task_cfg.computer.get("setup_config", {})
+
+                        # Create remote session with setup_config values
                         session_obj = RemoteDesktopSession(
                             api_url=api_url,
                             vnc_url=vnc_url or "",
-                            os_type=config.get("os_type", "linux"),
+                            os_type=setup_config.get("os_type", config.get("os_type", "linux")),
+                            width=setup_config.get("width", 1024),
+                            height=setup_config.get("height", 768),
                         )
 
                         # Wait for environment to be ready
@@ -624,6 +606,8 @@ class TaskRunner:
         vnc_port: Optional[int],
         api_port: Optional[int],
         overlay_path: Optional[Path] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
     ) -> ContainerInfo:
         """Start the environment container.
 
@@ -641,6 +625,10 @@ class TaskRunner:
             env_vars["CPU_CORES"] = cpus
             if not os.path.exists("/dev/kvm"):
                 env_vars["KVM"] = "N"
+
+        # Add display resolution if specified
+        if width is not None and height is not None:
+            env_vars["VNC_RESOLUTION"] = f"{width}x{height}"
 
         # Build volumes
         volumes = []
@@ -787,15 +775,16 @@ class TaskRunner:
         env_path: Path,
         task_index: int,
         config: dict,
-        agent: Optional[str] = None,
-        agent_image: Optional[str] = None,
-        agent_command: Optional[List[str]] = None,
-        agent_import_path: Optional[str] = None,
-        model: Optional[str] = None,
-        max_steps: int = 100,
-        oracle: bool = False,
-        output_dir: Optional[str] = None,
-        provider: ProviderType = ProviderType.NATIVE,
+        agent: Optional[str],
+        agent_image: Optional[str],
+        agent_command: Optional[List[str]],
+        agent_import_path: Optional[str],
+        model: Optional[str],
+        max_steps: int,
+        oracle: bool,
+        output_dir: Optional[str],
+        is_simulated: bool = False,
+        dev_paths: Optional[List[str]] = None,
     ) -> ContainerInfo:
         """Start the agent container.
 
@@ -830,25 +819,20 @@ class TaskRunner:
         if resolved_command is not None:
             agent_command = resolved_command
 
-        # Build API URL. For computer providers, use the host's environment variables.
-        # For local providers, use the internal network hostname.
-        if provider == ProviderType.COMPUTER:
-            api_url = os.environ.get("CUA_ENV_API_URL", "")
-            vnc_url = os.environ.get("CUA_ENV_VNC_URL", "")
-        else:
-            api_url = (
-                f"http://{self.env_hostname}:{config.get('internal_api_port', 5000)}" if config else ""
-            )
-            vnc_url = (
-                f"http://{self.env_hostname}:{config.get('internal_vnc_port', 8006)}" if config else ""
-            )
+        # Build API URL using network hostname (not used for simulated, but set for consistency)
+        api_url = (
+            f"http://{self.env_hostname}:{config.get('internal_api_port', 5000)}" if config else ""
+        )
+        vnc_url = (
+            f"http://{self.env_hostname}:{config.get('internal_vnc_port', 8006)}" if config else ""
+        )
 
         # Build environment variables (available to all agent images)
         env_vars = {
             "CUA_ENV_API_URL": api_url,
             "CUA_ENV_VNC_URL": vnc_url,
-            "CUA_ENV_TYPE": os.environ.get("CUA_ENV_TYPE") or (config.get("os_type", "linux") if config else "linux"),
-            "CUA_PROVIDER": provider.value,
+            "CUA_ENV_TYPE": config.get("os_type", "linux") if config else "linux",
+            "CUA_PROVIDER": "simulated" if is_simulated else "remote",
             "CUA_TASK_PATH": "/app/env",
             "CUA_TASK_INDEX": str(task_index),
             "BATCH_TASK_INDEX": str(task_index),  # Legacy compat
@@ -875,11 +859,6 @@ class TaskRunner:
             if value:
                 env_vars[key] = value
 
-        # Pass Check for telemetry configuration
-        telemetry_disabled = os.environ.get("CUA_TELEMETRY_DISABLED")
-        if telemetry_disabled is not None:
-            env_vars["CUA_TELEMETRY_DISABLED"] = telemetry_disabled
-
         # Build volumes
         volumes = [
             f"{env_path.absolute()}:/app/env:ro",
@@ -893,6 +872,20 @@ class TaskRunner:
         cua_bench_path = Path(__file__).parent.parent.absolute()
         if cua_bench_path.exists() and (cua_bench_path / "computers").exists():
             volumes.append(f"{cua_bench_path}:/app/cua_bench:ro")
+
+        # --with mode: mount and pip install local packages
+        dev_install_cmd = ""
+        if dev_paths:
+            install_parts = []
+            for i, dev_path in enumerate(dev_paths):
+                abs_path = Path(dev_path).absolute()
+                container_path = f"/app/dev_{i}"
+                volumes.append(f"{abs_path}:{container_path}:ro")
+                # Copy to tmp first since pip needs a writable source dir to build
+                install_parts.append(
+                    f"(cp -r {container_path} /tmp/dev_{i} && pip install /tmp/dev_{i} 2>&1 | tail -1)"
+                )
+            dev_install_cmd = " && ".join(install_parts) + " && "
 
         # Build command
         if agent_command:
@@ -916,14 +909,16 @@ class TaskRunner:
                 if max_steps:
                     command.extend(["--max-steps", str(max_steps)])
 
+        # In --with mode, wrap command to install local packages first
+        if dev_paths and dev_install_cmd:
+            original_cmd = " ".join(command)
+            command = ["bash", "-c", f"{dev_install_cmd}{original_cmd}"]
+
         # Start container (not detached - we want to wait for it)
-        # For computer provider, use host network to access remote API
-        container_network = network_name if network_name else "host"
-        
         return await start_container(
             image=image,
             name=container_name,
-            network=container_network,
+            network=network_name,
             hostname=self.agent_hostname,
             env_vars=env_vars,
             volumes=volumes,

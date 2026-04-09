@@ -23,6 +23,8 @@ RUN apt-get update && apt-get install -y \
     zip \
     xdg-utils \
     gcc \
+    # DHCP client for networking
+    isc-dhcp-client \
     # Qt/XCB runtime deps for PyQt5 (libqxcb.so)
     libxcb-icccm4 \
     libxcb-image0 \
@@ -83,8 +85,9 @@ RUN add-apt-repository -y ppa:deadsnakes/ppa && \
     python3.12 -m pip install uv && \
     rm -rf /var/lib/apt/lists/*
 
-# Ensure 'python' points to Python 3.12
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 2
+# Ensure 'python' and 'python3' both point to Python 3.12
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 2 && \
+    ln -sf /usr/bin/python3.12 /usr/local/bin/python3
 
 # Remove screensavers and power manager to avoid popups and lock screens
 RUN apt-get remove -y \
@@ -121,8 +124,8 @@ RUN git clone https://github.com/trycua/noVNC.git /opt/noVNC && \
 RUN mkdir -p /home/cua/.cache && \
     chown -R cua:cua /home/cua/.cache
 
-# Install computer-server
-RUN uv pip install --system cua-computer-server
+# Install computer-server and cua-agent
+RUN uv pip install --system cua-computer-server "cua-agent[all]"
 
 # Install GTK and WebKit dependencies for pywebview
 RUN apt-get update && apt-get install -y \

@@ -1070,6 +1070,7 @@ async def _cmd_run_task_async(args) -> int:
             output_dir=session_output_dir,  # Use the session output dir
             stream_agent_logs=True,  # Stream logs to run.log
             provider_type=provider_type,  # Pass detected provider type
+            dev_paths=getattr(args, "dev_paths", None),
         )
 
         if result.success:
@@ -1090,6 +1091,18 @@ async def _cmd_run_task_async(args) -> int:
         log_file = Path(session_output_dir) / "run.log"
         if log_file.exists():
             print(f"\n{GREY}Full logs saved to: {log_file}{RESET}")
+
+        # Summary
+        task_name = task_path.name
+        model_name = getattr(args, "model", None) or "default"
+        print("\n")
+        if result.success:
+            print(f"Task '{task_name}' completed successfully with model '{model_name}'.")
+        else:
+            print(
+                f"Task '{task_name}' failed (exit code {result.exit_code}) with model '{model_name}'."
+            )
+        print(f"Logs and artifacts: {session_output_dir}")
 
         # Update session status before cleanup
         try:
@@ -1562,6 +1575,7 @@ async def _cmd_run_dataset_async(args) -> int:
                     stream_agent_logs=True,  # Stream agent logs to <task_output_dir>/run.log
                     cleanup_before=False,
                     provider_type=provider_type,  # Pass detected provider type
+                    dev_paths=getattr(args, "dev_paths", None),
                 )
 
                 # Extract reward from logs if available
@@ -1662,6 +1676,19 @@ async def _cmd_run_dataset_async(args) -> int:
         summary += f"  Failed:  {failed_count}\n"
 
         log_print(summary)
+
+        # Summary
+        model_name = getattr(args, "model", None) or "default"
+        print("\n")
+        if failed_count == 0:
+            print(
+                f"All {len(results)} tasks in '{dataset_path.name}' passed with model '{model_name}'."
+            )
+        else:
+            print(
+                f"{failed_count}/{len(results)} tasks in '{dataset_path.name}' failed with model '{model_name}'."
+            )
+        print(f"Logs and artifacts: {output_dir}")
 
         return 0 if failed_count == 0 else 1
 
