@@ -20,6 +20,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agent.model_config import resolve_model
+
 from . import register_agent
 from .base import AgentResult, BaseAgent, FailureMode
 
@@ -156,12 +158,20 @@ class OpenClawAgent(BaseAgent):
             if replay_messages:
                 print(f"[Replay] Loaded {len(replay_messages)} items from prior transcript")
 
+        resolved_model = resolve_model(self.model)
+        resolved_summary_model = (
+            resolved_model if self.summary_model == self.model else resolve_model(self.summary_model)
+        )
+
         # Tool assembly (US-OC-007)
         tools = build_tools(
             session,
             memory_store,
             summary_model=self.summary_model,
-            vision_thinking_params=self.thinking_config.vision_params(self.summary_model),
+            vision_thinking_params=self.thinking_config.vision_params(
+                self.summary_model,
+                runtime=resolved_summary_model,
+            ),
         )
         tool_summaries = get_tool_summaries(tools)
         agents_md = (Path(__file__).parent / "openclaw" / "AGENTS.md").read_text()
@@ -201,6 +211,7 @@ class OpenClawAgent(BaseAgent):
             model=self.model,
             context_window=int(ctx_override) if ctx_override else None,
             instructions_tokens=len(instructions) // 4,
+            resolved_model=resolved_model,
         )
 
         # Persist resolved context window in session state (matches OpenClaw's contextTokens)
@@ -228,6 +239,8 @@ class OpenClawAgent(BaseAgent):
             summary_model=self.summary_model,
             # Thinking config (US-OC-019/020)
             thinking_config=self.thinking_config,
+            resolved_model=resolved_model,
+            summary_runtime=resolved_summary_model,
             # Provider-specific thinking kwargs → ComputerAgent additional_generation_kwargs
             **thinking_api_params,
         )

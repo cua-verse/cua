@@ -49,7 +49,6 @@ async def _map_computer_tool_to_openai(computer_handler: Any, model: str) -> Dic
         "environment": environment,
     }
 
-
 async def _prepare_tools_for_openai(tool_schemas: List[Dict[str, Any]], model: str) -> Tools:
     """Prepare tools for OpenAI API format."""
     openai_tools = []

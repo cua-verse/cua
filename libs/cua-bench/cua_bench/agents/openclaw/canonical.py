@@ -186,8 +186,8 @@ class TranscriptPolicy:
     """Ensure valid Anthropic turn structure (no trailing assistant message)."""
 
 
-def get_transcript_policy(model: str) -> TranscriptPolicy:
-    """Resolve TranscriptPolicy from a litellm model string.
+def get_transcript_policy(model: str | Any) -> TranscriptPolicy:
+    """Resolve TranscriptPolicy from structured runtime metadata or a model string.
 
     Uses the same provider-detection pattern as
     :func:`thinking.resolve_thinking_params`.
@@ -198,9 +198,12 @@ def get_transcript_policy(model: str) -> TranscriptPolicy:
 
     Reference: openclaw/src/agents/transcript-policy.ts:resolveTranscriptPolicy
     """
-    model_lower = model.lower()
+    from agent.model_config import resolve_model
 
-    if "anthropic/" in model_lower or "claude" in model_lower:
+    runtime = resolve_model(model)
+    model_lower = runtime.model.lower()
+
+    if runtime.provider == "anthropic" or "claude" in model_lower:
         return TranscriptPolicy(
             sanitize_mode="full",
             drop_thinking_blocks=True,
@@ -210,11 +213,7 @@ def get_transcript_policy(model: str) -> TranscriptPolicy:
             validate_anthropic_turns=True,
         )
 
-    if (
-        "openai/" in model_lower
-        or "gpt" in model_lower
-        or model_lower.startswith("o")
-    ):
+    if runtime.provider == "openai":
         return TranscriptPolicy(
             sanitize_mode="images-only",
             drop_thinking_blocks=False,
@@ -224,11 +223,7 @@ def get_transcript_policy(model: str) -> TranscriptPolicy:
             validate_anthropic_turns=False,
         )
 
-    if (
-        "gemini" in model_lower
-        or "google" in model_lower
-        or "vertex" in model_lower
-    ):
+    if runtime.provider in {"google", "vertex"}:
         return TranscriptPolicy(
             sanitize_mode="full",
             drop_thinking_blocks=False,
@@ -1124,7 +1119,7 @@ def sanitize_items(
     messages: list[CanonicalMessage],
     target: Literal["openai-responses", "anthropic"] | None = None,
     *,
-    model: str | None = None,
+    model: str | Any | None = None,
     policy: TranscriptPolicy | None = None,
 ) -> list[dict[str, Any]]:
     """Convert canonical messages to provider-specific format.
@@ -1153,9 +1148,9 @@ def sanitize_items(
     if target is None:
         if model is None:
             raise ValueError("sanitize_items() requires target or model")
-        from agent.model_config import get_model_config
+        from agent.model_config import resolve_model
 
-        target = get_model_config(model).adapter_target
+        target = resolve_model(model).adapter_target
 
     if policy is None and model is not None:
         policy = get_transcript_policy(model)

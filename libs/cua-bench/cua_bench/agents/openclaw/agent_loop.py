@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Union
 
 from agent.agent import ComputerAgent, get_json, get_output_call_ids
+from agent.model_config import ResolvedModel
 from agent.responses import replace_failed_computer_calls_with_function_calls
 from litellm.responses.utils import Usage
 
@@ -71,6 +72,8 @@ class OpenClawComputerAgent(ComputerAgent):
         max_compactions: int = 3,
         on_compaction: Callable | None = None,
         thinking_config: Optional[Any] = None,
+        resolved_model: ResolvedModel | None = None,
+        summary_runtime: ResolvedModel | None = None,
         **kwargs,  # Pass through to ComputerAgent
     ):
         # Auto-inject overflow_cb into callbacks (US-OC-028)
@@ -90,6 +93,8 @@ class OpenClawComputerAgent(ComputerAgent):
         self._last_screenshot_path: str | None = None
         # Thinking config for per-call-site params (US-OC-019/020)
         self.thinking_config = thinking_config
+        self.resolved_model = resolved_model
+        self.summary_runtime = summary_runtime
 
     @property
     def compaction_count(self) -> int:
@@ -265,10 +270,14 @@ class OpenClawComputerAgent(ComputerAgent):
             flush_system_prompt=MEMORY_FLUSH_SYSTEM_PROMPT,
             silent_token=SILENT_REPLY_TOKEN,
             thinking_params=(
-                self.thinking_config.flush_params(self.summary_model)
+                self.thinking_config.flush_params(
+                    self.summary_model,
+                    runtime=self.summary_runtime,
+                )
                 if self.thinking_config is not None
                 else None
             ),
+            summary_runtime=self.summary_runtime,
         )
 
     # --- Screenshot path injection (US-OC-034) ---
@@ -355,7 +364,11 @@ class OpenClawComputerAgent(ComputerAgent):
                 assistant_content,
                 usage=usage,
                 stop_reason=result.get("stop_reason") or ("tool_use" if has_tools else None),
-                api="openai-responses",
+                api=(
+                    self.resolved_model.transcript_api_label
+                    if self.resolved_model is not None
+                    else None
+                ),
             )
 
         if tool_results:
@@ -422,10 +435,14 @@ class OpenClawComputerAgent(ComputerAgent):
             self.overflow_cb.context_window,
             instructions_tokens=len(self.instructions or "") // 4,
             thinking_params=(
-                self.thinking_config.compaction_params(self.summary_model)
+                self.thinking_config.compaction_params(
+                    self.summary_model,
+                    runtime=self.summary_runtime,
+                )
                 if self.thinking_config is not None
                 else None
             ),
+            summary_runtime=self.summary_runtime,
         )
 
         # Persist compaction entry with firstKeptEntryId
@@ -450,7 +467,10 @@ class OpenClawComputerAgent(ComputerAgent):
 
         # Convert canonical → provider-specific format via the same model-aware
         # sanitize pipeline used on the normal per-turn send path.
-        compacted_items = sanitize_items(canonical_messages, model=self.model)
+        compacted_items = sanitize_items(
+            canonical_messages,
+            model=self.resolved_model or self.model,
+        )
 
         items.clear()
         items.extend(compacted_items)
@@ -491,7 +511,10 @@ class OpenClawComputerAgent(ComputerAgent):
             return messages
 
         canonical_messages = normalize_to_canonical(messages)
-        return sanitize_items(canonical_messages, model=self.model)
+        return sanitize_items(
+            canonical_messages,
+            model=self.resolved_model or self.model,
+        )
 
     def _build_compacted_items(
         self, summary: str, kept_messages: List[Dict[str, Any]]

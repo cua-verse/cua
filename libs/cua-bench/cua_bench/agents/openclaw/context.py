@@ -33,7 +33,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from agent.model_config import ResolvedModel, resolve_model
 from agent.callbacks.base import AsyncCallbackHandler
+
+from .helper_runtime import call_helper_model
 
 # ---------------------------------------------------------------------------
 # Constants (from OpenClaw reference)
@@ -77,16 +80,8 @@ def resolve_context_window(model: str) -> int:
 
     Falls back to DEFAULT_CONTEXT_TOKENS for unknown models.
     """
-    for candidate in _model_candidates(model):
-        try:
-            import litellm
-            info = litellm.get_model_info(candidate)
-            max_input = info.get("max_input_tokens")
-            if max_input and max_input > 0:
-                return int(max_input)
-        except Exception:
-            continue
-    return DEFAULT_CONTEXT_TOKENS
+    resolved = resolve_model(model)
+    return resolved.context_window or DEFAULT_CONTEXT_TOKENS
 
 
 def _model_candidates(model: str) -> list[str]:
@@ -277,8 +272,14 @@ class ContextOverflowCallback(AsyncCallbackHandler):
         threshold: float = 0.80,
         model: str = "",
         instructions_tokens: int = 0,
+        resolved_model: ResolvedModel | None = None,
     ):
-        self._context_window = context_window or resolve_context_window(model)
+        if context_window is not None:
+            self._context_window = context_window
+        elif resolved_model is not None:
+            self._context_window = resolved_model.context_window or DEFAULT_CONTEXT_TOKENS
+        else:
+            self._context_window = resolve_context_window(model)
         self._threshold = threshold
         self._instructions_tokens = instructions_tokens
         self._current_tokens = 0
@@ -868,8 +869,9 @@ async def summarize_chunk(
     custom_instructions: str | None = None,
     timeout: int = SUMMARIZATION_TIMEOUT,
     thinking_params: dict[str, Any] | None = None,
+    summary_runtime: ResolvedModel | None = None,
 ) -> str:
-    """Summarize a chunk of messages via litellm.acompletion.
+    """Summarize a chunk of messages via the shared helper runtime adapter.
 
     Args:
         messages: The message chunk to summarize.
@@ -880,8 +882,6 @@ async def summarize_chunk(
     Returns:
         Summary text.
     """
-    import litellm
-
     system_parts = [SUMMARIZATION_SYSTEM_PROMPT]
     if custom_instructions:
         system_parts.append(custom_instructions)
@@ -903,18 +903,19 @@ async def summarize_chunk(
     ]
 
     last_error: Exception | None = None
+    resolved_summary = summary_runtime or resolve_model(model)
     for attempt in range(MAX_SUMMARIZATION_RETRIES):
         try:
-            response = await litellm.acompletion(
-                model=model,
+            response = await call_helper_model(
+                resolved_summary,
+                purpose="compaction",
                 messages=llm_messages,
                 max_tokens=2048,
                 temperature=1.0,
                 timeout=timeout,
-                **(thinking_params or {}),
+                thinking_params=thinking_params,
             )
-            content = response.choices[0].message.content
-            return content.strip() if content else DEFAULT_SUMMARY_FALLBACK
+            return response.text or DEFAULT_SUMMARY_FALLBACK
         except Exception as e:
             last_error = e
             if attempt < MAX_SUMMARIZATION_RETRIES - 1:
@@ -933,6 +934,7 @@ async def summarize_chunks_iterative(
     custom_instructions: str | None = None,
     timeout: int = SUMMARIZATION_TIMEOUT,
     thinking_params: dict[str, Any] | None = None,
+    summary_runtime: ResolvedModel | None = None,
 ) -> str:
     """Iteratively summarize chunks, feeding each summary as context to the next.
 
@@ -951,6 +953,7 @@ async def summarize_chunks_iterative(
             custom_instructions=custom_instructions,
             timeout=timeout,
             thinking_params=thinking_params,
+            summary_runtime=summary_runtime,
         )
 
     return summary or DEFAULT_SUMMARY_FALLBACK
@@ -970,6 +973,7 @@ async def summarize_with_fallback(
     custom_instructions: str | None = None,
     timeout: int = SUMMARIZATION_TIMEOUT,
     thinking_params: dict[str, Any] | None = None,
+    summary_runtime: ResolvedModel | None = None,
 ) -> str:
     """Three-tier summarization with progressive fallback.
 
@@ -985,6 +989,7 @@ async def summarize_with_fallback(
                 chunks, model, custom_instructions=custom_instructions,
                 timeout=timeout,
                 thinking_params=thinking_params,
+                summary_runtime=summary_runtime,
             )
     except Exception as e:
         print(f"[Compaction] Tier 1 (full) failed: {e}")
@@ -1000,6 +1005,7 @@ async def summarize_with_fallback(
                     chunks, model, custom_instructions=custom_instructions,
                     timeout=timeout,
                     thinking_params=thinking_params,
+                    summary_runtime=summary_runtime,
                 )
                 if oversized_count > 0:
                     summary += f"\n\n[Note: {oversized_count} oversized message(s) excluded from summary]"
@@ -1029,6 +1035,7 @@ async def compact_messages(
     custom_instructions: str | None = None,
     timeout: int = SUMMARIZATION_TIMEOUT,
     thinking_params: dict[str, Any] | None = None,
+    summary_runtime: ResolvedModel | None = None,
 ) -> CompactionResult:
     """Compact older conversation messages into a summary with budget-aware splitting.
 
@@ -1160,6 +1167,7 @@ async def compact_messages(
             custom_instructions=custom_instructions,
             timeout=timeout,
             thinking_params=thinking_params,
+            summary_runtime=summary_runtime,
         )
     else:
         summary = DEFAULT_SUMMARY_FALLBACK

@@ -9,7 +9,14 @@ import sys
 from . import loops
 from .agent import ComputerAgent
 from .decorators import register_agent
-from .model_config import ModelConfig, get_model_config, register_model_config
+from .model_config import (
+    HelperTransportDefaults,
+    ModelConfig,
+    ResolvedModel,
+    get_model_config,
+    register_model_config,
+    resolve_model,
+)
 from .types import AgentResponse, Messages
 
 __all__ = [
@@ -18,8 +25,11 @@ __all__ = [
     "Messages",
     "AgentResponse",
     "ModelConfig",
+    "HelperTransportDefaults",
+    "ResolvedModel",
     "get_model_config",
     "register_model_config",
+    "resolve_model",
 ]
 
 __version__ = "0.4.0"

@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
 
+from agent.model_config import ResolvedModel, resolve_model
+
 
 class ThinkLevel(str, Enum):
     """Thinking level — controls reasoning depth.
@@ -69,22 +71,35 @@ class ThinkingConfig:
         """Return provider-specific kwargs for the main agent loop."""
         return resolve_thinking_params(self.level, model, transport="responses")
 
-    def flush_params(self, model: str) -> dict[str, Any]:
+    def flush_params(
+        self, model: str, *, runtime: ResolvedModel | None = None
+    ) -> dict[str, Any]:
         """Return provider-specific kwargs for memory flush helper calls."""
-        transport: Literal["responses", "chat"] = (
-            "responses" if _is_openai_model(model) else "chat"
-        )
+        resolved = runtime or resolve_model(model)
+        transport = resolved.helper_transport_defaults.memory_flush
         return resolve_thinking_params(self.flush_level, model, transport=transport)
 
-    def compaction_params(self, model: str) -> dict[str, Any]:
+    def compaction_params(
+        self, model: str, *, runtime: ResolvedModel | None = None
+    ) -> dict[str, Any]:
         """Return provider-specific kwargs for compaction summarization calls."""
+        resolved = runtime or resolve_model(model)
         return resolve_thinking_params(
-            self.compaction_level, model, transport="chat"
+            self.compaction_level,
+            model,
+            transport=resolved.helper_transport_defaults.compaction,
         )
 
-    def vision_params(self, model: str) -> dict[str, Any]:
+    def vision_params(
+        self, model: str, *, runtime: ResolvedModel | None = None
+    ) -> dict[str, Any]:
         """Return provider-specific kwargs for vision helper calls."""
-        return resolve_thinking_params(self.vision_level, model, transport="chat")
+        resolved = runtime or resolve_model(model)
+        return resolve_thinking_params(
+            self.vision_level,
+            model,
+            transport=resolved.helper_transport_defaults.vision,
+        )
 
 
 # ---------------------------------------------------------------------------
