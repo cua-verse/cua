@@ -533,8 +533,8 @@
     },
     {
       "id": "US-OC-020",
-      "title": "Thinking Mode: Wire into Memory Flush, Compaction, and Transcript",
-      "description": "As a benchmark operator, I want per-call-site thinking config for memory flush and compaction LLM calls, and thinking blocks captured in the session transcript, so that auxiliary summarization calls can use a different thinking mode than the main loop, and token estimation / compaction correctly account for thinking content.",
+      "title": "Thinking Mode: Residual Transcript Capture and Legacy Helper Cleanup",
+      "description": "As a benchmark operator, I want the remaining non-policy thinking-mode wiring cleaned up after the initial implementation, so that transcript capture, token estimation, and any legacy helper call sites stay aligned with the newer model-aware runtime policy work.",
       "context": {
         "existingFiles": [
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (_run_memory_flush line 528 — direct litellm.acompletion; _compact_and_rebuild line 601 — calls compact_messages)",
@@ -545,16 +545,15 @@
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: _run_memory_flush passes thinking API params to litellm.acompletion when flush_level is not off",
-        "Level 1: compact_messages and _summarize_chunk accept and pass thinking params when compaction_level is not off",
-        "Level 1: Unit test: ThinkingConfig(level=deep, flush_level=light, compaction_level=off) produces correct API params for each call site",
+        "Level 1: Any remaining legacy helper call sites that still consume ThinkingConfig directly are either removed, delegated to the model-aware adapter introduced by US-OC-046, or explicitly documented as unsupported for provider-specific reasoning params",
+        "Level 1: Unit test coverage remains for per-call-site ThinkingConfig inheritance semantics (main vs flush vs compaction) independent of the transport-specific adapter used at runtime",
         "Level 1: group_step_output() captures thinking blocks from output items as {type: \"thinking\", thinking: \"...\"} in assistant_content",
         "Level 1: Token estimation in context.py counts thinking block characters (tool-result-char-estimator parity with OpenClaw)",
-        "Level 2: run_magic_tower.sh 50 with --thinking-level medium and CONTEXT_WINDOW_OVERRIDE=50000 — compaction triggers and completes without error"
+        "Level 2: A thinking-enabled run still records expected thinking/transcript artifacts after US-OC-046 lands, without reintroducing transport-specific helper failures"
       ],
       "priority": 26,
       "passes": false,
-      "notes": "Implemented most of the story: solver/openclaw agent now support separate main/flush/compaction thinking levels, with flush/compaction inheriting the main level by default; `run_magic_tower.sh` forwards the three flags; memory flush and compaction summarization pass provider-specific thinking params through to `litellm.acompletion`; transcript grouping preserves textual thinking blocks; token-estimation tests now explicitly cover thinking-block chars. Real VM testing with GPT-5.4 shows that clean sessions work with thinking enabled and produce reasoning items in trajectory logs, but replay of opaque OpenAI Responses reasoning items (`type: reasoning`, `summary: []`) is still not fully safe across persisted sessions. Interim guards were added in `agent/loops/openai.py`, but provider-safe replay remains follow-up work for US-OC-038/039/041. KNOWN BUG: thinking_params maps OpenAI to reasoning={effort, summary} which is a Responses API parameter. Compaction/flush use litellm.acompletion() (Chat Completions API) which rejects 'reasoning' as unknown. GPT-5.4 with thinking_level=medium triggers this: compaction and memory flush fail with 'Unknown parameter: reasoning'. Fix: either route compaction/flush through Responses API for OpenAI, or strip reasoning from thinking_params in acompletion() call sites."
+      "notes": "This story is now narrowed. Most of the original implementation landed: solver/openclaw agent support separate main/flush/compaction thinking levels, `run_magic_tower.sh` forwards the flags, transcript grouping preserves textual thinking blocks, and token-estimation tests cover thinking-block chars. The previously open GPT-5.4/OpenAI helper-call bug is no longer owned here; it is superseded by US-OC-046, which now owns model-aware thinking-param mapping, helper-call compatibility, runtime sanitize policy, and reasoning retention behavior. Keep US-OC-020 focused on residual transcript-capture semantics, ThinkingConfig inheritance behavior, and cleanup of any legacy direct helper wiring left after US-OC-046."
     },
     {
       "id": "US-OC-021",
@@ -643,7 +642,7 @@
         "Level 1: Fix the CUA Anthropic loop to handle the new response format correctly",
         "Level 2: CONTEXT_WINDOW_OVERRIDE=35000 bash run_magic_tower.sh 50 with anthropic/claude-opus-4-6 — completes all 50 steps including compaction without tool_use pairing errors"
       ],
-      "priority": 22,
+      "priority": 40.5,
       "passes": false,
       "notes": "Discovered 2026-03-16: anthropic.py was patched to route claude-opus-4-6 and claude-sonnet-4-6 to computer_20251124 tool version (computer-use-2025-11-24 beta). After compaction at turn 11, the agent crashes at turn 19 with 'tool_use ids were found without tool_result blocks immediately after'. The same test passes with anthropic/claude-sonnet-4-20250514 (which uses computer_20250124). The orphaned tool_use is at messages.3 in the post-compaction conversation — entirely managed by CUA's internal loop, not our replay/repair code. Root cause is likely a response format difference in the newer computer-use API version that the CUA loop's message converter doesn't handle. Workaround: revert anthropic.py to use computer_20250124 for all models."
     },
@@ -769,8 +768,8 @@
     },
     {
       "id": "US-OC-032",
-      "title": "Cross-Model Message Format Compatibility: Investigation + Test Suite",
-      "description": "As the benchmark operator, I want to verify that the current message format (transcript replay, compaction summaries, memory flush) works correctly across model families (Anthropic, OpenAI, Gemini, Kimi K2.5) and in cross-model configurations (e.g., Anthropic for computer-use + OpenAI for summarization), and build a test suite to prevent format regressions, so that the harness is not silently locked to one provider.",
+      "title": "Cross-Model Replay and Message Format Compatibility: Investigation + Test Suite",
+      "description": "As the benchmark operator, I want to verify that transcript replay, compaction summaries, memory flush artifacts, and post-compaction message rebuilding work correctly across model families (Anthropic, OpenAI, Gemini, Kimi K2.5) and in cross-model configurations (e.g., Anthropic for computer-use + OpenAI for summarization), and build a test suite to prevent format regressions, so that the harness is not silently locked to one provider or replay path.",
       "context": {
         "existingFiles": [
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py (convert_to_responses_api_format, build_replay_messages, sanitize_history)",
@@ -783,9 +782,10 @@
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: Investigation report docs/cross-model-compatibility.md covering: (a) Anthropic loop format expectations, (b) OpenAI loop format expectations, (c) Gemini loop format expectations (if CUA supports it), (d) Kimi/Moonshot format expectations, (e) format mismatches found, (f) cross-model combinations tested",
+        "Level 1: Investigation report docs/cross-model-compatibility.md covering: (a) Anthropic loop format expectations, (b) OpenAI loop format expectations, (c) Gemini loop format expectations (if CUA supports it), (d) Kimi/Moonshot format expectations, (e) replay-specific mismatches found, (f) cross-model combinations tested",
         "Level 1: Unit tests — replay messages round-trip correctly through each supported loop's format converter (mock the LLM call, test the message pipeline)",
         "Level 1: Unit tests — compaction summary output from model A replays correctly into model B's loop (test all pairwise combinations: Anthropic↔OpenAI, Anthropic↔Gemini, etc.)",
+        "Level 1: Unit tests — malformed or legacy transcript shapes (for example assistant content as string, stale usage after compaction, replayed computer/tool outputs) are repaired or normalized consistently before replay across supported providers",
         "Level 2: run_magic_tower.sh 15 with openai/computer-use-preview — no API format errors from replay messages",
         "Level 2: run_magic_tower.sh 15 with anthropic/claude-sonnet-4-20250514 --summary-model openai/gpt-4o — compaction completes without format errors",
         "Level 2: run_magic_tower.sh 15 with Gemini model (if computer-use supported) — document results even if it fails",
@@ -793,7 +793,7 @@
       ],
       "priority": 32,
       "passes": false,
-      "notes": "Models to cover: Anthropic (claude-sonnet-4-20250514, claude-opus-4-6), OpenAI (computer-use-preview, gpt-4o), Google Gemini (gemini-2.5-pro or similar with computer-use if available), Kimi K2.5. For models without computer-use support, test only the summarization/flush path (as --summary-model). Cross-model test matrix: main-model × summary-model for all viable combinations. If a model family is not supported by CUA's loop system, document the gap and what would be needed."
+      "notes": "Models to cover: Anthropic (claude-sonnet-4-20250514, claude-opus-4-6), OpenAI (computer-use-preview, gpt-4o, gpt-5.4), Google Gemini (gemini-2.5-pro or similar with computer-use if available), Kimi K2.5. For models without computer-use support, test only the summarization/flush path (as --summary-model). Cross-model test matrix: main-model × summary-model for all viable combinations. This story explicitly owns replay-path parity gaps found in the Pi Agent audit beyond transport-only formatting: malformed assistant payload repair, stale usage handling across compaction boundaries, provider-aware tool/computer call replay, and keeping replay/compaction rebuild behavior aligned with the main send path. If a model family is not supported by CUA's loop system, document the gap and what would be needed."
     },
     {
       "id": "US-OC-033",
@@ -1133,6 +1133,251 @@
       "priority": 39,
       "passes": false,
       "notes": "Write-time repair is preferred over sanitize-time (repair_orphaned_pairs) because: (1) agent will run in long-lived sessions, not just batch mode, (2) on-disk transcripts should always be valid and readable, (3) crash recovery replays clean history without needing a repair pass, (4) streaming-friendly — synthetic results appear immediately. Once guard is in place, repair_orphaned_pairs(synthesize=True) becomes a safety net. Consider setting synthesize=False in sanitize_items() when guard is active."
+    },
+    {
+      "id": "US-OC-046",
+      "title": "TranscriptPolicy Parity: Sanitize Mode + Runtime Model-Resolved Policy",
+      "description": "As the agent harness, I want transcript sanitization and thinking-parameter handling to resolve from the live model and active transport, so that the runtime pipeline matches OpenClaw's policy-driven behavior instead of relying on target-only defaults or blindly reusing one reasoning payload shape across helper call sites.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/canonical.py (TranscriptPolicy, get_transcript_policy, sanitize_items)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (main predict_step call path and compaction rebuild path)"
+        ],
+        "depends": "US-OC-041 must be done first (introduces TranscriptPolicy). US-OC-043 through US-OC-045 may land before or after this story, but any overlapping runtime policy work should be folded into this implementation rather than left ambiguous",
+        "reference": "../openclaw/src/agents/transcript-policy.ts (sanitizeMode and broader policy resolution); ../openclaw/src/agents/pi-embedded-runner/google.ts (sanitizeSessionHistory runtime application of policy-driven passes)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: TranscriptPolicy extended with sanitize_mode field mirroring OpenClaw's intent ('full'|'images-only') and any remaining flags needed by the current provider set",
+        "Level 1: sanitize_items() accepts model= and resolves policy via get_transcript_policy(model) in production call sites rather than target-only defaults",
+        "Level 1: OpenClawComputerAgent.run() applies canonical normalization + sanitize_items() on the main pre-predict_step send path, not only in the compaction rebuild path",
+        "Level 1: Thinking parameter handling is split into model intent vs transport/call-site mapping, so helper paths do not blindly forward OpenAI Responses-style reasoning payloads into incompatible litellm.acompletion() calls",
+        "Level 1: Memory flush and compaction summarization paths use the same model-aware thinking adapter as the main runtime, or explicitly suppress/remap unsupported reasoning params per transport",
+        "Level 1: Session persistence behavior for reasoning is made explicit and tested: either normalized thinking blocks plus optional provider metadata (for example thinkingSignature) are retained in canonical session logs and sanitized on replay/history surfaces, or reasoning is intentionally dropped with that tradeoff documented in code and PRD notes",
+        "Level 1: Unit tests pass — same canonical transcript sanitizes differently for Anthropic/OpenAI/Gemini when model strings differ, without explicit manual policy injection",
+        "Level 1: Unit tests pass — GPT-5.4/OpenAI thinking-enabled helper calls no longer fail with unknown reasoning parameter errors during memory flush or compaction summarization",
+        "Level 2: bash run_magic_tower.sh 50 openai/gpt-5.4 — transcript replay path still works with runtime-resolved policy",
+        "Level 2: bash run_magic_tower.sh 50 anthropic/claude-sonnet-4-20250514 — transcript send path uses the same sanitize pipeline and does not regress turn ordering"
+      ],
+      "priority": 39.1,
+      "passes": true,
+      "notes": "Completed as the canonical owner of the runtime transcript/thinking parity work. TranscriptPolicy now carries OpenClaw-style sanitize intent (`sanitize_mode`) and resolves from the live model via `get_transcript_policy(model)`. The main OpenClaw run path applies model-aware sanitize handling on transcript-derived history while preserving already-native OpenAI Responses item streams, and compaction rebuild uses the same model-resolved sanitize pipeline. Thinking handling is split by transport/call site: the main runtime uses Responses-style `reasoning` where supported, helper paths use transport-aware mapping (`aresponses` for OpenAI memory flush, chat/helper-safe params for compaction and vision tooling). Session reasoning retention is now explicit: canonical/session logs keep normalized `thinking` blocks plus optional `thinkingSignature`, and replay/history surfaces sanitize per provider policy. US-OC-020 remains residual cleanup only."
+    },
+    {
+      "id": "US-OC-047",
+      "title": "Model Resolution and Runtime Control Plane Parity: Capability-Aware Resolver Beyond Format Metadata",
+      "description": "As the agent harness, I want the lightweight ModelConfig registry extended into a capability-aware model resolution layer and runtime-control-plane input object that capture provider API, context window, transcript policy hints, helper transport behavior, transcript API labels, and forward-compat defaults, so that model/provider behavior is centralized more like OpenClaw's resolveModel() rather than split across litellm assumptions and ad hoc defaults.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/python/agent/agent/model_config.py (current flat ModelConfig registry)",
+          "submodules/cua/libs/python/agent/agent/loops/openai.py (reads format metadata from ModelConfig)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (context window fallback via litellm model info)"
+        ],
+      "depends": "US-OC-040 must be done first (provides the initial registry); US-OC-046 is higher priority and should land first so transcript policy can plug into the richer model resolution path",
+        "reference": "../openclaw/src/agents/pi-embedded-runner/model.ts (resolveModel); ../openclaw/src/agents/transcript-policy.ts (policy resolution inputs: modelApi, provider, modelId)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: Replace or extend ModelConfig with a resolver output that includes at least provider, model_api, adapter_target, tool_schema_type, screenshot_output_type, supports_safety_checks, action_format, transcript_api_label, helper_transport_defaults, and context_window when known",
+        "Level 1: A single resolver function accepts the litellm model string and returns the structured model metadata used by loops, context sizing, transcript policy resolution, and transcript logging",
+        "Level 1: Transcript policy resolution consumes structured model metadata rather than re-parsing model strings independently",
+        "Level 1: The main agent runtime constructs one per-run resolved model/runtime object and uses it instead of re-deriving provider behavior independently in prompt, context, transcript, and helper-call code paths",
+        "Level 1: Memory flush and compaction summarization call through a shared resolved runtime/helper adapter instead of choosing provider transport behavior locally inside memory_flush.py or context.py",
+        "Level 1: Helper transport selection, transcript api labeling, and context-window preference do not rely on ad hoc raw model-string parsing inside downstream helper modules once the runtime object exists",
+        "Level 1: The per-run resolved runtime object is the single source of truth for helper transport mode, transcript api label, context window preference, and transcript policy inputs across main-turn, memory-flush, and compaction call paths",
+        "Level 1: Unit tests pass — helper modules no longer need provider-specific conditionals to choose transport behavior once given resolved runtime metadata, and adding a hypothetical new provider/model entry changes loop/helper/sanitize behavior through data only",
+        "Level 1: Unit tests pass — adding a hypothetical new provider/model entry changes loop/tool/sanitize behavior through data only, with zero conditional code edits in loops",
+        "Level 2: bash run_magic_tower.sh 50 openai/computer-use-preview and bash run_magic_tower.sh 50 openai/gpt-5.4 both pass with the resolver supplying model-specific behavior",
+        "Level 2: CONTEXT_WINDOW_OVERRIDE unset — context window logic prefers resolved model metadata before falling back to raw litellm lookups",
+        "Level 2: A run that triggers memory flush and compaction confirms main turn, memory flush, and compaction summarization all consume the same resolved runtime metadata object or adapter rather than each re-resolving provider behavior independently"
+      ],
+      "priority": 41,
+      "passes": true,
+      "notes": "Completed as the canonical owner of the runtime model-resolution/control-plane unification. The lightweight model registry now resolves into structured runtime metadata carrying provider, model_api, adapter target, transcript_api_label, helper transport defaults, context window, and forward-compatible capability fields. OpenClaw's main turn, transcript policy resolution, transcript API labeling, context sizing, memory flush, and compaction now consume the same resolved runtime object or shared helper adapter instead of re-deriving provider behavior independently from raw model strings. Focused tests cover resolver behavior, canonical formatting/transcript policy use, helper transport selection, compaction integration, and the context callback path; Level 2 validation confirmed that a run triggering memory flush and compaction used the unified runtime path successfully, with the remaining replay-history degradation issue tracked separately under US-OC-032."
+    },
+    {
+      "id": "US-OC-048",
+      "title": "Prompt Tooling Parity: Expose Computer Tool in System Prompt",
+      "description": "As the agent harness, I want the system prompt's tooling section to explicitly include the primary Computer tool alongside BaseTool-derived tools, so that the model is instructed about its main desktop interaction capability instead of learning it only from the raw tool schema payload.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py (build_tools + get_tool_summaries currently filter to BaseTool instances)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/prompt.py (Tools section consumes tool_summaries)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (builds tool_summaries before PromptBuilder)"
+        ],
+        "depends": "None — targeted parity fix",
+        "reference": "../openclaw/src/agents/system-prompt.ts (tool availability section includes the full enabled tooling surface, not just one subclass family)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: Unit tests pass — tool summaries include a stable summary entry for the Computer tool even though it is not a BaseTool subclass",
+        "Level 1: PromptBuilder's Tools section lists the Computer tool with a description explaining screenshot observation plus mouse/keyboard interaction",
+        "Level 1: No existing BaseTool summaries regress or disappear when the Computer tool is added",
+        "Level 2: Integration test or prompt capture confirms the built system prompt names the Computer tool explicitly"
+      ],
+      "priority": 21.5,
+      "passes": true,
+      "notes": "Completed as a narrow prompt/tool-summary parity fix. `get_tool_summaries()` now emits a stable summary entry for the primary `computer` tool even though it is not a BaseTool subclass, while preserving existing BaseTool-derived summaries unchanged. Focused tests cover both the summary extraction path and end-to-end prompt capture in `OpenClawAgent.perform_task()`, so the built system prompt now explicitly names the Computer tool and describes screenshot observation plus mouse/keyboard interaction."
+    },
+    {
+      "id": "US-OC-049",
+      "title": "Transcript Observability Parity: Provider-Aware API Metadata",
+      "description": "As the agent harness, I want transcript message entries to record provider-accurate API metadata derived from the resolved runtime model instead of hardcoded labels, so that logs, replay audits, and future provider-specific transcript logic can trust on-disk observability data.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (assistant transcript logging currently hardcodes api='openai-responses')",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py (append_message persists optional api metadata)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (runtime model selection entry point)"
+        ],
+        "depends": "US-OC-047 should land first so this story can consume the shared resolved runtime object's transcript_api_label instead of introducing another local provider-label resolver",
+        "reference": "../openclaw/src/agents/pi-embedded-runner/run.ts (provider/model resolution precedes attempt logging and runtime metadata propagation)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: Unit tests pass — transcript assistant entries record provider-accurate api labels for at least Anthropic and OpenAI runs",
+        "Level 1: The hardcoded `openai-responses` literal is removed from the assistant transcript logging path in favor of a provider-aware value",
+        "Level 1: If model resolution metadata is unavailable, the fallback api label is explicit and documented rather than silently mislabeling the transcript",
+        "Level 2: A short Anthropic run and a short OpenAI run produce different `message.api` values in transcript.jsonl consistent with the active runtime"
+      ],
+      "priority": 22.5,
+      "passes": false,
+      "notes": "Motivated by Pi Agent audit finding: the current loop writes `api: \"openai-responses\"` on assistant transcript entries even when the run uses Anthropic. This is primarily an observability/correctness fix, but it also lays groundwork for future provider-aware transcript tooling and debugging."
+    },
+    {
+      "id": "US-OC-050",
+      "title": "Spike: Verify litellm.aresponses() for Anthropic Computer-Use + Thinking",
+      "description": "As the agent harness, I want to verify that litellm.aresponses() works for Anthropic models with computer-use tools and thinking enabled, so that we can build a unified loop on top of it instead of maintaining separate per-provider loops.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (current Anthropic loop using litellm.acompletion — 1684 LOC with manual format conversion)",
+          "submodules/cua/libs/python/agent/agent/loops/openai.py (current OpenAI loop using litellm.aresponses — 266 LOC, native format)",
+          "submodules/cua/libs/python/agent/agent/model_config.py (ResolvedModel + ModelConfig registry — US-OC-040/047)"
+        ],
+        "depends": "US-OC-047 (runtime resolver) must be done first — already passes",
+        "reference": "https://docs.litellm.ai/docs/response_api (litellm responses API — supports all providers); ../openclaw/src/agents/pi-embedded-runner/run/attempt.ts (pi-ai unified loop pattern)",
+        "planFile": "docs/plan/US-OC-050-054-unified-loop.md"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Spike script exists that calls litellm.aresponses() with an Anthropic model, computer-use tool schema, and thinking params",
+        "Level 1: Document whether aresponses() returns: (a) computer-use actions in output items, (b) reasoning/thinking traces, (c) correct usage stats",
+        "Level 1: If aresponses() works — document the response shape and any differences from acompletion() path",
+        "Level 1: If aresponses() fails — document the error, identify the blocker, and define fallback approach (acompletion + LiteLLMCompletionResponsesConfig.transform_chat_completion_response_to_responses_api_response)",
+        "Level 2: VM test with Anthropic model via aresponses() — agent completes at least 5 steps with computer-use actions",
+        "Level 2: VM test with OpenAI model via aresponses() — agent completes at least 5 steps (regression baseline)"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "This is a spike/feasibility story that gates US-OC-051–054. The key question: can litellm.aresponses() replace litellm.acompletion() for Anthropic with computer-use tools? If yes, the unified loop uses aresponses() everywhere and gets native Responses API format for free (including reasoning). If no, the fallback is acompletion() + LiteLLMCompletionResponsesConfig.transform_chat_completion_response_to_responses_api_response() which already handles reasoning_content extraction. Either way, the unified loop architecture works — the spike determines which API method to use as the transport."
+    },
+    {
+      "id": "US-OC-051",
+      "title": "Unified Request Builder: Composable Provider-Specific Request Patching",
+      "description": "As the agent harness, I want a composable request builder that assembles provider-specific API kwargs from ResolvedModel metadata, so that provider differences (beta headers, reasoning params, prompt caching, tool schemas) are handled by declarative patchers instead of per-loop code.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/python/agent/agent/model_config.py (ResolvedModel — provider, model_api, adapter_target, tool_schema_type)",
+          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (_prepare_tools_for_anthropic, _get_tool_config_for_model, MODEL_TOOL_MAPPING, beta header injection, _add_cache_control — provider-specific request logic to extract)",
+          "submodules/cua/libs/python/agent/agent/loops/openai.py (_prepare_tools_for_openai, hardcoded reasoning/truncation — provider-specific request logic to extract)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/thinking.py (resolve_thinking_params — already provider-aware)"
+        ],
+        "depends": "US-OC-050 (spike determines whether transport is aresponses-only or aresponses+acompletion fallback)",
+        "reference": "../openclaw/src/agents/pi-embedded-runner/extra-params.ts (applyExtraParamsToAgent — composable stream wrapper chain); ../openclaw/src/agents/pi-embedded-runner/stream-payload-utils.ts (streamWithPayloadPatch pattern)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: RequestBuilder (or build_request_kwargs function) accepts ResolvedModel + messages + tools + generation kwargs and returns provider-ready api_kwargs dict",
+        "Level 1: Unit tests — Anthropic request includes beta headers, computer tool schema with correct tool_version and display dimensions",
+        "Level 1: Unit tests — OpenAI request includes reasoning params, truncation, computer tool schema matching model config",
+        "Level 1: Unit tests — thinking params from ThinkingConfig merge correctly (don't conflict with hardcoded provider defaults)",
+        "Level 1: Unit tests — prompt caching (Anthropic-only) applies cache_control when enabled, skipped for other providers",
+        "Level 1: Tool formatting unified — single format_tools() dispatches to provider-specific schema based on ResolvedModel.tool_schema_type"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "Modeled on OpenClaw's applyExtraParamsToAgent() + streamWithPayloadPatch pattern, but simpler — Python dict patching instead of streaming function composition. The request builder is a pipeline of patcher functions: base_kwargs() → patch_anthropic_headers() → patch_openai_reasoning() → patch_prompt_caching() → patch_thinking(). Each patcher checks ResolvedModel.provider and is a no-op for non-matching providers. MODEL_TOOL_MAPPING from anthropic.py should be absorbed into ModelConfig registry entries."
+    },
+    {
+      "id": "US-OC-052",
+      "title": "Unified Response Normalizer: Provider Response → Responses API Output Items",
+      "description": "As the agent harness, I want a single response normalization function that converts any provider's API response into Responses API output items (including reasoning traces and computer actions), so that the loop never needs provider-specific response parsing.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (_convert_completion_to_responses_items — 437 lines of manual conversion to replace)",
+          "submodules/cua/libs/python/agent/agent/responses.py (make_reasoning_item, make_click_item, etc. — output item constructors to reuse)",
+          "submodules/cua/libs/python/agent/agent/loops/openai.py (response.model_dump() passthrough — the target simplicity)"
+        ],
+        "depends": "US-OC-050 (spike determines response shape for each transport)",
+        "reference": "LiteLLMCompletionResponsesConfig._extract_reasoning_output_items and transform_chat_completion_response_to_responses_api_response (litellm built-in — already handles reasoning_content extraction but not computer-use actions)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: normalize_response() function accepts litellm response (from either aresponses or acompletion) and returns {'output': items, 'usage': usage_dict}",
+        "Level 1: Unit tests — aresponses() response passes through with reasoning items preserved",
+        "Level 1: Unit tests — acompletion() response with thinking_blocks produces reasoning items with signature metadata",
+        "Level 1: Unit tests — acompletion() response with reasoning_content (no thinking_blocks) produces reasoning items as fallback",
+        "Level 1: Unit tests — Anthropic computer-use tool_use actions correctly mapped to computer_call output items (click, type, scroll, keypress, etc.)",
+        "Level 1: Unit tests — usage transformation works for both response types",
+        "Level 2: VM test with Anthropic model — trajectory files contain reasoning items",
+        "Level 2: VM test with OpenAI model — trajectory files contain reasoning items"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": "Two codepaths based on US-OC-050 spike results: (1) If aresponses() works for all providers: normalize_response() is mostly passthrough + model_dump() for both. (2) If acompletion() fallback needed for Anthropic: use LiteLLMCompletionResponsesConfig.transform_chat_completion_response_to_responses_api_response() as base, then layer CUA-specific computer action mapping on top. Either way, the 437-line _convert_completion_to_responses_items() is replaced by a much simpler function. The computer action mapping (click, type, scroll etc.) is the part litellm can't handle — extract it as a focused helper."
+    },
+    {
+      "id": "US-OC-053",
+      "title": "Unified Agent Loop: Single predict_step Replacing Per-Provider Loops",
+      "description": "As the agent harness, I want a single unified predict_step() implementation that handles all providers via the request builder and response normalizer, so that adding a new provider requires zero loop code and the reasoning trace bug class is eliminated by design.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (AnthropicHostedToolsConfig — to be replaced)",
+          "submodules/cua/libs/python/agent/agent/loops/openai.py (OpenAIComputerUseConfig — to be replaced)",
+          "submodules/cua/libs/python/agent/agent/loops/base.py (AsyncAgentConfig protocol — predict_step contract)",
+          "submodules/cua/libs/python/agent/agent/agent.py (ComputerAgent — calls predict_step via agent_loop)",
+          "submodules/cua/libs/python/agent/agent/decorators.py (@register_agent, find_agent_config — loop selection)"
+        ],
+        "depends": "US-OC-051 (request builder) and US-OC-052 (response normalizer) must be done first"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: UnifiedAgentConfig class implements AsyncAgentConfig with single predict_step() that delegates to request builder + API call + response normalizer",
+        "Level 1: predict_step() selects API method (aresponses vs acompletion) based on ResolvedModel metadata, not model string parsing",
+        "Level 1: predict_click() implemented in unified class using same request builder + response normalizer",
+        "Level 1: @register_agent catches all models that were previously handled by AnthropicHostedToolsConfig and OpenAIComputerUseConfig",
+        "Level 1: Unit tests — predict_step returns correct output format for mocked Anthropic responses",
+        "Level 1: Unit tests — predict_step returns correct output format for mocked OpenAI responses",
+        "Level 2: VM test — bash run_magic_tower.sh 50 with Anthropic model passes through unified loop",
+        "Level 2: VM test — bash run_magic_tower.sh 15 openai/gpt-5.4 passes through unified loop",
+        "Level 2: VM test — reasoning traces appear in trajectory files for both providers"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": "This is the pi-ai equivalent: one loop, all providers. The predict_step body becomes roughly: resolve_model → build_request_kwargs → call_api → normalize_response → return. Provider differences are entirely in the request builder (US-OC-051) and response normalizer (US-OC-052). The unified class should coexist with old loops during development (higher @register_agent priority) so rollback is trivial."
+    },
+    {
+      "id": "US-OC-054",
+      "title": "Cleanup: Delete Per-Provider Loop Classes After Unified Loop Validation",
+      "description": "As the agent harness, I want the old AnthropicHostedToolsConfig and OpenAIComputerUseConfig loop classes removed after the unified loop is validated, so that the codebase has one path for all providers and no dead code.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (AnthropicHostedToolsConfig + 9 helper functions — ~1684 LOC to delete or gut)",
+          "submodules/cua/libs/python/agent/agent/loops/openai.py (OpenAIComputerUseConfig + 2 helper functions — ~266 LOC to delete or gut)",
+          "submodules/cua/libs/python/agent/agent/loops/__init__.py (loop imports to update)"
+        ],
+        "depends": "US-OC-053 (unified loop must be validated with VM tests before deleting old code)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: AnthropicHostedToolsConfig and OpenAIComputerUseConfig classes deleted (or reduced to thin wrappers that delegate to unified loop)",
+        "Level 1: _convert_completion_to_responses_items, _convert_responses_items_to_completion_messages, _prepare_tools_for_anthropic, _prepare_tools_for_openai — all deleted",
+        "Level 1: No remaining references to deleted classes or functions (grep verification)",
+        "Level 1: MODEL_TOOL_MAPPING in anthropic.py absorbed into ModelConfig registry (model_config.py)",
+        "Level 2: VM test — bash run_magic_tower.sh 50 with Anthropic model still passes",
+        "Level 2: VM test — bash run_magic_tower.sh 15 openai/gpt-5.4 still passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": "Pure cleanup story — no behavioral changes. The old loops should only be deleted after US-OC-053's VM tests confirm the unified loop works for both providers. If any edge cases surface during US-OC-053 testing, fix them in US-OC-053 before proceeding to deletion. Keep _convert_responses_items_to_completion_messages() if it's used by other consumers (check imports), otherwise delete it too."
     }
   ]
 }

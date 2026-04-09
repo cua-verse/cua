@@ -1028,3 +1028,82 @@
   - Regex-based config registry (ordered list of (pattern, config), first-match-wins) is simple and flexible — matches OpenClaw's `resolveModel` pattern without needing a class hierarchy
   - `ModelConfig` as a frozen dataclass prevents accidental mutation and enables `config is gpt6_config` identity checks in tests
   - `register_model_config()` prepends to the list so test overrides and runtime extensions take priority over defaults without modifying the module
+---
+
+## 2026-03-30 - US-OC-046
+- Refined PRD scope for the runtime transcript/thinking gap after comparing AgentHLE against OpenClaw and reviewing a GPT-5.4 thinking failure.
+- Added `US-OC-046` as the canonical owner of model-aware thinking-param mapping, helper-call compatibility, runtime sanitize wiring, and reasoning-retention policy in session logs.
+- Narrowed `US-OC-020` to residual cleanup only: transcript capture semantics, ThinkingConfig inheritance coverage, and any remaining legacy helper wiring after `US-OC-046`.
+- Files changed:
+  - prd.json
+  - progress.txt
+  - .current-story
+- **Learnings for future iterations:**
+  - Separate "thinking intent" from transport-specific request params; reusing one OpenAI-style `reasoning` payload across helper paths creates avoidable provider bugs.
+  - PRD cleanup matters when a bug spans multiple stories: assign one story as the canonical owner and demote the others to residual cleanup to avoid ambiguous implementation scope.
+---
+
+## 2026-03-30 - US-OC-046
+- Shipped the first code checkpoint for runtime model-resolved policy work.
+- CUA changes:
+  - added model-aware runtime sanitize handling in the OpenClaw loop while preserving already-native live Responses item streams
+  - made helper thinking transport-aware, including an OpenAI Responses path for memory flush and suppression of unsupported helper `reasoning` kwargs
+  - extended transcript/session conversion and transcript grouping coverage for the new runtime behavior
+  - added vision-thinking plumbing through solver -> agent -> tool assembly -> `AnalyzeImageTool`
+- Parent repo changes:
+  - added `docs/plan/US-OC-046-runtime-model-resolved-policy.md`
+  - updated focused tests for canonical policy resolution, memory flush, compaction, transcript formatting, solver args, thinking, and analyze-image tool wiring
+- Verification:
+  - `python3 -m compileall submodules/cua/libs/cua-bench/cua_bench/agents/openclaw submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py submodules/cua/libs/cua-bench/cua_bench/batch/solver.py submodules/cua/libs/python/agent/agent/tools/analyze_image.py`
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_thinking.py tests/test_canonical_format.py tests/test_openclaw_memory_flush.py tests/test_openclaw_compaction.py tests/test_openclaw_transcript_format.py tests/test_solver_args.py tests/test_analyze_image_tool.py`
+- **Learnings for future iterations:**
+  - Runtime sanitize should not blindly re-canonicalize already-native OpenAI Responses item streams; doing so can break computer-call continuity and trigger repeated screenshots.
+  - For OpenAI helper calls, there are two viable paths: use Responses when the helper really needs OpenAI reasoning semantics, or suppress `reasoning` entirely on chat-completions-style helpers.
+
+---
+## 2026-04-09 - US-OC-047 completion hygiene
+- Marked `US-OC-047` complete in the PRD and updated its notes to reflect the shipped runtime resolver/control-plane work instead of the original pre-implementation framing.
+- Recorded shipped verification for the focused Level 1 test slice:
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_model_config.py tests/test_canonical_format.py tests/test_openclaw_memory_flush.py tests/test_openclaw_compaction.py tests/test_openclaw_context.py tests/test_thinking.py`
+  - result: `268 passed`
+- Recorded Level 2 validation outcome from the latest `mota_24_easy` OpenClaw run:
+  - memory flush and compaction both executed successfully through the shared resolved runtime/helper path
+  - the remaining failure was behavioral/replay-history quality, not a `US-OC-047` transport or control-plane regression
+- Noted follow-on ownership explicitly:
+  - replay/compaction history degradation remains under `US-OC-032`
+  - transcript guardrail follow-up remains adjacent under `US-OC-045`
+
+---
+## 2026-04-08 - US-OC-046 completion hygiene
+- Marked `US-OC-046` complete in the PRD and updated its notes to reflect shipped runtime behavior instead of the original blocker framing.
+- Recorded Level 2 verification as completed for both required runtime paths:
+  - `bash run_magic_tower.sh 50 openai/gpt-5.4`
+  - `bash run_magic_tower.sh 50 anthropic/claude-sonnet-4-20250514`
+- Confirmed focused Level 1 verification remains green locally:
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_thinking.py tests/test_canonical_format.py tests/test_openclaw_memory_flush.py tests/test_openclaw_compaction.py tests/test_openclaw_transcript_format.py tests/test_solver_args.py tests/test_analyze_image_tool.py`
+- Cleared `.current-story` after story completion.
+
+## 2026-04-08 - US-OC-048
+- Added a stable prompt-summary entry for the primary `computer` tool in `get_tool_summaries()` even though it is not a `BaseTool` subclass.
+- Kept the fix narrow: only the `computer` tool receives special handling; other non-BaseTool objects are still excluded from prompt summaries.
+- Updated prompt integration coverage so the captured system prompt now explicitly includes `computer` plus a desktop-observation / mouse-keyboard description.
+- Updated focused tool-summary tests to assert mixed tool lists retain existing memory tool summaries while adding the Computer summary.
+- Fixed `tests/test_openclaw_agent_prompt.py` to use `asyncio.run(...)` instead of `asyncio.get_event_loop().run_until_complete(...)`, which was failing under Python 3.13 when no default loop existed.
+- Verification:
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run pytest tests/test_openclaw_tools.py tests/test_prompt_builder.py tests/test_openclaw_agent_prompt.py`
+- **Learnings for future iterations:**
+  - Prompt parity can diverge from actual runtime capability when prompt summaries are derived from a narrower type filter than the real tool list.
+  - For this codebase, a targeted special case for the primary Computer tool is safer than broadening prompt summaries to every duck-typed object with `name`/`description`.
+
+## 2026-04-09 - US-OC-050-054 Planning (unified loop spike + design)
+- Elevated US-OC-050 from a point fix to a spike/feasibility story (priority 10) gating the unified loop series.
+- Created US-OC-051 (Request Builder, priority 11), US-OC-052 (Response Normalizer, priority 12), US-OC-053 (Unified Loop, priority 13), US-OC-054 (Cleanup, priority 14) in prd.json.
+- Authored design doc at docs/plan/US-OC-050-054-unified-loop.md covering problem statement, OpenClaw pattern rationale, architecture diagrams (current vs target), story breakdown with code sketches, dependency graph, and risk table.
+- Authored gap analysis at docs/piagent-loop-gap-analysis.md covering run-level retry, auth profile rotation/failover, and other architectural gaps vs OpenClaw's pi-ai embedded runner.
+- No implementation code changed — planning session only.
+- **Learnings for future iterations:**
+  - Unified loop architecture mirrors OpenClaw's pi-ai pattern: one loop + composable request patchers + single response normalizer. Provider differences live in adapter functions, not loop logic.
+  - litellm.aresponses() vs acompletion() is the key spike question: aresponses() gives native Responses API format (reasoning included as output items), acompletion() requires manual transform via LiteLLMCompletionResponsesConfig but is the current Anthropic path.
+  - The 437-line _convert_completion_to_responses_items() is the primary target: litellm handles text/tool_calls/reasoning; only computer-action mapping (~150 lines) needs CUA-specific handling.
+  - ResolvedModel.model_api should drive the API method selection (aresponses vs acompletion), not model string parsing — eliminates a whole class of provider-matching bugs.
+---
