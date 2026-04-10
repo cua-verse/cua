@@ -226,11 +226,104 @@ US-OC-039 (sanitize_items input pipeline)  ───────┤
                                             (cleanup)
 ```
 
+## US-OC-050 Spike Results (2026-04-09)
+
+### Findings
+
+**Q1: Does `aresponses()` work for Anthropic with computer-use tools?**
+**NO.** Fails with `KeyError: 'function'` in litellm's Anthropic tool mapping.
+
+Root cause traced through litellm internals:
+1. `aresponses()` has no native Anthropic Responses API — falls back to `acompletion()` + transformation
+2. `LiteLLMCompletionResponsesConfig._transform_responses_api_tools_to_chat_completion_tools()` passes `computer_use_preview` tools through as-is (line 1307: catch-all `else` branch)
+3. Anthropic's `_map_tool_helper()` expects `tool["function"]` format for `computer_*` tools (line 403) → KeyError
+
+This is a litellm limitation: the Responses→Chat Completions tool transform doesn't know how to convert Responses API computer-use tool schemas to Anthropic's hosted tool format.
+
+**Q2: Does `aresponses()` work for OpenAI with computer-use tools?**
+**YES.** Returns correct `computer_call` output items with actions. Response shape:
+```json
+{
+  "id": "cu_...",
+  "type": "computer_call",
+  "status": "completed",
+  "actions": [{"type": "screenshot"}],
+  "call_id": "call_..."
+}
+```
+Note: GPT-5.4 uses `actions` (array, batched), computer-use-preview uses `action` (singular).
+
+**Q3: Do reasoning/thinking traces appear?**
+Not tested for Anthropic (blocked by Q1). OpenAI reasoning was 0 tokens for the simple test prompt — would need a more complex scenario.
+
+**Q4: Does prompt caching work through `aresponses()`?**
+Not tested (blocked by Q1 for Anthropic). Not applicable for OpenAI.
+
+### Phase 1 Decision (Direct API)
+
+**Dual transport**: `acompletion()` for Anthropic, `aresponses()` for OpenAI.
+
+---
+
+### Phase 2: OpenRouter Spike (2026-04-09)
+
+Team decision to switch from direct Anthropic/OpenAI APIs to **OpenRouter** as the unified provider gateway. Re-ran spike with `openrouter/` model prefix.
+
+**Q1: Do function-calling computer tools work via OpenRouter?**
+**YES, for both providers.** Since OpenRouter proxies via Chat Completions API, native hosted computer-use tools (`computer_20251124`, `computer_use_preview`) are NOT supported. Instead, computer actions use standard **function calling** — a `computer` function tool with action/x/y/text params. This matches upstream CUA's new GPT-5.4 function-calling approach.
+
+Both Anthropic and OpenAI return `function_call` items with correct arguments:
+```json
+{"type": "function_call", "name": "computer", "arguments": "{\"action\": \"click\", \"x\": 10, \"y\": 1070}"}
+```
+
+**Q2: Does reasoning work via OpenRouter?**
+**YES via `acompletion()`** with OpenRouter's unified `reasoning` param (not Anthropic's `thinking`):
+- Both providers accept `reasoning={'effort': 'medium'}` — OpenRouter translates `effort` into the appropriate `budget_tokens` for Anthropic internally
+- Anthropic: returns `reasoning_content` + `reasoning_details` with `reasoning.text` type and `signature`
+- OpenAI: returns `reasoning_content` + `reasoning_details` with `reasoning.summary` and `reasoning.encrypted` types
+- **Single interface**: `reasoning={'effort': level}` works for all providers — no need to branch on `max_tokens` vs `effort`
+
+**NO via `aresponses()`** — litellm's acompletion→Responses transform drops `reasoning_content`/`reasoning_details` from the Chat Completions response.
+
+**Q3: Which transport method to use?**
+`acompletion()` is the clear winner for OpenRouter:
+- Both providers go through the same Chat Completions API
+- Reasoning is preserved (returned in `reasoning_content`)
+- Function tools work uniformly
+- `aresponses()` adds no value (falls back to acompletion anyway) and loses reasoning
+
+**Q4: OpenRouter model IDs?**
+Different from direct API model strings:
+- `openrouter/anthropic/claude-sonnet-4` (not `anthropic/claude-sonnet-4-20250514`)
+- `openrouter/openai/gpt-5.4`
+
+### Phase 2 Decision (OpenRouter)
+
+**Single transport: `litellm.acompletion()` for all providers via OpenRouter.**
+
+This dramatically simplifies the unified loop:
+- ONE API call method for all providers (no aresponses vs acompletion dispatch)
+- ONE tool format for all providers (function calling, no native hosted tools)
+- Reasoning via `reasoning` param (OpenRouter unified format)
+- Response normalization is simpler — all responses are Chat Completions format
+
+### Impact on US-OC-051/052
+
+- **US-OC-051 (Request Builder)**: Simpler — single kwarg shape for all providers. Uses `messages` + Chat Completions function tools. `reasoning={'effort': level}` works uniformly for all providers via OpenRouter.
+- **US-OC-052 (Response Normalizer)**: Simpler — all responses are Chat Completions format. Extract `reasoning_content`/`reasoning_details` from message. Computer actions come as `function_call` tool_calls (parse `arguments` JSON). No native `computer_call` action mapping needed.
+- **US-OC-053 (Unified Loop)**: Much simpler — single `acompletion()` call, no model_api dispatch.
+- **ModelConfig/ResolvedModel**: Need updates for OpenRouter model IDs and `model_api="chat"` for all.
+
+### Spike artifacts
+
+- `tests/spike_aresponses_anthropic.py` — spike script (Phase 1 + Phase 2 notes)
+
 ## Risk Assessment
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| `aresponses()` doesn't support Anthropic computer-use tools | Medium | Low | Fallback: `acompletion()` + litellm transform. Architecture unchanged. |
+| `aresponses()` doesn't support Anthropic computer-use tools | **CONFIRMED** | Low | Fallback activated: `acompletion()` for Anthropic. Architecture unchanged. |
 | litellm's response transform misses CUA-specific fields | Medium | Low | Layer CUA-specific mapping on top of litellm's transform. |
 | Anthropic prompt caching doesn't work through `aresponses()` | Medium | Medium | Keep `acompletion()` for Anthropic if caching is critical; controlled by `ResolvedModel.model_api`. |
 | Edge cases in action mapping (triple_click, mouse_down/up) | Low | Low | Extract action mapping from old code; same logic, different location. |

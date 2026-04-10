@@ -213,11 +213,16 @@ def resolve_thinking_params(
 
     model_lower = model.lower()
 
-    # Anthropic models
+    # OpenRouter: unified reasoning param for all providers.
+    # OpenRouter translates effort levels to provider-specific formats internally.
+    if model_lower.startswith("openrouter/"):
+        return _openrouter_params(level)
+
+    # Anthropic models (direct API)
     if "anthropic/" in model_lower or "claude" in model_lower:
         return _anthropic_params(level)
 
-    # OpenAI models
+    # OpenAI models (direct API)
     if _is_openai_model(model_lower):
         return _openai_params(level, transport=transport)
 
@@ -229,8 +234,18 @@ def resolve_thinking_params(
     return {"reasoning_effort": level.value}
 
 
+def _openrouter_params(level: ThinkLevel) -> dict[str, Any]:
+    """OpenRouter: reasoning={effort: level} — unified for all providers.
+
+    OpenRouter translates effort levels to provider-specific formats internally
+    (e.g. budget_tokens for Anthropic, reasoning_effort for OpenAI).
+    """
+    effort = _OPENAI_EFFORT.get(level, "medium")
+    return {"reasoning": {"effort": effort}}
+
+
 def _anthropic_params(level: ThinkLevel) -> dict[str, Any]:
-    """Anthropic: thinking={type: enabled, budget_tokens: N}."""
+    """Anthropic (direct API): thinking={type: enabled, budget_tokens: N}."""
     budget = _ANTHROPIC_BUDGETS.get(level, 10000)
     return {"thinking": {"type": "enabled", "budget_tokens": budget}}
 

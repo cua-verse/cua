@@ -1107,3 +1107,71 @@
   - The 437-line _convert_completion_to_responses_items() is the primary target: litellm handles text/tool_calls/reasoning; only computer-action mapping (~150 lines) needs CUA-specific handling.
   - ResolvedModel.model_api should drive the API method selection (aresponses vs acompletion), not model string parsing — eliminates a whole class of provider-matching bugs.
 ---
+
+## 2026-04-09 - US-OC-050: Spike Results — aresponses() for Anthropic
+- **Result: aresponses() FAILS for Anthropic with computer-use tools.**
+- Root cause: litellm's Responses→Chat Completions tool transform passes `computer_use_preview` tools through as-is (no `function` wrapping), but Anthropic's `_map_tool_helper` expects `tool["function"]` format → `KeyError: 'function'`
+- The failure is in litellm internals: `litellm/llms/anthropic/chat/transformation.py:403` (`_map_tool_helper`) and `litellm/responses/litellm_completion_transformation/transformation.py:1307` (catch-all pass-through)
+- **OpenAI baseline confirmed working**: `aresponses()` returns `computer_call` items with correct `actions` array
+- **Decision: dual transport** — `acompletion()` for Anthropic, `aresponses()` for OpenAI, dispatched via `ResolvedModel.model_api`
+- Updated design doc at `docs/plan/US-OC-050-054-unified-loop.md` with spike findings section
+- Created spike script at `tests/spike_aresponses_anthropic.py`
+- **Files changed:**
+  - `tests/spike_aresponses_anthropic.py` (new)
+  - `docs/plan/US-OC-050-054-unified-loop.md` (spike results + risk table update)
+- **Learnings for future iterations:**
+  - litellm's `aresponses()` for non-OpenAI providers is a thin fallback — it transforms to acompletion internally. Computer-use tools are NOT handled in the transform pipeline, only function tools are.
+  - The unified loop's request builder (US-OC-051) must produce two kwarg shapes: `input` + Responses API tools for OpenAI, `messages` + Chat Completions tools for Anthropic
+  - GPT-5.4 `computer_call` output uses `actions` (array, batched format) while computer-use-preview uses `action` (singular) — the response normalizer must handle both
+---
+
+## 2026-04-09 - US-OC-050: OpenRouter Spike — Unified Transport via acompletion()
+- **Team decision**: Switch from direct Anthropic/OpenAI APIs to OpenRouter as unified provider gateway
+- Merged upstream cua-verse/cua (GPT-5.4 function-calling support, batched actions, telemetry)
+- **OpenRouter spike results:**
+  - Function-calling computer tools WORK for both providers via OpenRouter
+  - Native hosted tools (computer_20251124, computer_use_preview) NOT supported by OpenRouter
+  - Reasoning works via `acompletion()` + `reasoning` param (not `thinking`):
+    - Both providers accept `reasoning={'effort': level}` — OpenRouter translates effort into budget_tokens for Anthropic internally
+    - Anthropic: returns `reasoning_content` + `reasoning_details[reasoning.text]` with signature
+    - OpenAI: returns `reasoning_content` + `reasoning_details[reasoning.summary, reasoning.encrypted]`
+  - `aresponses()` drops reasoning for Anthropic (litellm transform loss) — not useful for OpenRouter
+- **Decision: single transport `acompletion()` for all providers via OpenRouter**
+  - Dramatically simplifies unified loop — ONE API method, ONE tool format, ONE response shape
+  - Eliminates aresponses vs acompletion dispatch complexity
+- OpenRouter model IDs differ from direct API: `openrouter/anthropic/claude-sonnet-4` (not date-suffixed)
+- **Files changed:**
+  - `tests/spike_aresponses_anthropic.py` (updated findings)
+  - `docs/plan/US-OC-050-054-unified-loop.md` (Phase 2 spike results)
+  - CUA submodule merged from upstream (openai.py, anthropic.py, agent.py)
+- **Learnings for future iterations:**
+  - OpenRouter proxies everything through Chat Completions API — all providers are uniform
+  - OpenRouter's `reasoning` param is the unified thinking interface: `reasoning={'effort': level}` works for both Anthropic and OpenAI — OpenRouter handles the provider-specific translation
+  - `reasoning_content` in Chat Completions response contains the reasoning text; `reasoning_details` has structured items with format/signature metadata
+  - The response normalizer only needs to parse Chat Completions tool_calls (no native computer_call action mapping needed)
+---
+
+## 2026-04-09 - US-OC-051: Unified Agent Loop via OpenRouter
+- Implemented `UnifiedAgentConfig` at `submodules/cua/libs/python/agent/agent/loops/unified.py` (616 lines)
+- Single `acompletion()` transport for all providers via OpenRouter — replaces per-provider dispatch
+- Function-calling computer tool schema (not native hosted tools) — same approach as upstream's GPT-5.4 loop
+- Unified `reasoning={'effort': level}` param via `thinking.py` `_openrouter_params()` — works for both Anthropic and OpenAI through OpenRouter
+- Input converter: `_convert_input_to_messages()` handles Responses API item format → Chat Completions messages (all item types: user/assistant/tool/function_call/function_call_output/computer_call/computer_call_output/reasoning)
+- Output converter: `_convert_response_to_output()` extracts reasoning_content, text, tool_calls → Responses API output items
+- `@register_agent(models=r"openrouter/.*", priority=10)` catches all `openrouter/` model strings
+- Fixed import path in `tasks/game/mota_24_easy/main.py`: `from cua_bench.replay import replay_trajectory` (updated to match refactored cua_bench module structure)
+- Added OpenRouter provider to `thinking.py` `resolve_thinking_params()` and `_openrouter_params()` helper
+- Registered `unified` in `submodules/cua/libs/python/agent/agent/loops/__init__.py`
+- **Files changed:**
+  - `submodules/cua/libs/python/agent/agent/loops/unified.py` (new — 616 lines)
+  - `submodules/cua/libs/python/agent/agent/loops/__init__.py` (register unified module)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/thinking.py` (add openrouter branch)
+  - `tasks/game/mota_24_easy/main.py` (fix import path)
+  - `tests/spike_aresponses_anthropic.py` (spike script from US-OC-050, lint-fixed)
+  - `docs/plan/US-OC-050-054-unified-loop.md` (spike findings + architecture decisions)
+  - `prd.json` (US-OC-051 passes: true)
+- **Learnings for future iterations:**
+  - The `_convert_input_to_messages()` converter must handle all CUA item types or the loop will silently drop conversation history — cover computer_call, computer_call_output, function_call, function_call_output, reasoning, user, assistant, tool.
+  - `@register_agent` priority=10 takes precedence over per-provider loops (which use lower priority); always set higher priority for catch-all patterns.
+  - OpenRouter `reasoning_content` comes via `message.reasoning_content` (litellm surfaces it); `reasoning_details` comes via `message.provider_specific_fields["reasoning_details"]` — both needed for full reasoning trace including Anthropic signature.
+---

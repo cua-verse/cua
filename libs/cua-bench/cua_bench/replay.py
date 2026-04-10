@@ -103,13 +103,13 @@ async def replay_trajectory(
 
     # Create computer handler from session._computer (same as ComputerAgent does)
     handler = cuaComputerHandler(session._computer)
-    
+
     # Debug: Check computer state before initialization
     logger.info(f"DEBUG: session._computer type: {type(session._computer)}")
     logger.info(f"DEBUG: session._computer._initialized: {getattr(session._computer, '_initialized', 'N/A')}")
-    
+
     await handler._initialize()
-    
+
     # Debug: Check handler state after initialization
     logger.info(f"DEBUG: handler.interface: {handler.interface}")
     logger.info(f"DEBUG: handler.cua_computer: {handler.cua_computer}")

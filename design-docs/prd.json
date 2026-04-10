@@ -1173,7 +1173,7 @@
           "submodules/cua/libs/python/agent/agent/loops/openai.py (reads format metadata from ModelConfig)",
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (context window fallback via litellm model info)"
         ],
-      "depends": "US-OC-040 must be done first (provides the initial registry); US-OC-046 is higher priority and should land first so transcript policy can plug into the richer model resolution path",
+        "depends": "US-OC-040 must be done first (provides the initial registry); US-OC-046 is higher priority and should land first so transcript policy can plug into the richer model resolution path",
         "reference": "../openclaw/src/agents/pi-embedded-runner/model.ts (resolveModel); ../openclaw/src/agents/transcript-policy.ts (policy resolution inputs: modelApi, provider, modelId)"
       },
       "acceptanceCriteria": [
@@ -1266,118 +1266,66 @@
         "Level 2: VM test with OpenAI model via aresponses() — agent completes at least 5 steps (regression baseline)"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": "This is a spike/feasibility story that gates US-OC-051–054. The key question: can litellm.aresponses() replace litellm.acompletion() for Anthropic with computer-use tools? If yes, the unified loop uses aresponses() everywhere and gets native Responses API format for free (including reasoning). If no, the fallback is acompletion() + LiteLLMCompletionResponsesConfig.transform_chat_completion_response_to_responses_api_response() which already handles reasoning_content extraction. Either way, the unified loop architecture works — the spike determines which API method to use as the transport."
+      "passes": true,
+      "notes": "Spike complete 2026-04-09. aresponses() fails for Anthropic (litellm tool transform gap). Decision: dual transport via ResolvedModel.model_api. Level 2 Anthropic VM test N/A (blocked by litellm). OpenAI baseline confirmed."
     },
     {
       "id": "US-OC-051",
-      "title": "Unified Request Builder: Composable Provider-Specific Request Patching",
-      "description": "As the agent harness, I want a composable request builder that assembles provider-specific API kwargs from ResolvedModel metadata, so that provider differences (beta headers, reasoning params, prompt caching, tool schemas) are handled by declarative patchers instead of per-loop code.",
-      "context": {
-        "existingFiles": [
-          "submodules/cua/libs/python/agent/agent/model_config.py (ResolvedModel — provider, model_api, adapter_target, tool_schema_type)",
-          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (_prepare_tools_for_anthropic, _get_tool_config_for_model, MODEL_TOOL_MAPPING, beta header injection, _add_cache_control — provider-specific request logic to extract)",
-          "submodules/cua/libs/python/agent/agent/loops/openai.py (_prepare_tools_for_openai, hardcoded reasoning/truncation — provider-specific request logic to extract)",
-          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/thinking.py (resolve_thinking_params — already provider-aware)"
-        ],
-        "depends": "US-OC-050 (spike determines whether transport is aresponses-only or aresponses+acompletion fallback)",
-        "reference": "../openclaw/src/agents/pi-embedded-runner/extra-params.ts (applyExtraParamsToAgent — composable stream wrapper chain); ../openclaw/src/agents/pi-embedded-runner/stream-payload-utils.ts (streamWithPayloadPatch pattern)"
-      },
-      "acceptanceCriteria": [
-        "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: RequestBuilder (or build_request_kwargs function) accepts ResolvedModel + messages + tools + generation kwargs and returns provider-ready api_kwargs dict",
-        "Level 1: Unit tests — Anthropic request includes beta headers, computer tool schema with correct tool_version and display dimensions",
-        "Level 1: Unit tests — OpenAI request includes reasoning params, truncation, computer tool schema matching model config",
-        "Level 1: Unit tests — thinking params from ThinkingConfig merge correctly (don't conflict with hardcoded provider defaults)",
-        "Level 1: Unit tests — prompt caching (Anthropic-only) applies cache_control when enabled, skipped for other providers",
-        "Level 1: Tool formatting unified — single format_tools() dispatches to provider-specific schema based on ResolvedModel.tool_schema_type"
-      ],
+      "title": "Unified Agent Loop via OpenRouter: Single acompletion() + Function-Calling Tools",
       "priority": 11,
-      "passes": false,
-      "notes": "Modeled on OpenClaw's applyExtraParamsToAgent() + streamWithPayloadPatch pattern, but simpler — Python dict patching instead of streaming function composition. The request builder is a pipeline of patcher functions: base_kwargs() → patch_anthropic_headers() → patch_openai_reasoning() → patch_prompt_caching() → patch_thinking(). Each patcher checks ResolvedModel.provider and is a no-op for non-matching providers. MODEL_TOOL_MAPPING from anthropic.py should be absorbed into ModelConfig registry entries."
-    },
-    {
-      "id": "US-OC-052",
-      "title": "Unified Response Normalizer: Provider Response → Responses API Output Items",
-      "description": "As the agent harness, I want a single response normalization function that converts any provider's API response into Responses API output items (including reasoning traces and computer actions), so that the loop never needs provider-specific response parsing.",
+      "passes": true,
+      "notes": "Collapsed from US-OC-051/052/053. OpenRouter simplifies to single transport + single tool format.",
       "context": {
+        "depends": "US-OC-050 (spike complete, OpenRouter validated)",
         "existingFiles": [
-          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (_convert_completion_to_responses_items — 437 lines of manual conversion to replace)",
-          "submodules/cua/libs/python/agent/agent/responses.py (make_reasoning_item, make_click_item, etc. — output item constructors to reuse)",
-          "submodules/cua/libs/python/agent/agent/loops/openai.py (response.model_dump() passthrough — the target simplicity)"
+          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (current Anthropic loop — uses native hosted tools, needs function-calling adaptation)",
+          "submodules/cua/libs/python/agent/agent/loops/openai.py (current OpenAI loop — already uses function calling for GPT-5.4, reference implementation)",
+          "submodules/cua/libs/python/agent/agent/loops/base.py (AsyncAgentConfig protocol)",
+          "submodules/cua/libs/python/agent/agent/agent.py (ComputerAgent — calls predict_step)",
+          "submodules/cua/libs/python/agent/agent/decorators.py (@register_agent, find_agent_config)",
+          "submodules/cua/libs/python/agent/agent/model_config.py (ResolvedModel + ModelConfig registry)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py (OpenClawAgent — entry point)"
         ],
-        "depends": "US-OC-050 (spike determines response shape for each transport)",
-        "reference": "LiteLLMCompletionResponsesConfig._extract_reasoning_output_items and transform_chat_completion_response_to_responses_api_response (litellm built-in — already handles reasoning_content extraction but not computer-use actions)"
+        "planFile": "docs/plan/US-OC-050-054-unified-loop.md"
       },
       "acceptanceCriteria": [
+        "Level 1: UnifiedAgentConfig class implements AsyncAgentConfig with single predict_step() using litellm.acompletion() for all providers via OpenRouter",
+        "Level 1: Computer-use actions use function-calling tool schema (not native hosted tools) — same schema as upstream's GPT-5.4 approach in openai.py",
+        "Level 1: Reasoning via unified reasoning={'effort': level} param — works for both Anthropic and OpenAI via OpenRouter",
+        "Level 1: Response normalization extracts reasoning_content/reasoning_details from Chat Completions response into trajectory-compatible format",
+        "Level 1: Response normalization converts function_call tool_calls (computer actions) into computer_call output items for CUA framework compatibility",
+        "Level 1: @register_agent catches all models previously handled by AnthropicHostedToolsConfig and OpenAIComputerUseConfig",
+        "Level 1: Unit tests — predict_step returns correct output format for mocked Anthropic responses via OpenRouter",
+        "Level 1: Unit tests — predict_step returns correct output format for mocked OpenAI responses via OpenRouter",
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: normalize_response() function accepts litellm response (from either aresponses or acompletion) and returns {'output': items, 'usage': usage_dict}",
-        "Level 1: Unit tests — aresponses() response passes through with reasoning items preserved",
-        "Level 1: Unit tests — acompletion() response with thinking_blocks produces reasoning items with signature metadata",
-        "Level 1: Unit tests — acompletion() response with reasoning_content (no thinking_blocks) produces reasoning items as fallback",
-        "Level 1: Unit tests — Anthropic computer-use tool_use actions correctly mapped to computer_call output items (click, type, scroll, keypress, etc.)",
-        "Level 1: Unit tests — usage transformation works for both response types",
-        "Level 2: VM test with Anthropic model — trajectory files contain reasoning items",
-        "Level 2: VM test with OpenAI model — trajectory files contain reasoning items"
-      ],
-      "priority": 12,
-      "passes": false,
-      "notes": "Two codepaths based on US-OC-050 spike results: (1) If aresponses() works for all providers: normalize_response() is mostly passthrough + model_dump() for both. (2) If acompletion() fallback needed for Anthropic: use LiteLLMCompletionResponsesConfig.transform_chat_completion_response_to_responses_api_response() as base, then layer CUA-specific computer action mapping on top. Either way, the 437-line _convert_completion_to_responses_items() is replaced by a much simpler function. The computer action mapping (click, type, scroll etc.) is the part litellm can't handle — extract it as a focused helper."
-    },
-    {
-      "id": "US-OC-053",
-      "title": "Unified Agent Loop: Single predict_step Replacing Per-Provider Loops",
-      "description": "As the agent harness, I want a single unified predict_step() implementation that handles all providers via the request builder and response normalizer, so that adding a new provider requires zero loop code and the reasoning trace bug class is eliminated by design.",
-      "context": {
-        "existingFiles": [
-          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (AnthropicHostedToolsConfig — to be replaced)",
-          "submodules/cua/libs/python/agent/agent/loops/openai.py (OpenAIComputerUseConfig — to be replaced)",
-          "submodules/cua/libs/python/agent/agent/loops/base.py (AsyncAgentConfig protocol — predict_step contract)",
-          "submodules/cua/libs/python/agent/agent/agent.py (ComputerAgent — calls predict_step via agent_loop)",
-          "submodules/cua/libs/python/agent/agent/decorators.py (@register_agent, find_agent_config — loop selection)"
-        ],
-        "depends": "US-OC-051 (request builder) and US-OC-052 (response normalizer) must be done first"
-      },
-      "acceptanceCriteria": [
-        "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: UnifiedAgentConfig class implements AsyncAgentConfig with single predict_step() that delegates to request builder + API call + response normalizer",
-        "Level 1: predict_step() selects API method (aresponses vs acompletion) based on ResolvedModel metadata, not model string parsing",
-        "Level 1: predict_click() implemented in unified class using same request builder + response normalizer",
-        "Level 1: @register_agent catches all models that were previously handled by AnthropicHostedToolsConfig and OpenAIComputerUseConfig",
-        "Level 1: Unit tests — predict_step returns correct output format for mocked Anthropic responses",
-        "Level 1: Unit tests — predict_step returns correct output format for mocked OpenAI responses",
-        "Level 2: VM test — bash run_magic_tower.sh 50 with Anthropic model passes through unified loop",
-        "Level 2: VM test — bash run_magic_tower.sh 15 openai/gpt-5.4 passes through unified loop",
-        "Level 2: VM test — reasoning traces appear in trajectory files for both providers"
-      ],
-      "priority": 13,
-      "passes": false,
-      "notes": "This is the pi-ai equivalent: one loop, all providers. The predict_step body becomes roughly: resolve_model → build_request_kwargs → call_api → normalize_response → return. Provider differences are entirely in the request builder (US-OC-051) and response normalizer (US-OC-052). The unified class should coexist with old loops during development (higher @register_agent priority) so rollback is trivial."
+        "Level 2: VM test — bash run_magic_tower.sh 15 openrouter/anthropic/claude-sonnet-4 completes 5+ steps",
+        "Level 2: VM test — bash run_magic_tower.sh 15 openrouter/openai/gpt-5.4 completes 5+ steps",
+        "Level 2: VM test with reasoning — agent completes steps with reasoning={'effort': 'medium'} and reasoning traces appear in trajectory files"
+      ]
     },
     {
       "id": "US-OC-054",
       "title": "Cleanup: Delete Per-Provider Loop Classes After Unified Loop Validation",
-      "description": "As the agent harness, I want the old AnthropicHostedToolsConfig and OpenAIComputerUseConfig loop classes removed after the unified loop is validated, so that the codebase has one path for all providers and no dead code.",
+      "priority": 12,
+      "passes": false,
+      "notes": "",
       "context": {
+        "depends": "US-OC-051 (unified loop must be validated with VM tests before deleting old code)",
         "existingFiles": [
-          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (AnthropicHostedToolsConfig + 9 helper functions — ~1684 LOC to delete or gut)",
-          "submodules/cua/libs/python/agent/agent/loops/openai.py (OpenAIComputerUseConfig + 2 helper functions — ~266 LOC to delete or gut)",
+          "submodules/cua/libs/python/agent/agent/loops/anthropic.py (AnthropicHostedToolsConfig + helpers — to delete or gut)",
+          "submodules/cua/libs/python/agent/agent/loops/openai.py (OpenAIComputerUseConfig + helpers — to delete or gut)",
           "submodules/cua/libs/python/agent/agent/loops/__init__.py (loop imports to update)"
         ],
-        "depends": "US-OC-053 (unified loop must be validated with VM tests before deleting old code)"
+        "planFile": "docs/plan/US-OC-050-054-unified-loop.md"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: AnthropicHostedToolsConfig and OpenAIComputerUseConfig classes deleted (or reduced to thin wrappers that delegate to unified loop)",
-        "Level 1: _convert_completion_to_responses_items, _convert_responses_items_to_completion_messages, _prepare_tools_for_anthropic, _prepare_tools_for_openai — all deleted",
+        "Level 1: AnthropicHostedToolsConfig and OpenAIComputerUseConfig classes deleted or reduced to thin wrappers",
         "Level 1: No remaining references to deleted classes or functions (grep verification)",
-        "Level 1: MODEL_TOOL_MAPPING in anthropic.py absorbed into ModelConfig registry (model_config.py)",
-        "Level 2: VM test — bash run_magic_tower.sh 50 with Anthropic model still passes",
-        "Level 2: VM test — bash run_magic_tower.sh 15 openai/gpt-5.4 still passes"
-      ],
-      "priority": 14,
-      "passes": false,
-      "notes": "Pure cleanup story — no behavioral changes. The old loops should only be deleted after US-OC-053's VM tests confirm the unified loop works for both providers. If any edge cases surface during US-OC-053 testing, fix them in US-OC-053 before proceeding to deletion. Keep _convert_responses_items_to_completion_messages() if it's used by other consumers (check imports), otherwise delete it too."
+        "Level 1: MODEL_TOOL_MAPPING in anthropic.py absorbed into ModelConfig registry or removed",
+        "Level 2: VM test — bash run_magic_tower.sh 15 openrouter/anthropic/claude-sonnet-4 still passes",
+        "Level 2: VM test — bash run_magic_tower.sh 15 openrouter/openai/gpt-5.4 still passes"
+      ]
     }
   ]
 }

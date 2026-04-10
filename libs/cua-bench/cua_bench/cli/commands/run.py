@@ -48,7 +48,7 @@ GREY = "\033[90m"
 
 def _get_runs_dir() -> Path:
     """Get the default runs output directory."""
-        
+
     xdg_data = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
     return Path(xdg_data) / "cua-bench" / "runs"
 
