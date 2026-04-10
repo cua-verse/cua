@@ -146,7 +146,8 @@ def resolve_model(model: str | ResolvedModel) -> ResolvedModel:
     provider = config.provider or _infer_provider(model)
     model_api = config.model_api or _infer_model_api(config, provider)
     helper_transport_defaults = (
-        config.helper_transport_defaults or _default_helper_transports(provider)
+        config.helper_transport_defaults
+        or _default_helper_transports(provider, model)
     )
     transcript_api_label = (
         config.transcript_api_label
@@ -205,7 +206,12 @@ def _infer_model_api(config: ModelConfig, provider: str) -> str:
     return "chat"
 
 
-def _default_helper_transports(provider: str) -> HelperTransportDefaults:
+def _default_helper_transports(
+    provider: str, model: str = ""
+) -> HelperTransportDefaults:
+    # OpenRouter routes everything through Chat Completions — always use "chat".
+    if model.lower().startswith("openrouter/"):
+        return HelperTransportDefaults()
     if provider == "openai":
         return HelperTransportDefaults(memory_flush="responses")
     return HelperTransportDefaults()

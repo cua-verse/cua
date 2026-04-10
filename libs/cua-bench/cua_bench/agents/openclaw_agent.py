@@ -36,7 +36,7 @@ class OpenClawAgent(BaseAgent):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.model = kwargs.get("model", "anthropic/claude-sonnet-4-20250514")
+        self.model = kwargs.get("model", "openrouter/anthropic/claude-sonnet-4-20250514")
         # Separate model for summarization and memory flush (defaults to main model)
         self.summary_model = kwargs.get("summary_model", None) or self.model
         self.max_steps = kwargs.get("max_steps", 100)

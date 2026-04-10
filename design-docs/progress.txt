@@ -1175,3 +1175,20 @@
   - `@register_agent` priority=10 takes precedence over per-provider loops (which use lower priority); always set higher priority for catch-all patterns.
   - OpenRouter `reasoning_content` comes via `message.reasoning_content` (litellm surfaces it); `reasoning_details` comes via `message.provider_specific_fields["reasoning_details"]` — both needed for full reasoning trace including Anthropic signature.
 ---
+
+## 2026-04-10 - US-OC-054: Finalize Unified Loop as Default
+- Switched default model in `openclaw_agent.py` and `run_magic_tower.sh` from `anthropic/claude-sonnet-4-20250514` to `openrouter/anthropic/claude-sonnet-4-20250514` — unified loop now active by default
+- Fixed `_default_helper_transports()` in `model_config.py`: OpenRouter models always use "chat" transport for all helper operations (memory_flush, compaction, vision)
+- Added 2 tests to `tests/test_model_config.py` verifying OpenRouter forces chat transport
+- Fixed unused imports (`Dict`, `List`, `pytest`) in `tests/test_unified_loop.py` (lint compliance)
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (default model updated)
+  - `submodules/cua/libs/python/agent/agent/model_config.py` (`_default_helper_transports` OpenRouter branch)
+  - `run_magic_tower.sh` (default model and summary_model updated)
+  - `tests/test_model_config.py` (2 new OpenRouter transport tests)
+  - `tests/test_unified_loop.py` (lint fix: removed unused imports)
+  - `prd.json` (US-OC-054 passes: true, title updated, notes added)
+- **Learnings for future iterations:**
+  - When switching default model from `anthropic/` to `openrouter/`, also update `_default_helper_transports()` — OpenRouter always uses Chat Completions so all helper transports must be "chat" not "responses"
+  - Old per-provider loops (`anthropic.py`, `openai.py`) remain fully functional for direct API model strings — the unified loop only activates via `openrouter/` prefix routing
+---

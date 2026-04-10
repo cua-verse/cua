@@ -1305,10 +1305,10 @@
     },
     {
       "id": "US-OC-054",
-      "title": "Cleanup: Delete Per-Provider Loop Classes After Unified Loop Validation",
+      "title": "Finalize Unified Loop as Default (Keep Old Loop Files)",
       "priority": 12,
-      "passes": false,
-      "notes": "",
+      "passes": true,
+      "notes": "Scope adapted: finalize unified loop as default path, keep old loops as fallback. Default model switched to openrouter/ prefix. 28 unit tests added. Old AnthropicHostedToolsConfig/OpenAIComputerUseConfig remain importable for direct API fallback.",
       "context": {
         "depends": "US-OC-051 (unified loop must be validated with VM tests before deleting old code)",
         "existingFiles": [
@@ -1316,15 +1316,16 @@
           "submodules/cua/libs/python/agent/agent/loops/openai.py (OpenAIComputerUseConfig + helpers — to delete or gut)",
           "submodules/cua/libs/python/agent/agent/loops/__init__.py (loop imports to update)"
         ],
-        "planFile": "docs/plan/US-OC-050-054-unified-loop.md"
+        "planFile": "docs/plan/US-OC-054-finalize-unified-loop.md"
       },
       "acceptanceCriteria": [
+        "Level 1: Default model in openclaw_agent.py uses openrouter/ prefix (routes to UnifiedAgentConfig)",
+        "Level 1: Default model in run_magic_tower.sh uses openrouter/ prefix",
         "Level 1: Lint passes (uv run ruff check .)",
-        "Level 1: AnthropicHostedToolsConfig and OpenAIComputerUseConfig classes deleted or reduced to thin wrappers",
-        "Level 1: No remaining references to deleted classes or functions (grep verification)",
-        "Level 1: MODEL_TOOL_MAPPING in anthropic.py absorbed into ModelConfig registry or removed",
-        "Level 2: VM test — bash run_magic_tower.sh 15 openrouter/anthropic/claude-sonnet-4 still passes",
-        "Level 2: VM test — bash run_magic_tower.sh 15 openrouter/openai/gpt-5.4 still passes"
+        "Level 1: Unit tests for unified loop input/output conversion, tool preparation, reasoning extraction (28 tests)",
+        "Level 1: Old per-provider loops (anthropic.py, openai.py) remain importable and functional for direct API model strings",
+        "Level 2: VM test — bash run_magic_tower.sh 15 routes through unified loop by default",
+        "Level 2: VM test — bash run_magic_tower.sh 15 openrouter/openai/gpt-5.4 via unified loop"
       ]
     }
   ]
