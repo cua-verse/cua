@@ -1327,6 +1327,185 @@
         "Level 2: VM test — bash run_magic_tower.sh 15 routes through unified loop by default",
         "Level 2: VM test — bash run_magic_tower.sh 15 openrouter/openai/gpt-5.4 via unified loop"
       ]
+    },
+    {
+      "id": "US-SUB-001",
+      "title": "Subagent Base Types & Registry",
+      "description": "As the agent harness, I want a subagent registry that tracks spawned subagent runs with lifecycle management and a completion queue, so that both general and GUI subagents have a shared foundation for spawn/complete/fail lifecycle and concurrency control.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py (SessionManager — persistence pattern to follow)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (OpenClawComputerAgent — will consume registry in US-SUB-005)"
+        ],
+        "reference": "docs/openclaw-subagent-analysis.md (full analysis of OpenClaw's subagent registry, lifecycle, and types); ../openclaw/src/agents/subagent-registry.ts (SubagentRunRecord type, register/complete lifecycle); ../openclaw/src/agents/subagent-registry.types.ts (type definitions)",
+        "designDoc": "docs/openclaw-subagent-analysis.md (SubagentRun fields, registry API, concurrency limits)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_registry.py tests/test_subagent_registry.py)",
+        "Level 1: Unit tests pass — SubagentRun dataclass with fields: run_id, type (general|gui), task, label, model, status (pending|running|complete|error|killed), result_text, created_at, ended_at, usage (input_tokens, output_tokens)",
+        "Level 1: Unit tests pass — SubagentRegistry.register() creates run, .complete() freezes result_text and pushes to asyncio.Queue, .fail() sets error status and pushes to queue, .kill() cancels and sets killed status",
+        "Level 1: Unit tests pass — registry.active_count() returns count of pending+running runs; spawn rejected when active_count >= max_concurrent (default 3)",
+        "Level 1: Unit tests pass — registry.list_runs(status_filter) returns filtered list; registry.get_run(run_id) returns single run or None",
+        "Level 1: Unit tests pass — completion queue is asyncio.Queue; drain_completions() returns all available without blocking (get_nowait loop)"
+      ],
+      "priority": 15,
+      "passes": true,
+      "notes": "Foundation for US-SUB-002 through US-SUB-006. Two subagent types share this registry: general (async, no VM) and GUI (blocking, VM relay). SubagentRun.type discriminates them. The completion queue is only used by general subagents (GUI subagents are blocking and return directly). Concurrency limit applies only to general subagents. Registry is in-memory only — subagent runs are ephemeral within a single perform_task() call, not persisted across runs. Snapshot to session transcript for observability only."
+    },
+    {
+      "id": "US-SUB-002",
+      "title": "General Subagent — Async One-Shot Worker",
+      "description": "As the agent harness, I want an async one-shot subagent that inherits all tools except Computer, runs as an asyncio.Task with multi-turn function-calling, and pushes its result to the registry completion queue, so that the main agent can delegate planning/analysis/memory tasks to a cheaper model without blocking the main loop.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/helper_runtime.py (call_helper_model — litellm wrapper pattern to follow for LLM calls)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/memory_flush.py (run_memory_flush — example of standalone LLM task with tool calling)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py (build_tools, get_tool_summaries — tool assembly pattern)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/memory.py (MemorySearchTool, MemoryGetTool, MemoryWriteTool — tools the subagent will use)"
+        ],
+        "depends": "US-SUB-001 (registry for lifecycle tracking)",
+        "reference": "../openclaw/src/agents/subagent-spawn.ts (spawn flow — validate constraints, create session, register run); ../openclaw/src/agents/subagent-announce.ts:47-104 (buildSubagentSystemPrompt — role constraints, focused worker instructions)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_general.py tests/test_subagent_general.py)",
+        "Level 1: Unit tests pass — run_general_subagent() accepts task, model, tools, memory_store, registry, run_id; runs litellm.acompletion() loop with function-calling",
+        "Level 1: Unit tests pass — tool set filtered: AnalyzeImageTool, MemorySearchTool, MemoryGetTool, MemoryWriteTool included; Computer, MilestoneTool, any delegation tools excluded (even if passed in)",
+        "Level 1: Unit tests pass — multi-turn: subagent calls tools (mock), receives results, produces final text response; loop ends on assistant message without tool calls or max_steps (default 5)",
+        "Level 1: Unit tests pass — on completion: registry.complete(run_id, result_text) called; on error: registry.fail(run_id, error_msg) called; neither throws to caller",
+        "Level 1: Unit tests pass — subagent system prompt includes: role (focused worker), task, constraints (complete and return, no initiation, no computer actions), output format (findings + relevant details)",
+        "Level 1: Unit tests pass — token usage accumulated across steps and stored in SubagentRun.usage"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": "This is NOT a full OpenClawComputerAgent — it's a lightweight litellm.acompletion() loop with function-calling. No VM access, no trajectory, no compaction, no session persistence. The subagent's tool calls are executed inline (call tool.call(), append result, continue loop). System prompt adapted from OpenClaw's buildSubagentSystemPrompt: focused worker role, task description, no initiation, complete and return. Default model should be parent's summary_model (cheaper). The asyncio.Task wrapper is in the delegation tool (US-SUB-005), not here — this module is the pure async function."
+    },
+    {
+      "id": "US-SUB-003",
+      "title": "GUI Subagent — Vision-to-Action Relay Protocol",
+      "description": "As the agent harness, I want a typed action protocol defining the contract between the GUI subagent (vision model) and the main agent (action executor), so that GUI subagent responses can be reliably parsed into executable VM actions regardless of the underlying vision model.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/types.py (ClickAction, TypeAction, HotkeyAction, ScrollAction, DragAction, WaitAction, DoneAction — CUA action types to align with)",
+          "submodules/cua/libs/python/agent/agent/tools/computer.py (Computer tool — action execution format)",
+          "submodules/cua/libs/python/agent/agent/responses.py (make_click_item, make_type_item — Responses API action item constructors)"
+        ],
+        "reference": "submodules/cua/libs/cua-bench/cua_bench/types.py (canonical CUA action types — align GUIAction variants with these); submodules/cua/libs/python/agent/agent/loops/openai.py (OpenAI computer_call output format — the native format GPT-5.4 produces)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui_protocol.py tests/test_subagent_gui_protocol.py)",
+        "Level 1: Unit tests pass — GUIAction union type with variants: ClickAction(x, y, button), TypeAction(text), HotkeyAction(keys), ScrollAction(x, y, direction, amount), DragAction(start_x, start_y, end_x, end_y), WaitAction(ms), DoneAction(summary)",
+        "Level 1: Unit tests pass — parse_gui_response() handles: (a) OpenAI computer_call output items (native GPT-5.4 format), (b) function_call with gui_action tool schema, (c) structured text fallback with action keywords",
+        "Level 1: Unit tests pass — execute_gui_action(action, session) converts GUIAction to DesktopSession method call: ClickAction→session.click(), TypeAction→session.type_text(), HotkeyAction→session.hotkey(), ScrollAction→session.scroll(), DragAction→session.drag(), WaitAction→asyncio.sleep()",
+        "Level 1: Unit tests pass — DoneAction is terminal (not executed on VM, returns summary to caller)",
+        "Level 1: Unit tests pass — action validation: coordinates non-negative, text non-empty, scroll amount positive; invalid actions raise ValueError"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": "This is the contract layer — no LLM calls, no VM interaction. Just types, parsing, and conversion. parse_gui_response() must handle GPT-5.4's native computer_call format (the primary use case) AND a function-calling fallback for non-CU vision models. execute_gui_action() calls DesktopSession methods directly (session.click, session.type_text, etc.), NOT the Computer tool — the Computer tool wraps these with extra logic (screenshot after action) that we handle in the relay loop (US-SUB-004). Align GUIAction field names with CUA's existing action types in types.py for consistency."
+    },
+    {
+      "id": "US-SUB-004",
+      "title": "GUI Subagent — Relay Loop Implementation",
+      "description": "As the agent harness, I want a blocking relay loop that sends screenshots to a specialized vision model (GPT-5.4/UI-TARS), parses the returned actions, executes them on the VM, and repeats until the model signals DONE or hits max_steps, so that the main agent can delegate GUI automation to a model optimized for visual interaction.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui_protocol.py (US-SUB-003 — GUIAction types, parse_gui_response, execute_gui_action)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/helper_runtime.py (call_helper_model — litellm wrapper for model calls)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/thinking.py (ThinkingConfig — provider-aware thinking params)"
+        ],
+        "depends": "US-SUB-001 (registry), US-SUB-003 (protocol types and action execution)",
+        "reference": "submodules/cua/libs/python/agent/agent/loops/openai.py (OpenAI loop — shows how computer_call items flow: predict_step returns computer_call → framework executes → screenshot fed back as computer_call_output); ../openclaw/src/agents/subagent-announce.ts:73-103 (subagent system prompt — 'complete the task, be ephemeral, stay focused')"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui.py tests/test_subagent_gui.py)",
+        "Level 1: Unit tests pass — run_gui_subagent() loop: take screenshot → build messages (system prompt + screenshot + instruction + action history) → litellm call → parse_gui_response → execute_gui_action → repeat",
+        "Level 1: Unit tests pass — screenshot fed back after each action (messages grow with alternating screenshot/action pairs); history pruned to last 3 screenshots (only_n_most_recent_images=3)",
+        "Level 1: Unit tests pass — loop terminates on: DoneAction (return summary), max_steps reached (return partial summary), LLM error (return error via registry.fail)",
+        "Level 1: Unit tests pass — model-aware request building: for computer-use models (openai/gpt-5.4), use native computer_call tool schema; for other vision models, use function-calling with gui_action tool",
+        "Level 1: Unit tests pass — action dedup safety: if same action (same type + same params) repeated 3 consecutive times, abort with 'stuck in loop' error",
+        "Level 1: Unit tests pass — token usage accumulated per-step, stored in SubagentRun.usage via registry",
+        "Level 2: VM test — GUI subagent with GPT-5.4 opens Notepad via Start menu (5-10 steps): screenshot shows Notepad window open at end"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": "The relay loop calls DesktopSession methods directly via execute_gui_action() from US-SUB-003 — NOT through the Computer tool. After each action, it takes a fresh screenshot via session.screenshot() and feeds it back to the vision model. The GUI subagent is blocking — the main agent's run() loop is paused while the GUI subagent drives the VM. System prompt should be minimal: 'You are a GUI automation agent. Given a screenshot and instruction, output the next action to take. When the instruction is complete, output DONE with a summary of what you accomplished.' For GPT-5.4 (primary use case), the native computer_call format is preferred — it's what the model is trained on. Function-calling fallback is for non-CU vision models."
+    },
+    {
+      "id": "US-SUB-005",
+      "title": "Delegation Tools & Main Loop Integration",
+      "description": "As the agent, I want delegate_general and delegate_gui tools registered as BaseTool subclasses plus a completion drain in the main loop, so that I can delegate planning/analysis tasks to async workers and GUI automation to a specialized vision model during task execution.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py (build_tools — tool assembly, add delegation tools here)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (OpenClawComputerAgent.run — add _drain_completions between steps)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md (agent instructions — add delegation guidance)",
+          "submodules/cua/libs/python/agent/agent/tools/base.py (BaseTool ABC, @register_tool — tool registration pattern)"
+        ],
+        "depends": "US-SUB-002 (general subagent implementation), US-SUB-004 (GUI subagent implementation)",
+        "reference": "../openclaw/src/agents/tools/sessions-spawn-tool.ts (spawn tool — params, validation, return format); ../openclaw/src/agents/tools/subagents-tool.ts (subagents tool — list/kill actions)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_tools.py tests/test_subagent_tools.py)",
+        "Level 1: Unit tests pass — DelegateGeneralTool: params (task str, model str optional, max_steps int default 5); spawns asyncio.Task wrapping run_general_subagent; returns immediately with {status: accepted, run_id, note: 'result auto-announces between steps'}",
+        "Level 1: Unit tests pass — DelegateGUITool: params (instruction str, model str default 'openai/gpt-5.4', max_steps int default 15); calls run_gui_subagent synchronously (blocking); returns {status: complete/error, summary, steps_used, tokens}",
+        "Level 1: Unit tests pass — SubagentsTool: params (action: list|kill, target: run_id optional); list returns active+recent runs; kill cancels asyncio.Task and calls registry.kill()",
+        "Level 1: Unit tests pass — _drain_completions() in OpenClawComputerAgent: non-blocking drain of registry.completion_queue; injects results as user messages formatted '[Subagent Result] task: {task}\\nStatus: {status}\\n\\n{result_text}'",
+        "Level 1: build_tools() returns list including DelegateGeneralTool, DelegateGUITool, SubagentsTool alongside existing tools",
+        "Level 1: AGENTS.md updated with delegation section: when to use delegate_general (planning, memory analysis, verification), when to use delegate_gui (routine GUI ops with specialized vision model), do NOT poll (general results auto-announce)",
+        "Level 2: VM test — run_magic_tower.sh 50 — agent has delegation tools in tool list (verify via trajectory turn_000/0000_api_start.json tools array)",
+        "Level 2: VM test — if agent invokes delegate_gui, trajectory shows blocking call with GUI subagent steps, then main agent resumes"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": "Three tools: delegate_general (async, returns accepted), delegate_gui (blocking, returns result), subagents (list/kill). The drain point in agent_loop.py is after _handle_item() and before the compaction check — same location where screenshot path injection happens. DelegateGUITool needs the DesktopSession passed through (from build_tools). DelegateGeneralTool needs the SubagentRegistry and MemoryStore. SubagentsTool needs the registry. All three need to be added to build_tools() with appropriate constructor args. AGENTS.md guidance is critical — without it the agent won't know when to delegate vs act directly."
+    },
+    {
+      "id": "US-SUB-006",
+      "title": "Cross-Subagent Context — Screenshot & State Passing",
+      "description": "As the agent harness, I want the main agent to pass screenshots to general subagents for analysis and receive a fresh screenshot after GUI subagent delegation completes, so that subagents have visual context and the main agent sees the updated VM state after delegation.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_general.py (US-SUB-002 — add screenshot attachment support)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui.py (US-SUB-004 — already takes screenshots internally, add history pruning)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (US-SUB-005 — add post-delegation screenshot injection)"
+        ],
+        "depends": "US-SUB-005 (tools and loop integration must be wired first)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: Unit tests pass — DelegateGeneralTool accepts optional screenshots param (list of base64 strings); screenshots injected as image_url content blocks in the subagent's initial user message",
+        "Level 1: Unit tests pass — GUI subagent relay loop prunes screenshot history to last 3 images (matching main agent's only_n_most_recent_images=3); older screenshots replaced with text placeholder '[screenshot pruned]'",
+        "Level 1: Unit tests pass — after DelegateGUITool completes (blocking return), a fresh screenshot is taken via session.screenshot() and injected as a user message into the main agent's items list with text '[VM state after GUI delegation]'",
+        "Level 2: VM test — run_magic_tower.sh 50 — after any GUI delegation, the main agent's next predict_step input includes a fresh screenshot (verify via trajectory API payload)"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": "Three changes: (1) General subagent screenshot attachment — the main agent's delegate_general tool optionally accepts screenshots (base64) that get injected into the subagent's context as vision content. This enables 'analyze this screenshot' delegation without the subagent having VM access. (2) GUI subagent history pruning — keep last 3 screenshots in the relay loop to avoid context overflow on long GUI sequences. (3) Post-delegation screenshot — after GUI subagent finishes and control returns to main agent, automatically take a screenshot so the main agent sees the current VM state. This is critical because the VM state changed during delegation and the main agent's last screenshot is stale."
+    },
+    {
+      "id": "US-SUB-007",
+      "title": "Subagent Registry Persistence — Disk-Backed Runs",
+      "description": "As the agent harness, I want subagent run records persisted to disk (JSONL) and restored on session resume, so that cross-run continuity includes subagent history (what was delegated, results, token costs) and stalled async subagents can be detected and cleaned up on restart.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_registry.py (US-SUB-001 — in-memory registry to extend with persistence)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py (SessionManager — JSONL append pattern, TranscriptEntry types, load_history/save_state)"
+        ],
+        "depends": "US-SUB-005 (registry must be wired into the agent loop before persistence matters)",
+        "reference": "../openclaw/src/agents/subagent-registry-state.ts (persistSubagentRunsToDisk — append-only JSONL; restoreSubagentRunsFromDisk — load + reconcile orphans); ../openclaw/src/agents/subagent-registry-helpers.ts (reconcileOrphanedRun — detect stalled runs from prior crash)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_registry.py tests/test_subagent_registry.py)",
+        "Level 1: Unit tests pass — SubagentRegistry.persist() writes all runs to JSONL file at tasks/{task_id}/subagent-runs.jsonl; one JSON object per line with all SubagentRun fields",
+        "Level 1: Unit tests pass — SubagentRegistry.restore(path) loads runs from JSONL; runs with status pending|running from a prior session are marked as 'orphaned' (status=error, result_text='stalled: prior session ended before completion')",
+        "Level 1: Unit tests pass — persist() called automatically on registry.complete(), registry.fail(), registry.kill() (append incremental, not full rewrite)",
+        "Level 1: Unit tests pass — restore() deduplicates by run_id (last entry wins, matching OpenClaw's append-only + last-write-wins pattern)",
+        "Level 1: Unit tests pass — subagent run history queryable: registry.completed_runs() returns all complete/error runs from current + prior sessions for transcript replay context",
+        "Level 2: VM test — run_magic_tower.sh 30 (run 1 with delegation), then run_magic_tower.sh 30 (run 2) — run 2's subagent-runs.jsonl contains entries from run 1; orphaned runs from run 1 marked as stalled"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": "Closes the gap between our ephemeral in-memory registry (US-SUB-001) and OpenClaw's disk-backed subagent-runs.jsonl. Three capabilities: (1) Persist — append-only JSONL write on every state transition (register, complete, fail, kill). Append-only avoids rewriting the full file on every change. (2) Restore — on session resume, load prior runs, mark pending/running as orphaned (stalled). This prevents the agent from waiting for results that will never arrive from a crashed prior session. (3) History query — completed_runs() exposes prior subagent results for inclusion in cross-run context (e.g., 'in a previous session, you delegated X and the result was Y'). The JSONL file lives alongside session transcripts at tasks/{task_id}/subagent-runs.jsonl. Format mirrors OpenClaw's subagent-registry-state.ts pattern."
     }
   ]
 }

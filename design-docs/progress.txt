@@ -1192,3 +1192,24 @@
   - When switching default model from `anthropic/` to `openrouter/`, also update `_default_helper_transports()` — OpenRouter always uses Chat Completions so all helper transports must be "chat" not "responses"
   - Old per-provider loops (`anthropic.py`, `openai.py`) remain fully functional for direct API model strings — the unified loop only activates via `openrouter/` prefix routing
 ---
+
+## 2026-04-16 - US-SUB-001: Subagent Base Types & Registry
+- Implemented in-memory SubagentRegistry with full lifecycle management (register/mark_running/complete/fail/kill)
+- SubagentRun dataclass with 11 fields: run_id, type (general|gui), task, label, model, status, result_text, error_message, created_at, ended_at, usage (SubagentUsage)
+- SubagentStatus and SubagentType enums; SubagentUsage with to_dict/from_dict
+- asyncio.Queue-based completion queue; drain_completions() non-blocking using get_nowait()
+- Concurrency limit (max_concurrent=3) applies only to GENERAL type; GUI type is exempt
+- 38 unit tests covering all lifecycle transitions, edge cases, concurrency edge cases, and snapshot serialization
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_registry.py` (new — SubagentRegistry implementation)
+  - `tests/test_subagent_registry.py` (new — 38 unit tests)
+  - `prd.json` (US-SUB-001 passes: true; US-SUB-002–007 stories added)
+  - `docs/plan/US-SUB-001-006-subagent-delegation.md` (new plan doc)
+  - `docs/plan/US-SUB-001-subagent-registry.md` (new story-specific plan doc)
+- **Learnings for future iterations:**
+  - SubagentRegistry is purely in-memory for V1; disk persistence is US-SUB-007
+  - GUI subagents never push to the completion queue — they are blocking and return directly; only GENERAL type uses the queue
+  - active_count() only counts GENERAL type (pending+running), not GUI — concurrency limit does not apply to GUI
+  - `_TERMINAL_STATUSES` frozenset used for O(1) status checks in complete/fail/kill guards
+  - SubagentRun.to_dict() omits None fields (result_text, error_message) to keep snapshot clean
+---
