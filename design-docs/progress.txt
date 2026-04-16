@@ -1213,3 +1213,19 @@
   - `_TERMINAL_STATUSES` frozenset used for O(1) status checks in complete/fail/kill guards
   - SubagentRun.to_dict() omits None fields (result_text, error_message) to keep snapshot clean
 ---
+
+## 2026-04-16 - US-SUB-002
+- Implemented `subagent_general.py`: async one-shot general subagent with multi-turn litellm.acompletion() loop
+- Key components: `run_general_subagent()` (main coroutine), `_filter_tools()` (allows analyze_image/memory_* only, excludes computer/milestone/delegation), `_build_subagent_system_prompt()` (focused worker role, constraints, output format), `_tools_to_litellm_schema()` (BaseTool → litellm format)
+- Added `tests/test_subagent_general.py` with 19 unit tests covering all 7 acceptance criteria
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_general.py` (new)
+  - `tests/test_subagent_general.py` (new)
+  - `prd.json` (US-SUB-002 passes: true)
+  - `progress.txt`
+- **Learnings for future iterations:**
+  - `_filter_tools` must use `isinstance(tool, BaseTool)` — non-BaseTool objects (e.g. raw Computer handler) must be excluded entirely, not just by name
+  - Tool call result messages must include `tool_call_id` matching the call's `id` for litellm multi-turn to work correctly
+  - After max_steps exhaustion without final text response, use the last `assistant_content` as partial result rather than returning empty — avoids empty COMPLETE states
+  - `SubagentUsage` is a simple dataclass with `input_tokens`/`output_tokens` ints; accumulate by `+=` from `response.usage.prompt_tokens`/`completion_tokens`
+---
