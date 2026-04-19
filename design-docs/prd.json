@@ -1428,8 +1428,8 @@
         "Level 2: VM test \u2014 GUI subagent with GPT-5.4 opens Notepad via Start menu (5-10 steps): screenshot shows Notepad window open at end"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": "The relay loop calls DesktopSession methods directly via execute_gui_action() from US-SUB-003 \u2014 NOT through the Computer tool. After each action, it takes a fresh screenshot via session.screenshot() and feeds it back to the vision model. The GUI subagent is blocking \u2014 the main agent's run() loop is paused while the GUI subagent drives the VM. System prompt should be minimal: 'You are a GUI automation agent. Given a screenshot and instruction, output the next action to take. When the instruction is complete, output DONE with a summary of what you accomplished.' For GPT-5.4 (primary use case), the native computer_call format is preferred \u2014 it's what the model is trained on. Function-calling fallback is for non-CU vision models."
+      "passes": true,
+      "notes": "The relay loop calls DesktopSession methods directly via execute_gui_action() from US-SUB-003 \u2014 NOT through the Computer tool. After each action, it takes a fresh screenshot via session.screenshot() and feeds it back to the vision model. The GUI subagent is blocking \u2014 the main agent's run() loop is paused while the GUI subagent drives the VM. CORRECTION to AC #5 (model-aware request building): GPT-5.4 does NOT support native computer_use_preview \u2014 CUA's agent/loops/openai.py:137-141 (_is_native_tool_model) explicitly excludes it. The implemented single-path design (litellm.acompletion + gui_action function-calling tool) is correct for all current models. A native Responses-API branch is a future story, gated on a computer-use-preview model being available for end-to-end testing."
     },
     {
       "id": "US-SUB-005",

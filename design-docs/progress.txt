@@ -1,5 +1,23 @@
 ## Codebase Patterns
 - Source `.envrc` directly (`source "/path/.envrc"`) for reliable env var loading in Bash tool (NOT `direnv export bash`)
+- **GPT-5 family rejects `temperature != 1.0`** (litellm raises `UnsupportedParamsError`). Use `temperature=1.0` for any `openai/gpt-5.x` helper call. `litellm.drop_params = True` also silences it but hides the signal.
+
+## 2026-04-19 - US-SUB-004: GUI Subagent Relay Loop
+- Implemented `run_gui_subagent()` — a blocking vision-to-action relay loop on top of the US-SUB-003 protocol layer. Single request path (`litellm.acompletion` + `gui_action` function-calling tool) — no native Responses API branch.
+- Added 24 unit tests (10 loop scenarios + helper coverage); sibling subagent tests remain green (106/106).
+- Smoke script at `smoke/gui_subagent_notepad.py` — standalone Level 2 test driven by `VM_IP` env var; saves final screenshot to `smoke/out/notepad_final.png`.
+- **Files added:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui.py`
+  - `tests/test_subagent_gui.py`
+  - `smoke/gui_subagent_notepad.py`
+- Level 2 smoke passed: `VM_IP=34.170.112.57 uv run python smoke/gui_subagent_notepad.py` — Notepad opened in ~8 steps, 18698 input / 171 output tokens; final screenshot at `smoke/out/notepad_final.png` shows Notepad window visible at bottom-left of the VM desktop.
+- **Learnings for future iterations:**
+  - PRD criterion #5's "native computer_call for computer-use models" was wrong for GPT-5.4 — CUA's `agent/loops/openai.py:137-141` explicitly excludes GPT-5.4 from native `computer_use_preview`. Single path is correct; native branch is a future story gated on model availability.
+  - **GPT-5 family rejects `temperature != 1.0`** (litellm raises `UnsupportedParamsError`). Use `temperature=1.0` for any OpenAI gpt-5.x helper call — matches the pattern already in `subagent_general.py:152`. `litellm.drop_params = True` would also silence it but hides the signal.
+  - For image-history pruning, walk `messages` newest→oldest and replace image blocks past the Nth with `{"type": "text", "text": "[older screenshot omitted]"}`. Mirrors `only_n_most_recent_images=3` in `openclaw_agent.py:231`.
+  - Dedup key must exempt `GUIWaitAction` — three identical `wait(1000)`s is a legitimate polling pattern, not a stuck loop.
+  - Assistant tool_call messages need paired tool-result acks to keep the transcript well-formed for the next turn. Used synthetic `"ok"` content since the VM side-effect itself is the real result; the model re-grounds on the next screenshot.
+
 - Use `uv sync --reinstall` if editable CUA packages fail to import (agent, cua_bench, etc.)
 - Solver exits with code 1 on MAX_STEPS_EXCEEDED — expected behavior, not an error
 - `CONTEXT_WINDOW_OVERRIDE=N` env var forces a small context window for testing overflow detection (e.g. `CONTEXT_WINDOW_OVERRIDE=8000 bash run_magic_tower.sh 15`)
