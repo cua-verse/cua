@@ -2,6 +2,26 @@
 - Source `.envrc` directly (`source "/path/.envrc"`) for reliable env var loading in Bash tool (NOT `direnv export bash`)
 - **GPT-5 family rejects `temperature != 1.0`** (litellm raises `UnsupportedParamsError`). Use `temperature=1.0` for any `openai/gpt-5.x` helper call. `litellm.drop_params = True` also silences it but hides the signal.
 
+## 2026-04-19 - US-SUB-008: General Subagent Persistent Session Engine
+- Replaced the flat 5-step `run_general_subagent` loop with a session-backed engine: new `subagent_session.py:GeneralSubagentSession` owns its own `SessionManager`, `ContextOverflowCallback`, and in-place compaction. `subagent_general.py` is now a thin wrapper that handles registry lifecycle (`mark_running` → `complete`/`fail`/`kill`-on-CancelledError) and re-exports the tool-filter helpers for backwards compatibility with US-SUB-002 callers.
+- Wrapper signature gains `summary_model` and `parent_session_dir` (required); `memory_store` is optional (forward-compat — engine doesn't yet read it). `DEFAULT_MAX_STEPS` bumped 5 → 50.
+- Subagent transcript lands at `<parent_session_dir>/subagents/<run_id>/transcript.jsonl`; assistant turns serialized as canonical typed blocks (text + function_call), tool results as `{type: tool_result, tool_use_id, content}`.
+- Compaction: excludes the system prompt (index 0), passes the rest to the shared `compact_messages()` from `context.py` (VM-agnostic, no fork), then rebuilds in-memory messages as `[system, user(summary), ...kept]`. Reactive overflow path catches `is_context_overflow_error` and retries after `force_compaction()`; bails after `max_compactions` (default 3).
+- Cooperative cancellation: wrapper's `except asyncio.CancelledError` calls `registry.kill(run_id)` and re-raises so the supervising `asyncio.Task` (US-SUB-005's `SubagentsTool.kill`) surfaces as cancelled. Other exceptions still call `registry.fail` and are swallowed (matches US-SUB-002 behavior; less noise in task supervision).
+- 13 new engine tests in `tests/test_subagent_session.py`; existing 19 wrapper tests in `tests/test_subagent_general.py` updated for the new signature (added `summary_model`, `parent_session_dir`, `tmp_path` fixture). Full suite: 825/825 passing.
+- **Files added/changed:**
+  - NEW `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_session.py`
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_general.py` (thin wrapper)
+  - NEW `tests/test_subagent_session.py`
+  - MODIFY `tests/test_subagent_general.py` (signature update + new TestCancelledError)
+- **Learnings for future iterations:**
+  - `compact_messages()` works on chat-completions-format messages even though its internal `repair_tool_use_result_pairing` looks for typed-block `function_call`/`tool_result` shapes — the repair becomes a no-op for chat-completions inputs (tool calls live in `assistant.tool_calls`, not in `content`), but token estimation and chunking still work correctly. Acceptable for the subagent path because tool calls and their results are appended in immediate succession by `_execute_tool_call`, so orphaned pairs don't arise in practice.
+  - Two parallel message stores: `self._messages` (chat-completions, source of truth for `litellm.acompletion`) and the on-disk transcript (canonical typed blocks via `session_mgr.append_message`). Compaction reads from `self._messages` (in-memory) and writes the new shape back; the transcript gets a separate `append_compaction` entry. Round-tripping through the transcript would double the work and risk drift.
+  - When patching `resolve_model` in subagent tests, target `cua_bench.agents.openclaw.subagent_session.resolve_model` (where the engine imports it), not `subagent_general` — the wrapper no longer imports it directly.
+  - `ContextOverflowCallback.__init__` will resolve the context window from the litellm registry for any model string, including unknown ones (falls back to `DEFAULT_CONTEXT_TOKENS=200_000`). Tests can pass `model="test-model"` without mocking `resolve_model` — but a mock helps when you want to assert which model string the engine forwarded to litellm.
+
+---
+
 ## 2026-04-19 - US-SUB-004: GUI Subagent Relay Loop
 - Implemented `run_gui_subagent()` — a blocking vision-to-action relay loop on top of the US-SUB-003 protocol layer. Single request path (`litellm.acompletion` + `gui_action` function-calling tool) — no native Responses API branch.
 - Added 24 unit tests (10 loop scenarios + helper coverage); sibling subagent tests remain green (106/106).

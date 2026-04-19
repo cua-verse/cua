@@ -1,106 +1,48 @@
-"""General subagent — async one-shot worker with multi-turn function-calling.
+"""General subagent — thin wrapper around the persistent session engine.
 
-A lightweight litellm.acompletion() loop that inherits analysis/memory tools
-(but NOT Computer or delegation tools), runs inline tool execution, and reports
-results back via the SubagentRegistry completion queue.
+US-SUB-002 introduced this module as a flat 5-step ``litellm.acompletion``
+loop. US-SUB-008 swapped the engine for a session-backed
+``GeneralSubagentSession`` (``subagent_session.py``) with its own compaction
+pipeline and on-disk transcript. This module is now a thin wrapper that
+handles registry lifecycle and cooperative cancellation.
 
-This is NOT a full OpenClawComputerAgent — no VM access, no trajectory, no
-compaction, no session persistence. The asyncio.Task wrapper lives in the
-delegation tool (US-SUB-005); this module is the pure async function.
+The wrapper preserves the public contract used by the upcoming
+``DelegateGeneralTool`` (US-SUB-005): spawn an asyncio task, get a final
+text back via the registry completion queue.
 
-Design adapted from OpenClaw's subagent architecture:
-  - subagent-announce.ts:buildSubagentSystemPrompt (role, constraints, output format)
-  - subagent-spawn.ts (spawn flow, registry lifecycle)
-  - Simplified for CUA's single-process asyncio model (no gateway sessions)
+Tool-filter helpers (``_filter_tools``, ``_build_subagent_system_prompt``,
+``_tools_to_litellm_schema``, ``ALLOWED_TOOL_NAMES``,
+``EXCLUDED_TOOL_NAMES``) now live in ``subagent_session.py`` and are
+re-exported here for backwards compatibility with US-SUB-002 callers and
+tests.
 """
 
 from __future__ import annotations
 
-import json as _json
+import asyncio
+from pathlib import Path
 from typing import Any
 
-from agent.model_config import resolve_model
-from agent.tools.base import BaseTool
-
 from .subagent_registry import SubagentRegistry, SubagentUsage
+from .subagent_session import (
+    ALLOWED_TOOL_NAMES,
+    DEFAULT_MAX_STEPS,
+    EXCLUDED_TOOL_NAMES,
+    GeneralSubagentSession,
+    _build_subagent_system_prompt,
+    _filter_tools,
+    _tools_to_litellm_schema,
+)
 
-# Tools the general subagent CAN use.
-ALLOWED_TOOL_NAMES = frozenset({
-    "analyze_image",
-    "memory_search",
-    "memory_get",
-    "memory_write",
-})
-
-# Tools explicitly excluded (even if passed in).
-EXCLUDED_TOOL_NAMES = frozenset({
-    "computer",
-    "milestone",
-    "delegate_general",
-    "delegate_gui",
-    "subagents",
-})
-
-DEFAULT_MAX_STEPS = 5
-
-
-def _build_subagent_system_prompt(task: str) -> str:
-    """Build a focused worker system prompt adapted from OpenClaw's buildSubagentSystemPrompt.
-
-    Reference: openclaw/src/agents/subagent-announce.ts:47-104
-    """
-    return "\n".join([
-        "# Subagent Context",
-        "",
-        "You are a **focused worker subagent** spawned by the main agent for a specific task.",
-        "",
-        "## Your Task",
-        f"- {task}",
-        "",
-        "## Rules",
-        "1. **Stay focused** - Do your assigned task, nothing else",
-        "2. **Complete and return** - Your final message is automatically reported to the main agent",
-        "3. **Don't initiate** - No heartbeats, no proactive actions, no side quests",
-        "4. **No computer actions** - You cannot interact with the desktop; use only the tools provided",
-        "5. **Be ephemeral** - You may be terminated after task completion. That's fine.",
-        "",
-        "## Output Format",
-        "When complete, respond with:",
-        "- What you accomplished or found",
-        "- Any relevant details the main agent should know",
-        "- Keep it concise but informative",
-        "",
-        "## What You DON'T Do",
-        "- NO user conversations (that's the main agent's job)",
-        "- NO computer/mouse/keyboard actions",
-        "- NO external messages",
-        "- NO pretending to be the main agent",
-    ])
-
-
-def _filter_tools(tools: list) -> list[BaseTool]:
-    """Filter tools to the subset allowed for general subagents.
-
-    Includes only BaseTool instances whose name is in ALLOWED_TOOL_NAMES.
-    Excludes anything in EXCLUDED_TOOL_NAMES or that isn't a BaseTool.
-    """
-    filtered: list[BaseTool] = []
-    for tool in tools:
-        if not isinstance(tool, BaseTool):
-            continue
-        name = getattr(tool, "name", None)
-        if name is None:
-            continue
-        if name in EXCLUDED_TOOL_NAMES:
-            continue
-        if name in ALLOWED_TOOL_NAMES:
-            filtered.append(tool)
-    return filtered
-
-
-def _tools_to_litellm_schema(tools: list[BaseTool]) -> list[dict[str, Any]]:
-    """Convert BaseTool instances to litellm function-calling format."""
-    return [{"type": "function", "function": tool.function} for tool in tools]
+__all__ = [
+    "ALLOWED_TOOL_NAMES",
+    "EXCLUDED_TOOL_NAMES",
+    "DEFAULT_MAX_STEPS",
+    "_build_subagent_system_prompt",
+    "_filter_tools",
+    "_tools_to_litellm_schema",
+    "run_general_subagent",
+]
 
 
 async def run_general_subagent(
@@ -110,115 +52,62 @@ async def run_general_subagent(
     tools: list,
     registry: SubagentRegistry,
     run_id: str,
+    summary_model: str,
+    parent_session_dir: str | Path,
+    memory_store: Any | None = None,
     max_steps: int = DEFAULT_MAX_STEPS,
     thinking_params: dict[str, Any] | None = None,
 ) -> None:
-    """Run a general subagent as a multi-turn function-calling loop.
+    """Run a general subagent as a persistent session.
+
+    Drives ``GeneralSubagentSession`` end-to-end and reports lifecycle
+    transitions back to the registry. ``CancelledError`` is treated as
+    cooperative cancellation (the US-SUB-005 ``SubagentsTool.kill`` path)
+    and surfaces as a ``KILLED`` registry transition.
 
     Args:
-        task: The task description for the subagent.
-        model: Model string (e.g. "anthropic/claude-sonnet-4-20250514").
-        tools: Full tool list from build_tools() — will be filtered.
+        task: Task description for the subagent.
+        model: litellm model string for the subagent's main loop.
+        tools: Full tool list — filtered to ``ALLOWED_TOOL_NAMES``.
         registry: SubagentRegistry for lifecycle reporting.
-        run_id: Run ID from registry.register().
-        max_steps: Maximum number of LLM call iterations (default 5).
+        run_id: Run ID returned from ``registry.register()``.
+        summary_model: litellm model string for in-session compaction.
+        parent_session_dir: Main agent's session directory; the
+            subagent transcript lands at ``<parent>/subagents/<run_id>/``.
+        memory_store: Optional MemoryStore (forward-compat — not yet
+            consumed by the engine itself; passed through for tools).
+        max_steps: Safety rail for the session loop (default 50).
         thinking_params: Optional provider-specific thinking kwargs.
     """
-    import litellm
-
-    usage = SubagentUsage()
-
+    session: GeneralSubagentSession | None = None
     try:
         registry.mark_running(run_id)
-
-        resolved = resolve_model(model)
-        filtered_tools = _filter_tools(tools)
-        tool_schemas = _tools_to_litellm_schema(filtered_tools)
-        tool_map = {t.name: t for t in filtered_tools}
-
-        system_prompt = _build_subagent_system_prompt(task)
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": task},
-        ]
-
-        result_text = ""
-
-        for _step in range(max_steps):
-            kwargs: dict[str, Any] = {
-                "model": resolved.model,
-                "messages": messages,
-                "max_tokens": 4096,
-                "temperature": 1.0,
-                **(thinking_params or {}),
-            }
-            if tool_schemas:
-                kwargs["tools"] = tool_schemas
-
-            response = await litellm.acompletion(**kwargs)
-            choice = response.choices[0]
-
-            # Accumulate token usage.
-            resp_usage = getattr(response, "usage", None)
-            if resp_usage is not None:
-                usage.input_tokens += getattr(resp_usage, "prompt_tokens", 0)
-                usage.output_tokens += getattr(resp_usage, "completion_tokens", 0)
-
-            assistant_content = choice.message.content or ""
-            tool_calls = choice.message.tool_calls
-
-            if not tool_calls:
-                # Final answer — no more tool calls.
-                result_text = assistant_content.strip()
-                break
-
-            # Append assistant message with tool_calls for multi-turn.
-            assistant_msg: dict[str, Any] = {"role": "assistant", "content": assistant_content}
-            assistant_msg["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in tool_calls
-            ]
-            messages.append(assistant_msg)
-
-            # Execute each tool call inline.
-            for tc in tool_calls:
-                tool_name = tc.function.name
-                tool_args = tc.function.arguments
-                tool = tool_map.get(tool_name)
-
-                if tool is None:
-                    tool_result = f"Error: tool '{tool_name}' is not available to this subagent."
-                else:
-                    try:
-                        tool_result = tool.call(tool_args)
-                        if not isinstance(tool_result, str):
-                            tool_result = _json.dumps(tool_result)
-                    except Exception as e:
-                        tool_result = f"Error executing {tool_name}: {e}"
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": str(tool_result),
-                })
-
-            # After tool execution, the last assistant text becomes partial result.
-            result_text = assistant_content.strip()
-        else:
-            # Loop exhausted max_steps without a final text-only response.
-            if not result_text:
-                result_text = "(subagent reached max steps without a final response)"
-
-        print(f"[Subagent] General subagent {run_id} completed ({usage.input_tokens}+{usage.output_tokens} tokens)")
-        registry.complete(run_id, result_text, usage)
-
+        session = GeneralSubagentSession(
+            run_id=run_id,
+            task=task,
+            model=model,
+            tools=tools,
+            registry=registry,
+            summary_model=summary_model,
+            parent_session_dir=Path(parent_session_dir),
+            memory_store=memory_store,
+            max_steps=max_steps,
+            thinking_params=thinking_params,
+        )
+        result_text = await session.run()
+        print(
+            f"[Subagent] General subagent {run_id} completed "
+            f"({session.usage.input_tokens}+{session.usage.output_tokens} tokens)"
+        )
+        registry.complete(run_id, result_text, session.usage)
+    except asyncio.CancelledError:
+        # Cooperative cancellation — US-SUB-005's SubagentsTool.kill path.
+        # Mark the registry KILLED but re-raise so the asyncio.Task surfaces
+        # as cancelled to the supervising tool.
+        print(f"[Subagent] General subagent {run_id} cancelled")
+        registry.kill(run_id)
+        raise
     except Exception as e:
         print(f"[Subagent] General subagent {run_id} failed: {e}")
+        usage = session.usage if session is not None else SubagentUsage()
         registry.fail(run_id, str(e), usage)

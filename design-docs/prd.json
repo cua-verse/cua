@@ -1432,6 +1432,37 @@
       "notes": "The relay loop calls DesktopSession methods directly via execute_gui_action() from US-SUB-003 \u2014 NOT through the Computer tool. After each action, it takes a fresh screenshot via session.screenshot() and feeds it back to the vision model. The GUI subagent is blocking \u2014 the main agent's run() loop is paused while the GUI subagent drives the VM. CORRECTION to AC #5 (model-aware request building): GPT-5.4 does NOT support native computer_use_preview \u2014 CUA's agent/loops/openai.py:137-141 (_is_native_tool_model) explicitly excludes it. The implemented single-path design (litellm.acompletion + gui_action function-calling tool) is correct for all current models. A native Responses-API branch is a future story, gated on a computer-use-preview model being available for end-to-end testing."
     },
     {
+      "id": "US-SUB-008",
+      "title": "General Subagent Persistent Session Engine",
+      "description": "As the agent harness, I want the general subagent to run inside a real session (its own SessionManager, its own ContextOverflowCallback, its own compaction pipeline) instead of a flat 5-step litellm.acompletion loop, so that delegated work can legitimately run for many turns, survive context pressure via compaction, and persist a per-subagent transcript for observability \u2014 matching OpenClaw's 'every subagent is a full pi-embedded-runner session' architecture.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_general.py (US-SUB-002 \u2014 one-shot run_general_subagent loop to be replaced by a thin wrapper around the new session engine)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_registry.py (US-SUB-001 \u2014 lifecycle unchanged; wrapper still calls mark_running/complete/fail)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/context.py (compact_messages, ContextOverflowCallback, is_context_overflow_error \u2014 VM-agnostic pipeline to reuse)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/session.py (SessionManager \u2014 subagent-scoped via task_id=run_id, base_dir=parent_session_dir/subagents)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (OpenClawComputerAgent.run \u2014 loop skeleton to mirror without Computer tool / Responses API machinery)"
+        ],
+        "depends": "US-SUB-002 (general subagent contract + tool filter)",
+        "reference": "../openclaw/src/agents/pi-embedded-runner/compact.ts (shared compaction pipeline; subagents differ only via promptMode='minimal' at lines 688-691); ../openclaw/src/agents/pi-embedded-runner/run/ (the agent run loop executed by both main and subagent sessions)",
+        "planFile": "docs/plan/US-SUB-005-008-persistent-delegation.md"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_session.py submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_general.py tests/test_subagent_session.py tests/test_subagent_general.py)",
+        "Level 1: Unit tests pass \u2014 GeneralSubagentSession runs a multi-turn loop with mocked tool calls (analyze_image, memory_search) and returns the final text after the model emits an assistant message with no tool_calls",
+        "Level 1: Unit tests pass \u2014 proactive compaction: when overflow_cb.needs_compaction is forced true, _compact_in_place() rewrites the in-memory message list from [CompactionSummaryBlock, ...kept_recent], increments compaction_count, appends a compaction entry to the subagent's SessionManager transcript, and the loop continues",
+        "Level 1: Unit tests pass \u2014 reactive compaction: if litellm.acompletion raises a context-overflow-shaped error, overflow_cb.force_compaction() is called, _compact_in_place() runs, and the call retries; after max_compactions retries the error propagates out",
+        "Level 1: Unit tests pass \u2014 subagent transcript is written to <parent_session_dir>/subagents/<run_id>/transcript.jsonl with assistant messages, tool-result messages, and compaction entries",
+        "Level 1: Unit tests pass \u2014 run_general_subagent wrapper: on success calls registry.mark_running \u2192 registry.complete(run_id, result, usage); on exception calls registry.fail(run_id, str(e), usage); on asyncio.CancelledError calls registry.kill(run_id) and re-raises (cooperative cancellation)",
+        "Level 1: Unit tests pass \u2014 default max_steps is 50 (not 5); the 'reached max steps without a final response' sentinel is only emitted at the new 50-step cap",
+        "Level 1: Regression \u2014 existing tests/test_subagent_general.py tool-filter and system-prompt tests still pass after the wrapper signature is updated; ALLOWED_TOOL_NAMES and EXCLUDED_TOOL_NAMES unchanged",
+        "Level 1: run_general_subagent public signature gains parameters memory_store, summary_model, parent_session_dir while preserving task/model/tools/registry/run_id/max_steps/thinking_params"
+      ],
+      "priority": 18,
+      "passes": true,
+      "notes": "Engine swap, not a behavior change from the main agent's perspective. The subagent's public contract (spawn a task, get a final text back via the registry completion queue) is preserved. Reuse compact_messages() from context.py \u2014 it's VM-agnostic; no fork needed. Subagent SessionManager is scoped by SessionManager(task_id=run_id, base_dir=parent_session_dir/'subagents'). The wrapper catches asyncio.CancelledError explicitly so that US-SUB-005's kill action produces a KILLED registry state instead of ERROR. No Level 2 test at this layer \u2014 US-SUB-005's Level 2 exercises the combined path. US-SUB-009 (steering) will extend this session with an inbox queue; design the loop to make that addition mechanical."
+    },
+    {
       "id": "US-SUB-005",
       "title": "Delegation Tools & Main Loop Integration",
       "description": "As the agent, I want delegate_general and delegate_gui tools registered as BaseTool subclasses plus a completion drain in the main loop, so that I can delegate planning/analysis tasks to async workers and GUI automation to a specialized vision model during task execution.",
@@ -1440,25 +1471,32 @@
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py (build_tools \u2014 tool assembly, add delegation tools here)",
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (OpenClawComputerAgent.run \u2014 add _drain_completions between steps)",
           "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md (agent instructions \u2014 add delegation guidance)",
-          "submodules/cua/libs/python/agent/agent/tools/base.py (BaseTool ABC, @register_tool \u2014 tool registration pattern)"
+          "submodules/cua/libs/python/agent/agent/tools/base.py (BaseTool ABC, @register_tool \u2014 tool registration pattern)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_session.py (US-SUB-008 \u2014 GeneralSubagentSession engine; DelegateGeneralTool spawns run_general_subagent which drives this)"
         ],
-        "depends": "US-SUB-002 (general subagent implementation), US-SUB-004 (GUI subagent implementation)",
-        "reference": "../openclaw/src/agents/tools/sessions-spawn-tool.ts (spawn tool \u2014 params, validation, return format); ../openclaw/src/agents/tools/subagents-tool.ts (subagents tool \u2014 list/kill actions)"
+        "depends": "US-SUB-002 (general subagent contract), US-SUB-004 (GUI subagent implementation), US-SUB-008 (persistent session engine \u2014 DelegateGeneralTool wires on top)",
+        "reference": "../openclaw/src/agents/tools/sessions-spawn-tool.ts (spawn tool \u2014 params, validation, return format); ../openclaw/src/agents/tools/subagents-tool.ts (subagents tool \u2014 list/kill actions)",
+        "planFile": "docs/plan/US-SUB-005-008-persistent-delegation.md"
       },
       "acceptanceCriteria": [
-        "Level 1: Lint passes (uv run ruff check submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_tools.py tests/test_subagent_tools.py)",
-        "Level 1: Unit tests pass \u2014 DelegateGeneralTool: params (task str, model str optional, max_steps int default 5); spawns asyncio.Task wrapping run_general_subagent; returns immediately with {status: accepted, run_id, note: 'result auto-announces between steps'}",
-        "Level 1: Unit tests pass \u2014 DelegateGUITool: params (instruction str, model str default 'openai/gpt-5.4', max_steps int default 15); calls run_gui_subagent synchronously (blocking); returns {status: complete/error, summary, steps_used, tokens}",
-        "Level 1: Unit tests pass \u2014 SubagentsTool: params (action: list|kill, target: run_id optional); list returns active+recent runs; kill cancels asyncio.Task and calls registry.kill()",
-        "Level 1: Unit tests pass \u2014 _drain_completions() in OpenClawComputerAgent: non-blocking drain of registry.completion_queue; injects results as user messages formatted '[Subagent Result] task: {task}\\nStatus: {status}\\n\\n{result_text}'",
-        "Level 1: build_tools() returns list including DelegateGeneralTool, DelegateGUITool, SubagentsTool alongside existing tools",
-        "Level 1: AGENTS.md updated with delegation section: when to use delegate_general (planning, memory analysis, verification), when to use delegate_gui (routine GUI ops with specialized vision model), do NOT poll (general results auto-announce)",
-        "Level 2: VM test \u2014 run_magic_tower.sh 50 \u2014 agent has delegation tools in tool list (verify via trajectory turn_000/0000_api_start.json tools array)",
-        "Level 2: VM test \u2014 if agent invokes delegate_gui, trajectory shows blocking call with GUI subagent steps, then main agent resumes"
+        "Level 1: Lint passes (uv run ruff check submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_tools.py tests/test_subagent_tools.py tests/test_subagent_drain.py)",
+        "Level 1: Unit tests pass \u2014 DelegateGeneralTool: params (task str, model str optional, max_steps int default 50, label str optional); spawns asyncio.Task wrapping run_general_subagent (which runs GeneralSubagentSession under the hood); returns immediately with {status: accepted, run_id, note: 'persistent session \u2014 result auto-announces when complete; do not poll'}",
+        "Level 1: Unit tests pass \u2014 DelegateGeneralTool constructor accepts parent_session_dir (Path) and memory_store (MemoryStore); both are forwarded to run_general_subagent so the subagent transcript lands at <parent_session_dir>/subagents/<run_id>/",
+        "Level 1: Unit tests pass \u2014 DelegateGeneralTool returns {status: rejected, reason: 'max concurrent subagents reached'} when registry.register raises SubagentLimitError",
+        "Level 1: Unit tests pass \u2014 DelegateGUITool: params (instruction str, model str default 'openai/gpt-5.4', max_steps int default 15, label str optional); drives run_gui_subagent synchronously via ThreadPoolExecutor + asyncio.run (matching AnalyzeImageTool.call pattern at analyze_image.py:144-168); returns {status: complete, summary, run_id, tokens} on success and {status: error, error, run_id, tokens} when the coroutine raises",
+        "Level 1: Unit tests pass \u2014 SubagentsTool: params (action: list|kill default list, target: run_id optional); list returns {status: ok, active, recent} via registry.list_runs() + to_dict(); kill calls registry.kill_run(target) which cancels the asyncio.Task (verify task.cancelled()) and transitions registry to KILLED",
+        "Level 1: Unit tests pass \u2014 registry extension: attach_task(run_id, task) stores the handle; kill_run(run_id) cancels task via task.cancel() + transitions via registry.kill(); idempotent when run is already in a terminal status",
+        "Level 1: Unit tests pass \u2014 _drain_completions(new_items) in OpenClawComputerAgent: non-blocking drain of registry.completion_queue; appends user messages formatted '[Subagent Result] task: {task}\\nStatus: {status}\\n\\n{result_text or error_message}'; empty queue is a no-op; drain preserves FIFO order across multiple completions",
+        "Level 1: build_tools() signature accepts registry and parent_session_dir; returned list contains DelegateGeneralTool, DelegateGUITool, SubagentsTool alongside existing tools",
+        "Level 1: OpenClawComputerAgent.__init__ accepts registry and calls _drain_completions(new_items) between the _handle_item loop and the proactive compaction check",
+        "Level 1: AGENTS.md updated with delegation section: what delegate_general does (async), what delegate_gui does (blocking), what subagents does (list/kill), and the 'do NOT poll \u2014 general results auto-announce' rule",
+        "Level 2: VM test \u2014 run_magic_tower.sh 50 \u2014 agent has delegate_general, delegate_gui, subagents in tool list (verify via trajectory turn_000/0000_api_start.json tools array)",
+        "Level 2: VM test \u2014 if the agent invokes delegate_general during a run, a subagent transcript appears at tasks/<task>/subagents/<run_id>/transcript.jsonl containing at least one assistant entry",
+        "Level 2: VM test \u2014 if the agent invokes delegate_gui, trajectory shows blocking call with GUI subagent steps, then main agent resumes and its next predict_step input includes a fresh screenshot"
       ],
-      "priority": 18,
+      "priority": 19,
       "passes": false,
-      "notes": "Three tools: delegate_general (async, returns accepted), delegate_gui (blocking, returns result), subagents (list/kill). The drain point in agent_loop.py is after _handle_item() and before the compaction check \u2014 same location where screenshot path injection happens. DelegateGUITool needs the DesktopSession passed through (from build_tools). DelegateGeneralTool needs the SubagentRegistry and MemoryStore. SubagentsTool needs the registry. All three need to be added to build_tools() with appropriate constructor args. AGENTS.md guidance is critical \u2014 without it the agent won't know when to delegate vs act directly."
+      "notes": "Three tools: delegate_general (async, returns accepted), delegate_gui (blocking, returns result), subagents (list/kill). DelegateGeneralTool wires on top of the US-SUB-008 persistent session engine \u2014 each spawn becomes a full session with its own compaction and its own on-disk transcript. Default max_steps for DelegateGeneralTool bumped 5 \u2192 50 to match the engine. DelegateGUITool unchanged engine-wise (short-lived blocking relay with image pruning is already sufficient). The drain point in agent_loop.py is after _handle_item() and before the proactive compaction check (current line 238) \u2014 drain-before-compact so any new user messages count toward token pressure this iteration. Registry gains attach_task(run_id, task) and kill_run(run_id) so SubagentsTool's kill action has real teeth; the wrapper in US-SUB-008 catches asyncio.CancelledError and transitions to KILLED. DelegateGeneralTool constructor takes (registry, tools, memory_store, default_model, summary_model, parent_session_dir, thinking_params); DelegateGUITool takes (registry, session, default_model, thinking_params); SubagentsTool takes (registry). All three are added in build_tools() with args threaded through from openclaw_agent.perform_task (parent_session_dir=session_mgr.session_dir)."
     },
     {
       "id": "US-SUB-006",
@@ -1479,9 +1517,9 @@
         "Level 1: Unit tests pass \u2014 after DelegateGUITool completes (blocking return), a fresh screenshot is taken via session.screenshot() and injected as a user message into the main agent's items list with text '[VM state after GUI delegation]'",
         "Level 2: VM test \u2014 run_magic_tower.sh 50 \u2014 after any GUI delegation, the main agent's next predict_step input includes a fresh screenshot (verify via trajectory API payload)"
       ],
-      "priority": 19,
+      "priority": 20,
       "passes": false,
-      "notes": "Three changes: (1) General subagent screenshot attachment \u2014 the main agent's delegate_general tool optionally accepts screenshots (base64) that get injected into the subagent's context as vision content. This enables 'analyze this screenshot' delegation without the subagent having VM access. (2) GUI subagent history pruning \u2014 keep last 3 screenshots in the relay loop to avoid context overflow on long GUI sequences. (3) Post-delegation screenshot \u2014 after GUI subagent finishes and control returns to main agent, automatically take a screenshot so the main agent sees the current VM state. This is critical because the VM state changed during delegation and the main agent's last screenshot is stale."
+      "notes": "Three changes: (1) General subagent screenshot attachment \u2014 the main agent's delegate_general tool optionally accepts screenshots (base64) that get injected into the subagent's context as vision content. This enables 'analyze this screenshot' delegation without the subagent having VM access. (2) GUI subagent history pruning \u2014 keep last 3 screenshots in the relay loop to avoid context overflow on long GUI sequences. Note: already implemented in US-SUB-004 (subagent_gui.py:389 _prune_images_to_last_n); this story just adds an assertion test. (3) Post-delegation screenshot \u2014 after GUI subagent finishes and control returns to main agent, automatically take a screenshot so the main agent sees the current VM state. This is critical because the VM state changed during delegation and the main agent's last screenshot is stale."
     },
     {
       "id": "US-SUB-007",
@@ -1502,11 +1540,39 @@
         "Level 1: Unit tests pass \u2014 persist() called automatically on registry.complete(), registry.fail(), registry.kill() (append incremental, not full rewrite)",
         "Level 1: Unit tests pass \u2014 restore() deduplicates by run_id (last entry wins, matching OpenClaw's append-only + last-write-wins pattern)",
         "Level 1: Unit tests pass \u2014 subagent run history queryable: registry.completed_runs() returns all complete/error runs from current + prior sessions for transcript replay context",
-        "Level 2: VM test \u2014 run_magic_tower.sh 30 (run 1 with delegation), then run_magic_tower.sh 30 (run 2) \u2014 run 2's subagent-runs.jsonl contains entries from run 1; orphaned runs from run 1 marked as stalled"
+        "Level 2: VM test \u2014 run_magic_tower.sh 30 (run 1 with delegation), then run_magic_tower.sh 30 (run 2) \u2014 run 2's subagent-runs.jsonl contains entries from run 1; orphaned runs from run 1 marked as stalled",
+        "Level 1: Unit tests pass \u2014 completed_runs() exposes the on-disk transcript path for each completed run (joined from parent_session_dir/subagents/<run_id>/transcript.jsonl introduced in US-SUB-008) so replayed context can link back to detailed subagent work"
       ],
-      "priority": 20,
+      "priority": 21,
       "passes": false,
-      "notes": "Closes the gap between our ephemeral in-memory registry (US-SUB-001) and OpenClaw's disk-backed subagent-runs.jsonl. Three capabilities: (1) Persist \u2014 append-only JSONL write on every state transition (register, complete, fail, kill). Append-only avoids rewriting the full file on every change. (2) Restore \u2014 on session resume, load prior runs, mark pending/running as orphaned (stalled). This prevents the agent from waiting for results that will never arrive from a crashed prior session. (3) History query \u2014 completed_runs() exposes prior subagent results for inclusion in cross-run context (e.g., 'in a previous session, you delegated X and the result was Y'). The JSONL file lives alongside session transcripts at tasks/{task_id}/subagent-runs.jsonl. Format mirrors OpenClaw's subagent-registry-state.ts pattern."
+      "notes": "Closes the gap between our ephemeral in-memory registry (US-SUB-001) and OpenClaw's disk-backed subagent-runs.jsonl. Three capabilities: (1) Persist \u2014 append-only JSONL write on every state transition (register, complete, fail, kill). Append-only avoids rewriting the full file on every change. (2) Restore \u2014 on session resume, load prior runs, mark pending/running as orphaned (stalled). This prevents the agent from waiting for results that will never arrive from a crashed prior session. (3) History query \u2014 completed_runs() exposes prior subagent results for inclusion in cross-run context (e.g., 'in a previous session, you delegated X and the result was Y'). The JSONL file lives alongside session transcripts at tasks/{task_id}/subagent-runs.jsonl. Format mirrors OpenClaw's subagent-registry-state.ts pattern. SCOPE EXTENSION (per US-SUB-005/008 plan): alongside registry metadata, also reconcile on-disk subagent transcript directories introduced in US-SUB-008 (tasks/<task>/subagents/<run_id>/). Any subagent dir whose registry record is PENDING or RUNNING at load time is stalled \u2014 mark ERROR with 'stalled: prior session ended before completion'. completed_runs() should surface the transcript path so replayed context can link back to the subagent's detailed work, not just its summary."
+    },
+    {
+      "id": "US-SUB-009",
+      "title": "Subagent Mid-Stream Steering",
+      "description": "As the main agent, I want to send follow-up messages into a running general subagent via subagents(action=steer, target=<run_id>, message=<text>), so that long-running delegated work can be refined or corrected mid-flight without spawning a fresh subagent \u2014 matching OpenClaw's steerControlledSubagentRun.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_session.py (US-SUB-008 \u2014 GeneralSubagentSession; add inbox queue + polling between turns)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_tools.py (US-SUB-005 \u2014 SubagentsTool; add steer action)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_registry.py (US-SUB-001/005 \u2014 add attach_inbox(run_id, queue) + get_inbox(run_id))"
+        ],
+        "depends": "US-SUB-005 (tools and loop integration), US-SUB-008 (persistent session engine \u2014 the inbox plugs into its loop)",
+        "reference": "../openclaw/src/agents/subagent-control.ts (steerControlledSubagentRun \u2014 target resolution, message length cap, queue injection); ../openclaw/src/agents/tools/subagents-tool.ts (steer action schema)",
+        "planFile": "docs/plan/US-SUB-005-008-persistent-delegation.md"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Lint passes (uv run ruff check .)",
+        "Level 1: Unit tests pass \u2014 GeneralSubagentSession gains self._inbox: asyncio.Queue[str]; between turns the loop calls inbox.get_nowait() and, if a message is present, appends it as a user message before the next litellm.acompletion call",
+        "Level 1: Unit tests pass \u2014 registry extension: attach_inbox(run_id, queue) stores the queue; get_inbox(run_id) returns it; cleaned up on terminal status transitions",
+        "Level 1: Unit tests pass \u2014 SubagentsTool.call({action: 'steer', target: run_id, message: <text>}) calls registry.get_inbox(run_id).put_nowait(message); rejects unknown run_id with {status: error}; rejects missing message with validation error",
+        "Level 1: Unit tests pass \u2014 steer target resolution matches OpenClaw's precedence (exact run_id \u2192 label \u2192 most recent active) and respects a MAX_STEER_MESSAGE_CHARS cap",
+        "Level 1: Unit tests pass \u2014 concurrency guard: a single subagent turn consumes at most one steer message; additional messages queued during that turn are consumed on subsequent turns",
+        "Level 2: VM test \u2014 run_magic_tower.sh 50 \u2014 if the main agent spawns a general subagent and later steers it, the subagent's transcript shows the steered message injected between its own turns"
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": "V2 delegation capability, deferred until US-SUB-005 validates V1 in real VM runs. Steering matters mainly for long interactive subagent sessions; not wiring it in V1 avoids speculative complexity in the loop. Reuses OpenClaw's design: inbox queue polled between turns (not mid-turn), single-message-per-turn guard to prevent message storms, same target-resolution precedence (exact run_id \u2192 label \u2192 most recent active) and a character cap on the message. No kill-like escalation path here \u2014 SubagentsTool(action=kill) handles termination; steer is for refinement. Loop shape in US-SUB-008 should be designed so adding the inbox poll is mechanical (single line between API calls, no restructuring)."
     }
   ]
 }
