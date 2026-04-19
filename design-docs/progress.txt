@@ -1229,3 +1229,24 @@
   - After max_steps exhaustion without final text response, use the last `assistant_content` as partial result rather than returning empty — avoids empty COMPLETE states
   - `SubagentUsage` is a simple dataclass with `input_tokens`/`output_tokens` ints; accumulate by `+=` from `response.usage.prompt_tokens`/`completion_tokens`
 ---
+
+## 2026-04-19 - US-SUB-003
+- Implemented `subagent_gui_protocol.py`: typed GUIAction union (7 variants), multi-format parser, validation, execute dispatcher, and `gui_action` tool schema
+- Three parse paths: (a) OpenAI `computer_call` native format (primary — GPT-5.4), (b) function_call with `gui_action` tool (non-CU vision models), (c) structured-text keyword fallback (last resort)
+- `execute_gui_action()` dispatches to RemoteDesktopSession methods (click/right_click/double_click/type/hotkey/scroll/drag); GUIDoneAction is terminal — returns summary with no VM call
+- Added `tests/test_subagent_gui_protocol.py` with 49 unit tests covering all 7 acceptance criteria
+- **Files changed:**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui_protocol.py` (new)
+  - `tests/test_subagent_gui_protocol.py` (new)
+  - `prd.json` (US-SUB-003 passes: true; planFile reference added)
+  - `docs/plan/US-SUB-003-gui-protocol.md` (new plan doc)
+  - `docs/plan/US-SUB-001-006-subagent-delegation.md` (US-SUB-002 differences notes appended)
+  - `architecture.md` (subagent_gui_protocol.py added to directory tree)
+  - `progress.txt`
+- **Learnings for future iterations:**
+  - OpenAI `computer_call` scroll uses `scroll_x`/`scroll_y` deltas (not `direction`); direction must be inferred from sign (positive → down, negative → up). The `amount` comes from the absolute delta value — fall back to explicit `amount` field or 3.
+  - OpenAI `double_click` maps to `button="double"` in our GUIClickAction union, not a separate type. This keeps the union flat and dispatch straightforward.
+  - Drag path uses first and last point only (`path[0]` and `path[-1]`); intermediate waypoints are discarded. Fine for typical drags — if precise multi-point drag is needed later, add a separate GUIDragPathAction variant.
+  - `_try_parse_function_call` must handle both `output` list layout (Responses API-style) and `tool_calls` list on the response or nested in `message` (Completion-style). These two are not mutually exclusive — the check order matters (output first, then tool_calls).
+  - Text path `SCROLL` regex omits x/y because we send `session.scroll(direction, amount)` server-side and do not need coordinates in that path. Coordinates matter only for computer_call and function_call paths.
+---

@@ -109,6 +109,18 @@ Lightweight litellm.acompletion() loop with function-calling:
 
 NOT a full OpenClawComputerAgent — no VM, no trajectory, no compaction, no session.
 
+#### Differences from OpenClaw (as built)
+
+Natural self-termination (OpenClaw "Path 1") is implemented 1:1: the LLM ends its turn with no tool calls → loop breaks → `registry.complete()` pushes to the completion queue, which the main loop drains between `predict_step` calls (analogue to OpenClaw's `steer()` push). System prompt rules and registry lifecycle (running → complete/failed) mirror `buildSubagentSystemPrompt` / `completeSubagentRun`.
+
+Deliberate simplifications vs. OpenClaw:
+
+- **Hard `max_steps=5` cap** (subagent_general.py:147). OpenClaw relies on a 48h `timeoutSeconds` instead. Ours is tighter by design — LLM-only subagents shouldn't need many turns; if they do, something is wrong. On exhaustion we return a "(subagent reached max steps without a final response)" sentinel rather than erroring.
+- **One-shot, no re-invocation.** OpenClaw can steer/send further messages to a completed subagent session (`sendControlledSubagentMessage`, `steerControlledSubagentRun`). We don't — each task is a one-shot asyncio function with no persistent session to re-enter. If the parent wants more work, it spawns a new subagent.
+- **No orchestrator subagents.** `ALLOWED_TOOL_NAMES` excludes `delegate_general` / `delegate_gui` / `subagents` (subagent_general.py:28-42), so a general subagent cannot spawn children. OpenClaw allows nesting up to depth 3 (main → orchestrator → orchestrator → leaf). Our max depth is effectively 1.
+- **No Path 2 (explicit kill) — deferred to US-SUB-005.** OpenClaw's `subagents(action=kill)` aborts the in-flight LLM stream via `abortEmbeddedPiRun`, clears queues, marks the registry `killed`, and cascade-kills descendants. We have the registry slot for it (`SubagentRegistry` lifecycle includes kill) but no wiring: `asyncio.Task.cancel()` on the task handle + a corresponding registry transition needs to land with the delegation tool in US-SUB-005. Cascade-kill is moot for us since there are no descendants (see previous point).
+- **No session persistence for subagents.** OpenClaw writes child session metadata to the session store (role, depth, model, `abortedLastRun` flag). We hold state only in the in-memory `SubagentRegistry` for the lifetime of the parent agent. Acceptable because subagents are ephemeral by design; revisit only if we add resume-across-restart.
+
 ### US-SUB-003: GUI Subagent — Vision-to-Action Relay Protocol (Priority 16)
 
 **File**: `openclaw/subagent_gui_protocol.py`

@@ -1389,7 +1389,8 @@
           "submodules/cua/libs/python/agent/agent/tools/computer.py (Computer tool \u2014 action execution format)",
           "submodules/cua/libs/python/agent/agent/responses.py (make_click_item, make_type_item \u2014 Responses API action item constructors)"
         ],
-        "reference": "submodules/cua/libs/cua-bench/cua_bench/types.py (canonical CUA action types \u2014 align GUIAction variants with these); submodules/cua/libs/python/agent/agent/loops/openai.py (OpenAI computer_call output format \u2014 the native format GPT-5.4 produces)"
+        "reference": "submodules/cua/libs/cua-bench/cua_bench/types.py (canonical CUA action types \u2014 align GUIAction variants with these); submodules/cua/libs/python/agent/agent/loops/openai.py (OpenAI computer_call output format \u2014 the native format GPT-5.4 produces)",
+        "planFile": "docs/plan/US-SUB-003-gui-protocol.md"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui_protocol.py tests/test_subagent_gui_protocol.py)",
@@ -1400,7 +1401,7 @@
         "Level 1: Unit tests pass \u2014 action validation: coordinates non-negative, text non-empty, scroll amount positive; invalid actions raise ValueError"
       ],
       "priority": 16,
-      "passes": false,
+      "passes": true,
       "notes": "This is the contract layer \u2014 no LLM calls, no VM interaction. Just types, parsing, and conversion. parse_gui_response() must handle GPT-5.4's native computer_call format (the primary use case) AND a function-calling fallback for non-CU vision models. execute_gui_action() calls DesktopSession methods directly (session.click, session.type_text, etc.), NOT the Computer tool \u2014 the Computer tool wraps these with extra logic (screenshot after action) that we handle in the relay loop (US-SUB-004). Align GUIAction field names with CUA's existing action types in types.py for consistency."
     },
     {
