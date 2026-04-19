@@ -74,6 +74,15 @@ from .session import (
     sanitize_history,
     should_run_memory_flush,
 )
+from .subagent_registry import (
+    SubagentLimitError,
+    SubagentRegistry,
+    SubagentRun,
+    SubagentStatus,
+    SubagentType,
+    SubagentUsage,
+)
+from .subagent_tools import DelegateGeneralTool, DelegateGUITool, SubagentsTool
 from .thinking import ThinkingConfig, ThinkLevel, resolve_thinking_default
 from .tools import ToolLoggingCallback, build_tools, get_tool_summaries
 from .transcript import group_step_output
@@ -133,4 +142,13 @@ __all__ = [
     "ThinkLevel",
     "resolve_thinking_default",
     "group_step_output",
+    "SubagentLimitError",
+    "SubagentRegistry",
+    "SubagentRun",
+    "SubagentStatus",
+    "SubagentType",
+    "SubagentUsage",
+    "DelegateGeneralTool",
+    "DelegateGUITool",
+    "SubagentsTool",
 ]

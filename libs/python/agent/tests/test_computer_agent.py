@@ -137,3 +137,93 @@ class TestComputerAgentIntegration:
         # Verify agent accepted the tool
         assert agent is not None
         assert hasattr(agent, "tools")
+
+
+class TestHandleFunctionCallScreenshot:
+    """Regression tests for the function_call path of action="screenshot".
+
+    The computer dispatch at agent.py's `_handle_item` previously returned the
+    raw base64 PNG as the `function_call_output.output` content, ballooning the
+    transcript by ~58K tokens per explicit screenshot call and escaping
+    `only_n_most_recent_images` pruning (which only operates on `image_url`
+    blocks, not tool-result text). The fix: for action="screenshot", return
+    the standard success sentinel in the function output; the base64 still
+    flows to the model via the adjacent `user` message with an `input_image`
+    content block, matching click/keypress/etc.
+    """
+
+    def test_screenshot_returns_sentinel_in_output(
+        self, disable_telemetry, mock_computer
+    ):
+        import asyncio
+        import json as _json
+
+        from agent import ComputerAgent
+
+        # Screenshot returns a base64 string (this is the real CUA Computer
+        # behavior at cua.py:39-47). The mock returns a long base64-lookalike
+        # so a regression would show up as "sees this payload in output".
+        long_b64 = "iVBORw0KGgo" + "A" * 1000
+        mock_computer.screenshot = AsyncMock(return_value=long_b64)
+
+        agent = ComputerAgent(
+            model="anthropic/claude-sonnet-4-5-20250929",
+            tools=[mock_computer],
+        )
+
+        item = {
+            "type": "function_call",
+            "name": "computer",
+            "call_id": "call_test_screenshot",
+            "arguments": '{"action": "screenshot"}',
+        }
+        result = asyncio.run(agent._handle_item(item, mock_computer))
+
+        # _handle_item returns [function_call_output, image_message].
+        assert len(result) == 2
+        call_output, image_message = result
+
+        assert call_output["type"] == "function_call_output"
+        assert call_output["call_id"] == "call_test_screenshot"
+        output_str = call_output["output"]
+        # Sentinel — NOT a base64 PNG string.
+        output_json = _json.loads(output_str)
+        assert output_json == {"success": True, "screenshot_captured": True}
+        # Belt and suspenders: make sure the base64 didn't sneak in anywhere.
+        assert "iVBORw0KGgo" not in output_str
+
+        # The adjacent user message still carries the screenshot for the model.
+        assert image_message["role"] == "user"
+        assert image_message["content"][0]["type"] == "input_image"
+        assert long_b64 in image_message["content"][0]["image_url"]
+
+    def test_non_screenshot_action_preserves_result_dict(
+        self, disable_telemetry, mock_computer
+    ):
+        """Regression guard: click/keypress/etc. must still surface their real
+        action_result in the tool output so real failures aren't masked."""
+        import asyncio
+        import json as _json
+
+        from agent import ComputerAgent
+
+        mock_computer.screenshot = AsyncMock(return_value="base64data")
+        mock_computer.click = AsyncMock(
+            return_value={"clicked": True, "target_x": 100, "target_y": 200}
+        )
+
+        agent = ComputerAgent(
+            model="anthropic/claude-sonnet-4-5-20250929",
+            tools=[mock_computer],
+        )
+        item = {
+            "type": "function_call",
+            "name": "computer",
+            "call_id": "call_test_click",
+            "arguments": '{"action": "click", "x": 100, "y": 200, "button": "left"}',
+        }
+        result = asyncio.run(agent._handle_item(item, mock_computer))
+        call_output = result[0]
+
+        payload = _json.loads(call_output["output"])
+        assert payload == {"clicked": True, "target_x": 100, "target_y": 200}

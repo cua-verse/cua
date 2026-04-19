@@ -133,11 +133,17 @@ class SubagentRegistry:
     def __init__(self, max_concurrent: int = 3) -> None:
         self._runs: dict[str, SubagentRun] = {}
         self._completion_queue: asyncio.Queue[SubagentRun] = asyncio.Queue()
+        self._tasks: dict[str, asyncio.Task] = {}
         self._max_concurrent = max_concurrent
 
     @property
     def max_concurrent(self) -> int:
         return self._max_concurrent
+
+    @property
+    def completion_queue(self) -> "asyncio.Queue[SubagentRun]":
+        """Read-only access to the completion queue for introspection/tests."""
+        return self._completion_queue
 
     def register(
         self,
@@ -234,6 +240,35 @@ class SubagentRegistry:
             return
         run.status = SubagentStatus.KILLED
         run.ended_at = _now_iso()
+
+    def attach_task(self, run_id: str, task: asyncio.Task) -> None:
+        """Associate an asyncio.Task with a run so ``kill_run`` can cancel it.
+
+        Idempotent: silently ignores unknown run_ids so the caller (US-SUB-005
+        ``DelegateGeneralTool``) does not need to re-check the registry after
+        ``register``.
+        """
+        if run_id in self._runs:
+            self._tasks[run_id] = task
+
+    def kill_run(self, run_id: str) -> bool:
+        """Cancel the underlying asyncio.Task and transition the run to KILLED.
+
+        Returns True if a kill signal was issued, False if the run is unknown
+        or already in a terminal status. The wrapper's
+        ``except asyncio.CancelledError`` path also calls ``self.kill(run_id)``
+        after cancellation propagates; the second call is a no-op because
+        ``kill`` bails on terminal statuses.
+        """
+        run = self._runs.get(run_id)
+        if run is None or run.status in _TERMINAL_STATUSES:
+            return False
+
+        task = self._tasks.get(run_id)
+        if task is not None and not task.done():
+            task.cancel()
+        self.kill(run_id)
+        return True
 
     def active_count(self) -> int:
         """Count of PENDING + RUNNING general subagent runs."""

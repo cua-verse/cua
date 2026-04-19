@@ -865,12 +865,18 @@ class ComputerAgent:
                         result = [call_output]
                     else:
                         # Return both the function output AND a user message with the screenshot
-                        # This allows the model to see the screenshot result
-                        # Preserve actual action_result so failures/errors aren't masked
-                        if action_result is not None:
-                            output_content = json.dumps(action_result)
-                        else:
+                        # This allows the model to see the screenshot result.
+                        # For action="screenshot", computer.screenshot() returns the raw
+                        # base64 PNG; dumping it into the tool content balloons the
+                        # transcript by ~58K tokens per call and escapes only_n_most_recent_images
+                        # pruning (which operates on image_url blocks, not tool-text). The
+                        # image_message below already delivers the screenshot via the
+                        # normalized image_url path, matching how click/keypress/etc. work.
+                        # So short-circuit action="screenshot" to the success sentinel.
+                        if action_type == "screenshot" or action_result is None:
                             output_content = json.dumps({"success": True, "screenshot_captured": True})
+                        else:
+                            output_content = json.dumps(action_result)
                         call_output = {
                             "type": "function_call_output",
                             "call_id": item.get("call_id"),

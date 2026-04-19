@@ -40,7 +40,7 @@ from .subagent_gui_protocol import (
 from .subagent_registry import SubagentRegistry, SubagentUsage
 
 DEFAULT_MAX_STEPS = 15
-DEFAULT_MODEL = "openai/gpt-5.4"
+DEFAULT_MODEL = "openrouter/openai/gpt-5.4"
 DEFAULT_IMAGE_HISTORY = 3
 DEDUP_WINDOW = 3
 

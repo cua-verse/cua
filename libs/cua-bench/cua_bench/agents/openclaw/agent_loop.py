@@ -46,6 +46,7 @@ from .session import (
     SessionManager,
     should_run_memory_flush,
 )
+from .subagent_registry import SubagentRegistry
 
 
 
@@ -74,6 +75,7 @@ class OpenClawComputerAgent(ComputerAgent):
         thinking_config: Optional[Any] = None,
         resolved_model: ResolvedModel | None = None,
         summary_runtime: ResolvedModel | None = None,
+        registry: SubagentRegistry | None = None,
         **kwargs,  # Pass through to ComputerAgent
     ):
         # Auto-inject overflow_cb into callbacks (US-OC-028)
@@ -95,6 +97,7 @@ class OpenClawComputerAgent(ComputerAgent):
         self.thinking_config = thinking_config
         self.resolved_model = resolved_model
         self.summary_runtime = summary_runtime
+        self._registry = registry
 
     @property
     def compaction_count(self) -> int:
@@ -235,6 +238,12 @@ class OpenClawComputerAgent(ComputerAgent):
                         ).model_dump(),
                     }
 
+            # === SUBAGENT COMPLETION DRAIN (US-SUB-005) ===
+            # Drain before the compaction check so any new user messages from
+            # completed general subagents count toward this iteration's token
+            # pressure.
+            self._drain_completions(new_items)
+
             # === PROACTIVE COMPACTION INJECTION POINT ===
             if (
                 self.overflow_cb.needs_compaction
@@ -279,6 +288,28 @@ class OpenClawComputerAgent(ComputerAgent):
             ),
             summary_runtime=self.summary_runtime,
         )
+
+    def _drain_completions(self, new_items: List[Dict[str, Any]]) -> None:
+        """Drain the subagent registry's completion queue into ``new_items``.
+
+        Each completed/failed general subagent run is appended as a user
+        message in ``[Subagent Result]`` format so the next LLM turn sees
+        it verbatim. No-op when no registry is wired (tests, legacy paths)
+        or when the queue is empty. FIFO ordering is preserved because
+        ``registry.drain_completions`` drains with sequential
+        ``get_nowait()`` calls.
+        """
+        if self._registry is None:
+            return
+        for run in self._registry.drain_completions():
+            status = run.status.value
+            body = run.result_text or run.error_message or ""
+            content = (
+                f"[Subagent Result] task: {run.task}\n"
+                f"Status: {status}\n\n"
+                f"{body}"
+            )
+            new_items.append({"role": "user", "content": content})
 
     # --- Screenshot path injection (US-OC-034) ---
 

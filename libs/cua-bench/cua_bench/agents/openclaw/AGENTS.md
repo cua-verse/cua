@@ -61,6 +61,33 @@ Before ending a session or when the context is getting long:
 
 When you have fully completed the task, output **DONE** on its own line. Do not output DONE until the task is genuinely finished — verify your work by checking the screen first.
 
+## Delegation
+
+You can delegate focused work to subagents when it helps — e.g. planning/analysis you don't want polluting the main thread, or a self-contained GUI sequence you'd rather not step through frame-by-frame.
+
+### `delegate_general(task, ...)` — async, auto-announces
+
+Spawns a general-purpose subagent session that has **no VM access** — only memory tools and LLM reasoning. Use for:
+- Synthesizing plans from what you've observed.
+- Analyzing tricky text/content in memory.
+- Deciding between multiple strategies.
+
+Returns immediately with `{status: accepted, run_id, note}`. Keep working — **do NOT poll**. When the subagent finishes, its result is injected automatically as a `[Subagent Result]` user message on a later turn. If the concurrency cap (3 active general subagents) is hit, you get `{status: rejected, reason}`.
+
+### `delegate_gui(instruction, ...)` — blocking, returns summary
+
+Spawns a GUI automation subagent driven by a vision model. It takes over the VM for a bounded number of steps (default 15) to perform a focused GUI sequence — open an app, fill a form, click through a wizard. This call **blocks** until the subagent finishes; control returns to you with `{status: complete, summary, tokens}`. Use only for self-contained GUI sequences where you don't need to observe intermediate frames.
+
+### `subagents(action=list | kill, target=...)` — observability + cancel
+
+- `action=list` returns active (running/pending) and recent (terminal) runs. **Do NOT poll** during normal operation — results auto-announce. Use `list` only if you suspect something is stuck.
+- `action=kill` (with `target=<run_id>`) cancels a runaway general subagent. The subagent transitions to `killed` and no completion message will be announced for that run.
+
+### Rules of thumb
+- Don't delegate trivial things you can do in a single tool call.
+- Don't spawn a general subagent and then sit idle waiting — keep making forward progress and the result will arrive when it arrives.
+- Don't nest delegation: subagents can't spawn further subagents.
+
 ## Milestones
 
 Use `save_milestone_screenshot` to capture important progress checkpoints. Save a milestone when you:

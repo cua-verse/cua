@@ -123,6 +123,7 @@ class OpenClawAgent(BaseAgent):
             OpenClawComputerAgent,
             PromptBuilder,
             SessionManager,
+            SubagentRegistry,
             ToolLoggingCallback,
             build_replay_messages,
             build_system_prompt_report,
@@ -163,7 +164,11 @@ class OpenClawAgent(BaseAgent):
             resolved_model if self.summary_model == self.model else resolve_model(self.summary_model)
         )
 
-        # Tool assembly (US-OC-007)
+        # Subagent registry (US-SUB-005) — per-task, ephemeral in-memory.
+        registry = SubagentRegistry()
+
+        # Tool assembly (US-OC-007 + US-SUB-005 delegation tools)
+        thinking_api_params = self.thinking_config.to_api_params(self.model)
         tools = build_tools(
             session,
             memory_store,
@@ -172,6 +177,10 @@ class OpenClawAgent(BaseAgent):
                 self.summary_model,
                 runtime=resolved_summary_model,
             ),
+            registry=registry,
+            parent_session_dir=session_mgr.task_dir,
+            default_model=self.model,
+            thinking_params=thinking_api_params,
         )
         tool_summaries = get_tool_summaries(tools)
         agents_md = (Path(__file__).parent / "openclaw" / "AGENTS.md").read_text()
@@ -223,7 +232,6 @@ class OpenClawAgent(BaseAgent):
         # overflow_cb is auto-injected into callbacks by OpenClawComputerAgent (US-OC-028)
         # Thinking params flow to ComputerAgent's additional_generation_kwargs (US-OC-019)
         tool_logging_cb = ToolLoggingCallback()
-        thinking_api_params = self.thinking_config.to_api_params(self.model)
         agent = OpenClawComputerAgent(
             # ComputerAgent params
             model=self.model,
@@ -241,6 +249,8 @@ class OpenClawAgent(BaseAgent):
             thinking_config=self.thinking_config,
             resolved_model=resolved_model,
             summary_runtime=resolved_summary_model,
+            # Subagent delegation (US-SUB-005)
+            registry=registry,
             # Provider-specific thinking kwargs → ComputerAgent additional_generation_kwargs
             **thinking_api_params,
         )

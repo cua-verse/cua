@@ -1,6 +1,52 @@
 ## Codebase Patterns
 - Source `.envrc` directly (`source "/path/.envrc"`) for reliable env var loading in Bash tool (NOT `direnv export bash`)
 - **GPT-5 family rejects `temperature != 1.0`** (litellm raises `UnsupportedParamsError`). Use `temperature=1.0` for any `openai/gpt-5.x` helper call. `litellm.drop_params = True` also silences it but hides the signal.
+- **Sync→async from inside BaseTool.call**: `BaseTool.call()` is sync; to drive an async coroutine blocking, copy the `AnalyzeImageTool.call` pattern (`analyze_image.py:144-168`) — `try asyncio.get_running_loop()` with fallback to no-loop, then `ThreadPoolExecutor().submit(asyncio.run, coro)` when a loop is running, else `asyncio.run(coro)` directly. Spawning a fresh executor-level loop is required because you can't `asyncio.run` inside a running loop and `loop.run_until_complete` on the same loop deadlocks.
+- **Async test pattern** (no pytest-asyncio plugin): wrap the test body in an `async def _scenario(): ...` inner function and call `asyncio.run(_scenario())` from a sync test. Matches `tests/test_subagent_session.py:156-157` (`_run = asyncio.run`). `@pytest.mark.asyncio` fails with "async functions are not natively supported".
+
+## 2026-04-19 - CUA follow-up: collapse action="screenshot" tool-result base64 into image_url
+- `agent.py:866-880` (CUA `_handle_item` function_call branch): when `action=="screenshot"`, short-circuit `output_content` to the standard sentinel `{"success": True, "screenshot_captured": True}` instead of JSON-dumping the base64 PNG returned by `computer.screenshot()`. The adjacent `user` message with `input_image` already carries the pixels — matches how `click`/`keypress`/etc. behave.
+- Root cause: in the Chat Completions / function-calling path, `computer_method = getattr(computer, action_type)` returns the raw base64 string for `action="screenshot"` (cua.py:39-47), and that string was dumped into `function_call_output.output`. The resulting tool-result content (~235 KB JSON-quoted base64) cost ~58K tokens per call and escaped `only_n_most_recent_images=3` pruning (which only operates on `image_url` content blocks).
+- Added 2 CUA unit tests in `submodules/cua/libs/python/agent/tests/test_computer_agent.py::TestHandleFunctionCallScreenshot` — one locks the sentinel-in-output behavior for action="screenshot", one is a regression guard that click/keypress still surface their real action_result dict so failures aren't masked.
+- Level 2 VM verification (fresh session, 50 steps, gpt-5.4 main + gpt-5.4-mini summary): context at turn 22 dropped 145K → 19K tokens (7.6× reduction); total input across the 50-step run dropped 8.5M → 283K (30×). No raw-base64 tool-result messages anywhere in the post-fix trajectory.
+- **Files changed:**
+  - MODIFY `submodules/cua/libs/python/agent/agent/agent.py` (one branch condition)
+  - MODIFY `submodules/cua/libs/python/agent/tests/test_computer_agent.py` (2 new tests)
+- **Learnings for future iterations:**
+  - Two screenshot paths in CUA's Chat Completions branch: (a) **implicit** (for click/keypress/etc.) — computer_method returns a small status dict or `None`, then line 852 takes a fresh screenshot and emits it as a separate `user`+`input_image` message. (b) **explicit** (`action="screenshot"`) — computer_method *itself* returns the base64 PNG string. Before the fix, path (b) still took the line-852 screenshot AND dumped the base64 return value into the tool content, double-encoding the image. Path (a) has always been the canonical pattern; path (b) now aligns with it.
+  - The Responses-API path (`item_type == "computer_call"`, lines 695-784) is unaffected — it places screenshots into `computer_call_output.output` as an `input_image` block natively, so this bug never manifested there. Openclaw-agent runs the unified loop which takes path (b) for gpt-5.4 et al., hence the impact.
+  - Cross-run replay loads the prior session's transcript verbatim; legacy transcripts still contain pre-fix base64 whales. To cleanly observe the fix you must either rotate the session state (`mv openclaw_sessions/<task> openclaw_sessions/<task>.bak-<ts>`) or accept that the first post-fix run starts with baked-in whales from the past. The existing `bak_*` directories in `openclaw_sessions/` are the established archival pattern.
+  - `_handle_item` tests need `asyncio.run(agent._handle_item(...))` — the CUA test harness has `@pytest.mark.asyncio` declared as an `asyncio_mode` config option but no pytest-asyncio plugin installed, so marked async tests raise `async functions are not natively supported`. Use the same sync-test-with-asyncio.run pattern already established in `tests/test_subagent_session.py`.
+
+## 2026-04-19 - US-SUB-004 follow-up: GUI subagent default model → OpenRouter
+- `subagent_gui.py:43` `DEFAULT_MODEL` changed `"openai/gpt-5.4"` → `"openrouter/openai/gpt-5.4"` so the GUI subagent works under OPENROUTER_API_KEY alone (no separate OPENAI_API_KEY needed). Also updated `smoke/gui_subagent_notepad.py` docstring + default, and `test_subagent_gui.py::test_default_model`.
+- Validated end-to-end with `smoke/gui_subagent_notepad.py`: spawned via direct `run_gui_subagent` call, model completed "Open Notepad via the Start menu." in a few turns (27K/600 tokens) and returned `status: complete` with the final screenshot at `smoke/out/notepad_final.png`.
+- **Files changed:**
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui.py`
+  - MODIFY `tests/test_subagent_gui.py`
+  - MODIFY `smoke/gui_subagent_notepad.py`
+
+## 2026-04-19 - US-SUB-005: Delegation Tools & Main Loop Integration
+- Wired three BaseTool subclasses (`delegate_general`, `delegate_gui`, `subagents`) on top of US-SUB-008's persistent session engine + US-SUB-004's blocking GUI relay. `DelegateGeneralTool` spawns an `asyncio.Task` and returns `{status: accepted, run_id}` immediately; `DelegateGUITool` blocks via the ThreadPoolExecutor+asyncio.run pattern; `SubagentsTool` exposes list/kill with real task cancellation.
+- `SubagentRegistry` gained `attach_task(run_id, task)` + `kill_run(run_id)`. `kill_run` calls `task.cancel()` only when the task is not already done, then transitions state to KILLED; double-kill and unknown run_ids are safe no-ops. The wrapper's existing `except asyncio.CancelledError → registry.kill` path chains cleanly because `kill()` bails on terminal statuses.
+- `OpenClawComputerAgent._drain_completions(new_items)`: non-blocking drain called between `_handle_item` loop and the proactive-compaction check (`agent_loop.py:245`). Appends `[Subagent Result] task: {task}\nStatus: {status}\n\n{body}` user messages in FIFO order. GUI subagent completions never enter the queue (registry only enqueues GENERAL type on complete/fail) so the drain naturally ignores them.
+- `build_tools()` now accepts `registry`, `parent_session_dir`, `default_model`, `thinking_params` kwargs; appends the three delegation tools when registry+parent_session_dir are supplied. Ungated absence returns the original 6-tool list (tests that don't want delegation don't need to pass a registry).
+- `openclaw_agent.perform_task` builds a per-task `SubagentRegistry()`, threads it + `session_mgr.task_dir` through `build_tools()` and `OpenClawComputerAgent(registry=...)`. `session_mgr.task_dir` (not `session_dir`) is the right attribute — confirmed against `session.py:204`.
+- 42 new tests across `test_subagent_registry.py` (+7), `test_subagent_tools.py` (21), `test_subagent_drain.py` (8). Full root-level suite: 861/861 passing (was 825 after US-SUB-008).
+- **Files added/changed:**
+  - NEW `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_tools.py`
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_registry.py` (attach_task, kill_run, completion_queue property)
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py` (registry kwarg, _drain_completions)
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py` (build_tools kwargs + delegation tool wiring)
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/__init__.py` (exports)
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md` (Delegation section)
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (registry instantiation + threading)
+  - NEW `tests/test_subagent_tools.py`, `tests/test_subagent_drain.py`; EXTEND `tests/test_subagent_registry.py`
+- **Learnings for future iterations:**
+  - `DelegateGeneralTool`'s tool list passed to subagents is the *pre-delegation* list (before the three delegation tools are appended to the main agent's tools), so subagents physically cannot see the delegation tools. Defense-in-depth: `subagent_session._filter_tools` also excludes `delegate_general`/`delegate_gui`/`subagents` by name. Both layers must stay consistent if we ever rename a tool.
+  - `SubagentRegistry.register(type=GENERAL)` enforces `max_concurrent` BEFORE `DelegateGeneralTool.call` runs any coroutine, so the SubagentLimitError path is simple — no partial registration cleanup needed. The tool just catches and returns `rejected`.
+  - `run_gui_subagent` already calls `registry.fail(run_id, ...)` on exception before re-raising, so `DelegateGUITool` does NOT need a second `registry.fail` in its error branch — a second call would be a no-op anyway thanks to the `_TERMINAL_STATUSES` guard, but it's cleaner to rely on the relay's own error handling.
+  - The executor-thread in `DelegateGUITool.call` spawns a fresh asyncio loop in a worker; the CUA DesktopSession must be thread-safe for the subset of operations `run_gui_subagent` performs (screenshot + computer action dispatch). `AnalyzeImageTool` already uses this pattern successfully against the same session, so precedent exists; if contention surfaces in Level 2 we have the option to restructure as a native-async tool path.
 
 ## 2026-04-19 - US-SUB-008: General Subagent Persistent Session Engine
 - Replaced the flat 5-step `run_general_subagent` loop with a session-backed engine: new `subagent_session.py:GeneralSubagentSession` owns its own `SessionManager`, `ContextOverflowCallback`, and in-place compaction. `subagent_general.py` is now a thin wrapper that handles registry lifecycle (`mark_running` → `complete`/`fail`/`kill`-on-CancelledError) and re-exports the tool-filter helpers for backwards compatibility with US-SUB-002 callers.

@@ -1495,7 +1495,7 @@
         "Level 2: VM test \u2014 if the agent invokes delegate_gui, trajectory shows blocking call with GUI subagent steps, then main agent resumes and its next predict_step input includes a fresh screenshot"
       ],
       "priority": 19,
-      "passes": false,
+      "passes": true,
       "notes": "Three tools: delegate_general (async, returns accepted), delegate_gui (blocking, returns result), subagents (list/kill). DelegateGeneralTool wires on top of the US-SUB-008 persistent session engine \u2014 each spawn becomes a full session with its own compaction and its own on-disk transcript. Default max_steps for DelegateGeneralTool bumped 5 \u2192 50 to match the engine. DelegateGUITool unchanged engine-wise (short-lived blocking relay with image pruning is already sufficient). The drain point in agent_loop.py is after _handle_item() and before the proactive compaction check (current line 238) \u2014 drain-before-compact so any new user messages count toward token pressure this iteration. Registry gains attach_task(run_id, task) and kill_run(run_id) so SubagentsTool's kill action has real teeth; the wrapper in US-SUB-008 catches asyncio.CancelledError and transitions to KILLED. DelegateGeneralTool constructor takes (registry, tools, memory_store, default_model, summary_model, parent_session_dir, thinking_params); DelegateGUITool takes (registry, session, default_model, thinking_params); SubagentsTool takes (registry). All three are added in build_tools() with args threaded through from openclaw_agent.perform_task (parent_session_dir=session_mgr.session_dir)."
     },
     {

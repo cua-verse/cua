@@ -23,6 +23,8 @@ from agent.callbacks.base import AsyncCallbackHandler
 from agent.tools.base import BaseTool
 
 from .memory import MemoryGetTool, MemorySearchTool, MemoryStore, MemoryWriteTool
+from .subagent_registry import SubagentRegistry
+from .subagent_tools import DelegateGeneralTool, DelegateGUITool, SubagentsTool
 
 
 COMPUTER_TOOL_NAME = "computer"
@@ -49,18 +51,34 @@ def build_tools(
     *,
     summary_model: str | None = None,
     vision_thinking_params: dict[str, Any] | None = None,
+    registry: SubagentRegistry | None = None,
+    parent_session_dir: Any = None,
+    default_model: str | None = None,
+    thinking_params: dict[str, Any] | None = None,
 ) -> list:
     """Assemble the canonical tool list for the OpenClaw agent.
 
     Returns [Computer, MilestoneTool, AnalyzeImageTool, MemorySearchTool,
-             MemoryGetTool, MemoryWriteTool].
+             MemoryGetTool, MemoryWriteTool] by default. When ``registry`` and
+    ``parent_session_dir`` are supplied (US-SUB-005), also appends
+    [DelegateGeneralTool, DelegateGUITool, SubagentsTool].
 
     Args:
         session: CUA DesktopSession (provides ``_computer`` and ``interface``).
         memory_store: Initialized MemoryStore for this task.
-        summary_model: Model string for VLM calls in AnalyzeImageTool (defaults to agent's summary_model).
-        vision_thinking_params: Provider-specific helper thinking kwargs forwarded to
-            AnalyzeImageTool's ``litellm.acompletion()`` call.
+        summary_model: Model string for VLM calls in AnalyzeImageTool (defaults
+            to the agent's summary_model). Also reused as the subagent
+            summary_model for in-session compaction.
+        vision_thinking_params: Provider-specific helper thinking kwargs
+            forwarded to AnalyzeImageTool's ``litellm.acompletion()`` call.
+        registry: Per-task ``SubagentRegistry``. Required (with
+            ``parent_session_dir``) to enable delegation tools.
+        parent_session_dir: Main agent's session dir. Subagent transcripts
+            land at ``<parent_session_dir>/subagents/<run_id>/transcript.jsonl``.
+        default_model: Default model string for ``DelegateGeneralTool``
+            (falls back to the model used for normal turns).
+        thinking_params: Main-agent thinking kwargs, forwarded unchanged into
+            the subagent session's ``litellm.acompletion`` call.
     """
     from agent.tools import AnalyzeImageTool, MilestoneTool
 
@@ -74,7 +92,34 @@ def build_tools(
     memory_get = MemoryGetTool(memory_store)
     memory_write = MemoryWriteTool(memory_store)
 
-    return [session._computer, milestone_tool, analyze_image_tool, memory_search, memory_get, memory_write]
+    tools: list = [
+        session._computer,
+        milestone_tool,
+        analyze_image_tool,
+        memory_search,
+        memory_get,
+        memory_write,
+    ]
+
+    if registry is not None and parent_session_dir is not None:
+        delegate_general = DelegateGeneralTool(
+            registry=registry,
+            tools=tools,
+            memory_store=memory_store,
+            default_model=default_model or summary_model or "",
+            summary_model=summary_model or default_model or "",
+            parent_session_dir=parent_session_dir,
+            thinking_params=thinking_params,
+        )
+        delegate_gui = DelegateGUITool(
+            registry=registry,
+            session=session,
+            thinking_params=thinking_params,
+        )
+        subagents_tool = SubagentsTool(registry=registry)
+        tools.extend([delegate_general, delegate_gui, subagents_tool])
+
+    return tools
 
 
 def get_tool_summaries(tools: list) -> dict[str, str]:
