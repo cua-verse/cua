@@ -133,6 +133,7 @@ class SubagentRegistry:
     def __init__(self, max_concurrent: int = 3) -> None:
         self._runs: dict[str, SubagentRun] = {}
         self._completion_queue: asyncio.Queue[SubagentRun] = asyncio.Queue()
+        self._post_delegation_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._tasks: dict[str, asyncio.Task] = {}
         self._max_concurrent = max_concurrent
 
@@ -301,6 +302,32 @@ class SubagentRegistry:
         while True:
             try:
                 results.append(self._completion_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return results
+
+    def enqueue_post_delegation(self, message: dict[str, Any]) -> None:
+        """Enqueue a pre-built user-message dict for post-delegation injection.
+
+        Used by ``DelegateGUITool`` to hand a fresh VM screenshot back to the
+        main agent as a ``{role: user, content: [text, image_url]}`` message
+        (US-SUB-006). The main agent loop drains this queue at the same seam
+        as ``drain_completions`` so the message lands in ``new_items`` before
+        the next ``predict_step``.
+        """
+        self._post_delegation_queue.put_nowait(message)
+
+    def drain_post_delegation(self) -> list[dict[str, Any]]:
+        """Return all pending post-delegation user messages from the queue.
+
+        Non-blocking FIFO drain — mirrors ``drain_completions`` shape.
+        Messages are already in final ``{role, content}`` form; the loop
+        extends ``new_items`` with them verbatim.
+        """
+        results: list[dict[str, Any]] = []
+        while True:
+            try:
+                results.append(self._post_delegation_queue.get_nowait())
             except asyncio.QueueEmpty:
                 break
         return results

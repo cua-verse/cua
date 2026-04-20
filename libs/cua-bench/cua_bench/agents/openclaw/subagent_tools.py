@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import logging
 from pathlib import Path
 from typing import Any, Union
 
@@ -51,8 +52,12 @@ from .subagent_registry import (
     SubagentStatus,
     SubagentType,
 )
+from .subagent_session import _encode_image_url_from_path
 
 DELEGATE_GENERAL_DEFAULT_MAX_STEPS = GENERAL_DEFAULT_MAX_STEPS
+
+_POST_DELEGATION_TEXT = "[VM state after GUI delegation]"
+_logger = logging.getLogger(__name__)
 
 _ACCEPTED_NOTE = (
     "persistent session — result auto-announces when complete; do not poll"
@@ -127,6 +132,17 @@ class DelegateGeneralTool(BaseTool):
                     "type": "string",
                     "description": "Optional human-readable label for observability.",
                 },
+                "screenshot_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional absolute paths to PNG screenshots to "
+                        "attach to the subagent's initial message as vision "
+                        "input. Use this to delegate 'analyze this frame' "
+                        "work. Paths are the local files the main agent has "
+                        "seen via '[Screenshot saved to: ...]' hints."
+                    ),
+                },
             },
             "required": ["task"],
         }
@@ -146,6 +162,12 @@ class DelegateGeneralTool(BaseTool):
             params_dict.get("max_steps", DELEGATE_GENERAL_DEFAULT_MAX_STEPS)
         )
         label = params_dict.get("label", "") or ""
+        screenshot_paths_raw = params_dict.get("screenshot_paths") or []
+        screenshot_paths: list[str] | None = (
+            [p for p in screenshot_paths_raw if isinstance(p, str) and p]
+            if isinstance(screenshot_paths_raw, list)
+            else None
+        )
 
         try:
             run = self._registry.register(
@@ -171,6 +193,7 @@ class DelegateGeneralTool(BaseTool):
             memory_store=self._memory_store,
             max_steps=max_steps,
             thinking_params=self._thinking_params,
+            initial_screenshot_paths=screenshot_paths,
         )
 
         loop = asyncio.get_running_loop()
@@ -197,12 +220,14 @@ class DelegateGUITool(BaseTool):
         self,
         registry: SubagentRegistry,
         session: Any,
+        parent_session_dir: Path,
         default_model: str = GUI_DEFAULT_MODEL,
         thinking_params: dict[str, Any] | None = None,
         cfg: dict | None = None,
     ) -> None:
         self._registry = registry
         self._session = session
+        self._parent_session_dir = Path(parent_session_dir)
         self._default_model = default_model
         self._thinking_params = thinking_params
         super().__init__(cfg)
@@ -269,8 +294,8 @@ class DelegateGUITool(BaseTool):
             model=model,
         )
 
-        async def _drive() -> str:
-            return await run_gui_subagent(
+        async def _drive() -> tuple[str, bytes | None]:
+            summary = await run_gui_subagent(
                 instruction=instruction,
                 session=self._session,
                 registry=self._registry,
@@ -279,6 +304,18 @@ class DelegateGUITool(BaseTool):
                 max_steps=max_steps,
                 thinking_params=self._thinking_params,
             )
+            # Take the post-delegation screenshot in the same driver so the
+            # caller only spawns one asyncio.run / executor pass.
+            try:
+                post_shot = await self._session.screenshot()
+            except Exception as post_exc:  # noqa: BLE001
+                _logger.warning(
+                    "post-delegation screenshot failed for run %s: %s",
+                    run.run_id,
+                    post_exc,
+                )
+                post_shot = None
+            return summary, post_shot
 
         # AnalyzeImageTool sync→async pattern (analyze_image.py:144-168).
         try:
@@ -290,9 +327,9 @@ class DelegateGUITool(BaseTool):
             if loop is not None and loop.is_running():
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     future = executor.submit(asyncio.run, _drive())
-                    summary = future.result()
+                    summary, post_shot = future.result()
             else:
-                summary = asyncio.run(_drive())
+                summary, post_shot = asyncio.run(_drive())
         except Exception as e:  # run_gui_subagent already called registry.fail
             usage = _usage_dict(self._registry, run.run_id)
             return {
@@ -302,12 +339,53 @@ class DelegateGUITool(BaseTool):
                 "tokens": usage,
             }
 
+        if isinstance(post_shot, (bytes, bytearray)) and post_shot:
+            self._enqueue_post_delegation(run.run_id, bytes(post_shot))
+
         return {
             "status": "complete",
             "summary": summary,
             "run_id": run.run_id,
             "tokens": _usage_dict(self._registry, run.run_id),
         }
+
+    def _enqueue_post_delegation(self, run_id: str, png_bytes: bytes) -> None:
+        """Persist the fresh screenshot and enqueue a user message for the main agent.
+
+        Writes ``<parent_session_dir>/subagents/<run_id>/post_delegation.png``
+        for trajectory inspection, then pushes a pre-built
+        ``{role: user, content: [text, image_url]}`` dict to the registry's
+        post-delegation queue for ``_drain_post_delegation`` to fold into the
+        next main-agent turn (US-SUB-006).
+        """
+        try:
+            target_dir = self._parent_session_dir / "subagents" / run_id
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target_path = target_dir / "post_delegation.png"
+            target_path.write_bytes(png_bytes)
+        except OSError as exc:
+            _logger.warning(
+                "could not persist post-delegation screenshot for %s: %s",
+                run_id,
+                exc,
+            )
+            return
+
+        block = _encode_image_url_from_path(str(target_path))
+        if block is None:
+            _logger.warning(
+                "could not encode post-delegation screenshot for %s", run_id
+            )
+            return
+
+        message = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _POST_DELEGATION_TEXT},
+                block,
+            ],
+        }
+        self._registry.enqueue_post_delegation(message)
 
 
 # ---------------------------------------------------------------------------

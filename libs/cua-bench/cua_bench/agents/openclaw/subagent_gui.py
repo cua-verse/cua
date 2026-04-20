@@ -42,11 +42,6 @@ from .subagent_registry import SubagentRegistry, SubagentUsage
 DEFAULT_MAX_STEPS = 15
 DEFAULT_MODEL = "openrouter/openai/gpt-5.4"
 DEFAULT_IMAGE_HISTORY = 3
-DEDUP_WINDOW = 3
-
-
-class StuckInLoopError(RuntimeError):
-    """Raised when the subagent emits the same action ``DEDUP_WINDOW`` times in a row."""
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +63,8 @@ def _build_system_prompt() -> str:
         "## Visibility Model",
         "- Each turn, you receive the current VM screenshot.",
         "- You do not have a memory of past turns beyond the action you just emitted.",
-        "- Emit exactly one action per turn via the `gui_action` tool call.",
+        "- You may emit one or multiple `gui_action` tool calls per turn.",
+        "- Multiple actions execute sequentially; the next screenshot arrives after all complete.",
         "",
         "## Action Vocabulary",
         "- `click` — click at (x, y) with button left/right/double.",
@@ -83,8 +79,8 @@ def _build_system_prompt() -> str:
         "1. **Stay focused** — Do only the assigned task, no side quests.",
         "2. **Complete and return** — Emit `done` with a summary as soon as the "
         "task is visibly complete on screen.",
-        "3. **Don't repeat yourself** — If an action didn't work, try something "
-        "different. Identical actions repeated three times in a row abort the run.",
+        "3. **Observe before repeating** — Before repeating the same action, "
+        "check the latest screenshot to confirm it had the intended effect.",
         "4. **Be ephemeral** — You will be terminated after returning. That's fine.",
         "",
         "## Output Format",
@@ -94,28 +90,8 @@ def _build_system_prompt() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Action formatting (dedup key + human description)
+# Action formatting (human description)
 # ---------------------------------------------------------------------------
-
-
-def _action_key(action: GUIAction) -> tuple:
-    """Stable hashable key for dedup. GUIWaitAction is intentionally excluded
-    by the caller — polling is a legitimate repeated pattern."""
-    if isinstance(action, GUIClickAction):
-        return ("click", action.x, action.y, action.button)
-    if isinstance(action, GUITypeAction):
-        return ("type", action.text)
-    if isinstance(action, GUIHotkeyAction):
-        return ("hotkey", tuple(action.keys))
-    if isinstance(action, GUIScrollAction):
-        return ("scroll", action.x, action.y, action.direction, action.amount)
-    if isinstance(action, GUIDragAction):
-        return ("drag", action.start_x, action.start_y, action.end_x, action.end_y)
-    if isinstance(action, GUIWaitAction):
-        return ("wait", action.ms)
-    if isinstance(action, GUIDoneAction):
-        return ("done", action.summary)
-    return (type(action).__name__,)
 
 
 def _describe_action(action: GUIAction) -> str:
@@ -235,23 +211,19 @@ def _assistant_tool_call_message(choice: Any) -> dict[str, Any]:
     return {"role": "assistant", "content": content, "tool_calls": serialized}
 
 
-def _tool_result_message(choice: Any, result: str) -> dict[str, Any] | None:
-    """Build the tool-result message paired with the assistant's tool_call.
+def _tool_result_messages(choice: Any, result: str) -> list[dict[str, Any]]:
+    """Build tool-result messages for each tool_call in the assistant turn.
 
-    Returns ``None`` if the choice has no tool_calls (text-fallback path —
-    then the assistant message stands alone without a tool reply).
+    Returns an empty list if the choice has no tool_calls (text-fallback path).
     """
     message = getattr(choice, "message", None)
     tool_calls = None if message is None else getattr(message, "tool_calls", None)
     if not tool_calls:
-        return None
-    first = tool_calls[0]
-    call_id = getattr(first, "id", "")
-    return {
-        "role": "tool",
-        "tool_call_id": call_id,
-        "content": result,
-    }
+        return []
+    return [
+        {"role": "tool", "tool_call_id": getattr(tc, "id", ""), "content": result}
+        for tc in tool_calls
+    ]
 
 
 def _user_screenshot_message(png_bytes: bytes, prefix: str) -> dict[str, Any]:
@@ -283,17 +255,20 @@ async def run_gui_subagent(
 
     Each iteration:
       1. Call ``litellm.acompletion`` with the current messages + gui_action tool.
-      2. Parse the response into a ``GUIAction`` via ``parse_gui_response``.
-      3. If ``GUIDoneAction``: complete the run and return the summary.
-      4. Otherwise: execute the action on ``session``, take a fresh screenshot,
+      2. Parse the response into one or more ``GUIAction`` via ``parse_gui_response``.
+      3. If any action is ``GUIDoneAction``: execute preceding actions, then
+         complete the run and return the summary.
+      4. Otherwise: execute all actions on ``session``, take a fresh screenshot,
          append it to messages, prune image history, loop.
 
-    Terminates on ``GUIDoneAction``, ``max_steps`` reached, any LLM/session
-    exception (re-raised after ``registry.fail``), or three consecutive
-    identical actions (``StuckInLoopError``).
+    GPT-5.4 can emit multiple tool_calls per response (e.g. up, up, up, done).
+    All actions are executed sequentially before the next screenshot — matching
+    how CUA's main agent loop handles multi-action responses.
 
-    Returns the final summary string. Raises ``StuckInLoopError`` or the
-    underlying exception on failure.
+    Terminates on ``GUIDoneAction``, ``max_steps`` reached, or any LLM/session
+    exception (re-raised after ``registry.fail``).
+
+    Returns the final summary string. Raises the underlying exception on failure.
     """
     import litellm
 
@@ -312,8 +287,6 @@ async def run_gui_subagent(
         raise
 
     messages.append(_user_screenshot_message(initial_screenshot, "Current screenshot:"))
-
-    action_keys: list[tuple] = []
 
     for _step in range(max_steps):
         try:
@@ -338,42 +311,51 @@ async def run_gui_subagent(
             raise
 
         try:
-            action = parse_gui_response(choice)
+            actions = parse_gui_response(choice)
         except ValueError as e:
             registry.fail(run_id, f"parse error: {e}", usage)
             raise
 
-        if isinstance(action, GUIDoneAction):
-            summary = action.summary or "(no summary)"
+        # Split at first GUIDoneAction — execute everything before it.
+        to_execute: list[GUIAction] = []
+        done_action: GUIDoneAction | None = None
+        for a in actions:
+            if isinstance(a, GUIDoneAction):
+                done_action = a
+                break
+            to_execute.append(a)
+
+        # Debug: log actions for this step
+        descs = [_describe_action(a) for a in to_execute]
+        if done_action:
+            descs.append(f"done: {done_action.summary}")
+        print(f"  [GUI {run_id}] step {_step}: {descs}")
+
+        # Record the assistant turn + tool acks in transcript.
+        messages.append(_assistant_tool_call_message(choice))
+        messages.extend(_tool_result_messages(choice, "ok"))
+
+        # Execute all non-done actions sequentially.
+        last_action_desc = ""
+        for action in to_execute:
+            try:
+                await execute_gui_action(action, session)
+                last_action_desc = _describe_action(action)
+            except Exception as e:
+                registry.fail(run_id, f"execute error: {e}", usage)
+                raise
+
+        if done_action is not None:
+            summary = done_action.summary or "(no summary)"
             registry.complete(run_id, summary, usage)
             return summary
 
-        if not isinstance(action, GUIWaitAction):
-            action_keys.append(_action_key(action))
-            if (
-                len(action_keys) >= DEDUP_WINDOW
-                and len(set(action_keys[-DEDUP_WINDOW:])) == 1
-            ):
-                msg = (
-                    f"stuck in loop: action {_describe_action(action)!r} "
-                    f"repeated {DEDUP_WINDOW} times"
-                )
-                registry.fail(run_id, msg, usage)
-                raise StuckInLoopError(msg)
-
-        # Record the assistant turn + synthetic tool ack so the next call sees
-        # the action in the transcript.
-        messages.append(_assistant_tool_call_message(choice))
-        tool_ack = _tool_result_message(choice, "ok")
-        if tool_ack is not None:
-            messages.append(tool_ack)
-
-        try:
-            await execute_gui_action(action, session)
-        except Exception as e:
-            registry.fail(run_id, f"execute error: {e}", usage)
-            raise
-
+        # Take one screenshot after the entire batch.
+        action_desc = (
+            last_action_desc
+            if len(to_execute) == 1
+            else f"{len(to_execute)} actions (last: {last_action_desc})"
+        )
         try:
             new_screenshot = await session.screenshot()
         except Exception as e:
@@ -383,7 +365,7 @@ async def run_gui_subagent(
         messages.append(
             _user_screenshot_message(
                 new_screenshot,
-                f"After action {_describe_action(action)}. Current screenshot:",
+                f"After {action_desc}. Current screenshot:",
             )
         )
         _prune_images_to_last_n(messages, n=DEFAULT_IMAGE_HISTORY)
@@ -396,10 +378,8 @@ async def run_gui_subagent(
 
 
 __all__ = [
-    "DEDUP_WINDOW",
     "DEFAULT_IMAGE_HISTORY",
     "DEFAULT_MAX_STEPS",
     "DEFAULT_MODEL",
-    "StuckInLoopError",
     "run_gui_subagent",
 ]

@@ -26,6 +26,7 @@ minus Computer/Responses-API machinery; reuses the VM-agnostic
 
 from __future__ import annotations
 
+import base64
 import json as _json
 import os
 from pathlib import Path
@@ -120,6 +121,53 @@ def _tools_to_litellm_schema(tools: list[BaseTool]) -> list[dict[str, Any]]:
     return [{"type": "function", "function": tool.function} for tool in tools]
 
 
+def _build_initial_user_content(
+    task: str, screenshot_paths: list[str] | None
+) -> str | list[dict[str, Any]]:
+    """Build the subagent's initial user-message content.
+
+    With no screenshots attached, returns the task as a plain string so the
+    no-screenshot path (the original US-SUB-008 behavior) is byte-identical.
+    With screenshots, returns a list-content block with the text + one
+    ``image_url`` entry per path; unreadable paths become a
+    ``[screenshot unavailable: <basename>]`` text fallback so a single bad
+    path does not fail the whole spawn.
+    """
+    if not screenshot_paths:
+        return task
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": task}]
+    for path in screenshot_paths:
+        block = _encode_image_url_from_path(path)
+        if block is None:
+            blocks.append({
+                "type": "text",
+                "text": f"[screenshot unavailable: {Path(path).name}]",
+            })
+        else:
+            blocks.append(block)
+    return blocks
+
+
+def _encode_image_url_from_path(path: str) -> dict[str, Any] | None:
+    """Read a PNG from disk and encode as an OpenAI-compatible image_url block.
+
+    Returns ``None`` when the file is missing, unreadable, or empty so callers
+    can emit a fallback text block instead of failing the whole spawn. Shape
+    mirrors ``subagent_gui._encode_screenshot``.
+    """
+    try:
+        data = Path(path).read_bytes()
+    except (OSError, ValueError):
+        return None
+    if not data:
+        return None
+    b64 = base64.b64encode(data).decode("ascii")
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/png;base64,{b64}"},
+    }
+
+
 class GeneralSubagentSession:
     """Persistent LLM-only session for a general subagent run.
 
@@ -149,6 +197,7 @@ class GeneralSubagentSession:
         max_compactions: int = DEFAULT_MAX_COMPACTIONS,
         thinking_params: dict[str, Any] | None = None,
         summary_runtime: ResolvedModel | None = None,
+        initial_screenshot_paths: list[str] | None = None,
     ) -> None:
         self._run_id = run_id
         self._task = task
@@ -175,9 +224,12 @@ class GeneralSubagentSession:
 
         # Build system prompt + initial messages.
         self._system_prompt = _build_subagent_system_prompt(task)
+        initial_user_content = _build_initial_user_content(
+            task, initial_screenshot_paths
+        )
         self._messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt},
-            {"role": "user", "content": task},
+            {"role": "user", "content": initial_user_content},
         ]
 
         # Transcribe the initial user task so the subagent transcript records

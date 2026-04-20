@@ -144,26 +144,31 @@ def validate_gui_action(action: GUIAction) -> None:
 # ---------------------------------------------------------------------------
 
 
-def parse_gui_response(response: Any) -> GUIAction:
-    """Parse a vision model response into a GUIAction.
+def parse_gui_response(response: Any) -> list[GUIAction]:
+    """Parse a vision model response into one or more GUIActions.
 
     Tries three paths in order:
       (a) OpenAI `computer_call` output items (native GPT-5.4 format)
       (b) function_call with `gui_action` tool (non-CU vision models)
       (c) structured text with action keywords (last resort)
 
-    Returns the first successfully parsed GUIAction.
-    Raises ValueError if none of the paths can produce one.
+    Returns ALL parsed actions from the first path that produces results.
+    GPT-5.4 can emit multiple tool_calls per response (e.g. up, up, left)
+    and we execute them all before taking the next screenshot.
+
+    Raises ValueError if none of the paths can produce any action.
     """
-    action = (
+    actions = (
         _try_parse_computer_call(response)
         or _try_parse_function_call(response)
         or _try_parse_text(response)
+        or []
     )
-    if action is None:
+    if not actions:
         raise ValueError(f"Could not parse GUI action from response: {response!r}")
-    validate_gui_action(action)
-    return action
+    for action in actions:
+        validate_gui_action(action)
+    return actions
 
 
 def _as_dict(obj: Any) -> dict[str, Any] | None:
@@ -186,11 +191,13 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
-def _try_parse_computer_call(response: Any) -> GUIAction | None:
+def _try_parse_computer_call(response: Any) -> list[GUIAction] | None:
     """Path (a): OpenAI Responses API computer_call items.
 
     Response shape:
         {"output": [{"type": "computer_call", "action": {"type": "click", ...}}, ...]}
+
+    Collects ALL computer_call items in the output (GPT-5.4 can emit multiple).
     """
     output = _get(response, "output")
     if output is None:
@@ -198,6 +205,7 @@ def _try_parse_computer_call(response: Any) -> GUIAction | None:
     if not isinstance(output, list):
         return None
 
+    actions: list[GUIAction] = []
     for item in output:
         item_type = _get(item, "type")
         if item_type != "computer_call":
@@ -209,8 +217,10 @@ def _try_parse_computer_call(response: Any) -> GUIAction | None:
             action_dict = _as_dict(action_dict)
             if action_dict is None:
                 continue
-        return _computer_call_to_gui_action(action_dict)
-    return None
+        parsed = _computer_call_to_gui_action(action_dict)
+        if parsed is not None:
+            actions.append(parsed)
+    return actions or None
 
 
 def _computer_call_to_gui_action(action: dict[str, Any]) -> GUIAction | None:
@@ -269,7 +279,7 @@ def _computer_call_to_gui_action(action: dict[str, Any]) -> GUIAction | None:
     return None
 
 
-def _try_parse_function_call(response: Any) -> GUIAction | None:
+def _try_parse_function_call(response: Any) -> list[GUIAction] | None:
     """Path (b): function_call with `gui_action` tool schema.
 
     Supports two layouts:
@@ -277,7 +287,11 @@ def _try_parse_function_call(response: Any) -> GUIAction | None:
          `{name, arguments}`.
       2. Completion-style `tool_calls` list on the assistant message with
          `{function: {name, arguments}}`.
+
+    Collects ALL gui_action calls (GPT-5.4 can emit multiple tool_calls).
     """
+    actions: list[GUIAction] = []
+
     output = _get(response, "output")
     if isinstance(output, list):
         for item in output:
@@ -285,11 +299,14 @@ def _try_parse_function_call(response: Any) -> GUIAction | None:
                 continue
             if _get(item, "name") != "gui_action":
                 continue
-            return _parse_gui_action_args(_get(item, "arguments"))
+            parsed = _parse_gui_action_args(_get(item, "arguments"))
+            if parsed is not None:
+                actions.append(parsed)
+        if actions:
+            return actions
 
     tool_calls = _get(response, "tool_calls")
     if tool_calls is None:
-        # Try nested message.tool_calls (e.g. litellm choices[0].message.tool_calls)
         message = _get(response, "message")
         if message is not None:
             tool_calls = _get(message, "tool_calls")
@@ -300,8 +317,10 @@ def _try_parse_function_call(response: Any) -> GUIAction | None:
                 continue
             if _get(fn, "name") != "gui_action":
                 continue
-            return _parse_gui_action_args(_get(fn, "arguments"))
-    return None
+            parsed = _parse_gui_action_args(_get(fn, "arguments"))
+            if parsed is not None:
+                actions.append(parsed)
+    return actions or None
 
 
 def _parse_gui_action_args(arguments: Any) -> GUIAction | None:
@@ -364,15 +383,16 @@ _TEXT_WAIT_RE = re.compile(r"^\s*WAIT\s+(\d+)\s*$", re.IGNORECASE)
 _TEXT_DONE_RE = re.compile(r"^\s*DONE(?:[:\s]+(.*))?$", re.IGNORECASE | re.DOTALL)
 
 
-def _try_parse_text(response: Any) -> GUIAction | None:
+def _try_parse_text(response: Any) -> list[GUIAction] | None:
     """Path (c): structured text with action keywords.
 
-    Searches for a response text body, then tries each keyword pattern line by line.
+    Searches for a response text body, then parses ALL keyword lines.
     """
     text = _extract_text(response)
     if text is None:
         return None
 
+    actions: list[GUIAction] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
@@ -381,40 +401,49 @@ def _try_parse_text(response: Any) -> GUIAction | None:
         m = _TEXT_CLICK_RE.match(line)
         if m:
             x, y, btn = int(m.group(1)), int(m.group(2)), (m.group(3) or "left").lower()
-            return GUIClickAction(x=x, y=y, button=btn)
+            actions.append(GUIClickAction(x=x, y=y, button=btn))
+            continue
 
         m = _TEXT_TYPE_RE.match(line)
         if m:
-            return GUITypeAction(text=m.group(1))
+            actions.append(GUITypeAction(text=m.group(1)))
+            continue
 
         m = _TEXT_HOTKEY_RE.match(line)
         if m:
             keys = [k.strip() for k in m.group(1).split("+") if k.strip()]
-            return GUIHotkeyAction(keys=keys)
+            actions.append(GUIHotkeyAction(keys=keys))
+            continue
 
         m = _TEXT_SCROLL_RE.match(line)
         if m:
             direction = m.group(1).lower()
             amount = int(m.group(2)) if m.group(2) else 3
-            return GUIScrollAction(x=0, y=0, direction=direction, amount=amount)
+            actions.append(GUIScrollAction(x=0, y=0, direction=direction, amount=amount))
+            continue
 
         m = _TEXT_DRAG_RE.match(line)
         if m:
-            return GUIDragAction(
+            actions.append(GUIDragAction(
                 start_x=int(m.group(1)),
                 start_y=int(m.group(2)),
                 end_x=int(m.group(3)),
                 end_y=int(m.group(4)),
-            )
+            ))
+            continue
 
         m = _TEXT_WAIT_RE.match(line)
         if m:
-            return GUIWaitAction(ms=int(m.group(1)))
+            actions.append(GUIWaitAction(ms=int(m.group(1))))
+            continue
 
         m = _TEXT_DONE_RE.match(line)
         if m:
             summary = (m.group(1) or "").strip()
-            return GUIDoneAction(summary=summary)
+            actions.append(GUIDoneAction(summary=summary))
+            continue
+
+    return actions or None
 
     return None
 

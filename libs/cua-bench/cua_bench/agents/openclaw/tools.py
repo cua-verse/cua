@@ -55,6 +55,7 @@ def build_tools(
     parent_session_dir: Any = None,
     default_model: str | None = None,
     thinking_params: dict[str, Any] | None = None,
+    disable_main_computer: bool = False,
 ) -> list:
     """Assemble the canonical tool list for the OpenClaw agent.
 
@@ -79,6 +80,11 @@ def build_tools(
             (falls back to the model used for normal turns).
         thinking_params: Main-agent thinking kwargs, forwarded unchanged into
             the subagent session's ``litellm.acompletion`` call.
+        disable_main_computer: When True, omit ``session._computer`` from the
+            tool list so the main agent cannot drive the VM directly. Pair
+            with ``registry``/``parent_session_dir`` so ``delegate_gui`` is
+            available as the only GUI path. Useful for forcing GUI delegation
+            in validation runs (US-SUB-006 Level 2 coverage).
     """
     from agent.tools import AnalyzeImageTool, MilestoneTool
 
@@ -93,13 +99,14 @@ def build_tools(
     memory_write = MemoryWriteTool(memory_store)
 
     tools: list = [
-        session._computer,
         milestone_tool,
         analyze_image_tool,
         memory_search,
         memory_get,
         memory_write,
     ]
+    if not disable_main_computer:
+        tools.insert(0, session._computer)
 
     if registry is not None and parent_session_dir is not None:
         delegate_general = DelegateGeneralTool(
@@ -114,6 +121,7 @@ def build_tools(
         delegate_gui = DelegateGUITool(
             registry=registry,
             session=session,
+            parent_session_dir=parent_session_dir,
             thinking_params=thinking_params,
         )
         subagents_tool = SubagentsTool(registry=registry)

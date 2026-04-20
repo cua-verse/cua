@@ -57,6 +57,7 @@ async def run_general_subagent(
     memory_store: Any | None = None,
     max_steps: int = DEFAULT_MAX_STEPS,
     thinking_params: dict[str, Any] | None = None,
+    initial_screenshot_paths: list[str] | None = None,
 ) -> None:
     """Run a general subagent as a persistent session.
 
@@ -78,6 +79,11 @@ async def run_general_subagent(
             consumed by the engine itself; passed through for tools).
         max_steps: Safety rail for the session loop (default 50).
         thinking_params: Optional provider-specific thinking kwargs.
+        initial_screenshot_paths: Optional list of absolute file paths to
+            PNG screenshots to attach to the subagent's initial user
+            message (US-SUB-006). Each readable path becomes an
+            ``image_url`` block alongside the text task; unreadable paths
+            degrade to a ``[screenshot unavailable: ...]`` text block.
     """
     session: GeneralSubagentSession | None = None
     try:
@@ -93,6 +99,7 @@ async def run_general_subagent(
             memory_store=memory_store,
             max_steps=max_steps,
             thinking_params=thinking_params,
+            initial_screenshot_paths=initial_screenshot_paths,
         )
         result_text = await session.run()
         print(

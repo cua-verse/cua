@@ -243,6 +243,10 @@ class OpenClawComputerAgent(ComputerAgent):
             # completed general subagents count toward this iteration's token
             # pressure.
             self._drain_completions(new_items)
+            # === POST-DELEGATION SCREENSHOT DRAIN (US-SUB-006) ===
+            # Runs after completions so the GUI-delegation screenshot is the
+            # freshest user turn heading into the next predict_step.
+            self._drain_post_delegation(new_items)
 
             # === PROACTIVE COMPACTION INJECTION POINT ===
             if (
@@ -310,6 +314,19 @@ class OpenClawComputerAgent(ComputerAgent):
                 f"{body}"
             )
             new_items.append({"role": "user", "content": content})
+
+    def _drain_post_delegation(self, new_items: List[Dict[str, Any]]) -> None:
+        """Drain the registry's post-delegation queue into ``new_items``.
+
+        Messages are pushed by ``DelegateGUITool`` after a blocking GUI
+        subagent run completes (US-SUB-006). They carry a fresh VM
+        screenshot as ``{role: user, content: [text, image_url]}`` so the
+        main agent's next ``predict_step`` sees the updated state. Pre-built
+        shapes — extend verbatim, do not reformat.
+        """
+        if self._registry is None:
+            return
+        new_items.extend(self._registry.drain_post_delegation())
 
     # --- Screenshot path injection (US-OC-034) ---
 

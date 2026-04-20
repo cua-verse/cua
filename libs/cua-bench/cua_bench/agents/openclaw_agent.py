@@ -41,6 +41,10 @@ class OpenClawAgent(BaseAgent):
         self.summary_model = kwargs.get("summary_model", None) or self.model
         self.max_steps = kwargs.get("max_steps", 100)
         self.max_history_turns = kwargs.get("max_history_turns", None)  # None = all
+        # When True, the main agent has no direct ``computer`` tool — all GUI
+        # work must go through ``delegate_gui``. Used to validate the
+        # post-delegation screenshot injection path end-to-end (US-SUB-006).
+        self.disable_main_computer = bool(kwargs.get("disable_main_computer", False))
 
         # Thinking level configuration (US-OC-019)
         # CLI --thinking-level overrides auto-detection; omitting uses model default.
@@ -181,6 +185,7 @@ class OpenClawAgent(BaseAgent):
             parent_session_dir=session_mgr.task_dir,
             default_model=self.model,
             thinking_params=thinking_api_params,
+            disable_main_computer=self.disable_main_computer,
         )
         tool_summaries = get_tool_summaries(tools)
         agents_md = (Path(__file__).parent / "openclaw" / "AGENTS.md").read_text()
@@ -257,6 +262,8 @@ class OpenClawAgent(BaseAgent):
         print("OpenClaw Agent initialized with model:", self.model)
         if self.summary_model != self.model:
             print("  Summary/flush model:", self.summary_model)
+        if self.disable_main_computer:
+            print("  Main computer tool DISABLED — GUI work must go through delegate_gui")
         if self.thinking_config.level.value != "off":
             print("  Thinking level:", self.thinking_config.level.value)
         if self.thinking_config.flush_level != self.thinking_config.level:

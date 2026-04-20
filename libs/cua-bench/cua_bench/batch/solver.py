@@ -114,6 +114,7 @@ def parse_args(argv: list[str]) -> dict:
         "flush_thinking_level": None,
         "compaction_thinking_level": None,
         "vision_thinking_level": None,
+        "disable_main_computer": False,
     }
 
     if len(argv) < 2:
@@ -126,6 +127,7 @@ def parse_args(argv: list[str]) -> dict:
     args["setup_only"] = "--setup-only" in argv
     args["evaluate_only"] = "--evaluate-only" in argv
     args["task_only"] = "--task-only" in argv
+    args["disable_main_computer"] = "--disable-main-computer" in argv
 
     for i, arg in enumerate(argv):
         if arg == "--agent" and i + 1 < len(argv):
@@ -273,6 +275,7 @@ def validate_args(args, logger):
         logger.error("  --thinking-level <level> Main loop thinking level")
         logger.error("  --flush-thinking-level <level> Flush thinking level (defaults to main)")
         logger.error("  --compaction-thinking-level <level> Compaction thinking level (defaults to main)")
+        logger.error("  --disable-main-computer  Main agent cannot drive VM directly — must use delegate_gui")
         logger.error("  --save-pngs            Save screenshots as PNGs")
         logger.error("  --filter <events>      Filter trace events")
         logger.error("  --task-index <n>       Override task index")
@@ -550,6 +553,8 @@ def initialize_agent(args, agent_class):
         agent_kwargs["compaction_thinking_level"] = args["compaction_thinking_level"]
     if args.get("vision_thinking_level"):
         agent_kwargs["vision_thinking_level"] = args["vision_thinking_level"]
+    if args.get("disable_main_computer"):
+        agent_kwargs["disable_main_computer"] = True
     return agent_class(**agent_kwargs)
 
 
