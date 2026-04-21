@@ -1334,3 +1334,37 @@
   - `_try_parse_function_call` must handle both `output` list layout (Responses API-style) and `tool_calls` list on the response or nested in `message` (Completion-style). These two are not mutually exclusive — the check order matters (output first, then tool_calls).
   - Text path `SCROLL` regex omits x/y because we send `session.scroll(direction, amount)` server-side and do not need coordinates in that path. Coordinates matter only for computer_call and function_call paths.
 ---
+
+## 2026-04-21 - US-SUB-007: Subagent Registry Persistence — Disk-Backed Runs
+- Extended `SubagentRegistry` with optional JSONL disk persistence: `persist_path` param, `_persist_run()` internal, `restore()` load+orphan-detect, `completed_runs()` history query with transcript path enrichment
+- Added `SubagentRun.from_dict()` for round-trip deserialization (inverse of `to_dict()`)
+- `SubagentUsage.from_dict()` already existed from US-SUB-001; reused it
+- Wired persistence into `openclaw_agent.py`: registry now receives `persist_path = session_mgr.task_dir / "subagent-runs.jsonl"` and calls `registry.restore()` on init
+- Added `_TranscriptWriter` to `subagent_gui.py`: lightweight append-only JSONL writer for GUI subagent turns; writes step/actions/tool_calls per relay turn (screenshots excluded — too large)
+- Extended `run_gui_subagent` to accept `parent_session_dir` param; transcript written to `<parent_session_dir>/subagents/<run_id>/transcript.jsonl`
+- Propagated `parent_session_dir` through `DelegateGUITool` in `subagent_tools.py`
+- Bonus: fixed `ScrollAction` call in `remote.py` — removed `x=`/`y=` kwargs that don't exist on the dataclass
+- Bonus: `subagent_gui_protocol.py` improvements (bundled as companion to US-SUB-007 work):
+  - Added `_KEY_ALIASES`/`_normalize_key()` for ARROWLEFT→left, ARROWUP→up normalization
+  - Batch `actions` array support in `_try_parse_computer_call` (alongside singular `action`)
+  - `keypress` accepted as alias for `hotkey` in function-call path
+  - Tool schema `action_type` enum updated: `hotkey` → `keypress` for consistency with main agent
+- **Files changed (submodule):**
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_registry.py` (persistence: from_dict, _persist_run, restore, completed_runs)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui.py` (_TranscriptWriter, parent_session_dir param)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui_protocol.py` (key normalization, batch actions, keypress alias, schema update)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_tools.py` (propagate parent_session_dir)
+  - `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (disk-backed registry, restore on init)
+  - `submodules/cua/libs/cua-bench/cua_bench/computers/remote.py` (fix ScrollAction kwargs)
+- **Files changed (parent):**
+  - `tests/test_subagent_registry_persistence.py` (new — 27 unit tests for all persistence acceptance criteria)
+  - `tests/test_subagent_gui_protocol.py` (8 new tests: batch actions, arrow key normalization, keypress alias)
+  - `prd.json` (US-SUB-007 passes: true; added US-SUB-010 story)
+  - `progress.txt`
+- **Learnings for future iterations:**
+  - `restore()` uses `loaded.update(self._runs)` after building the loaded dict — this ensures current-session runs (if any pre-exist) always override disk data for the same run_id (current session wins, not restored)
+  - Append-only JSONL + last-entry-wins dedup avoids full-file rewrites on every state transition; rewriting is O(n) and causes corruption risk if the process crashes mid-write
+  - `SubagentRegistry` persist_path parent dir is created by `_persist_run()` lazily (first append) — no need for the caller to pre-create the dir
+  - `_TranscriptWriter` uses `None` as a no-op sentinel — when `parent_session_dir` is not provided, all `write_turn` calls are silent no-ops with no file I/O overhead
+  - The `hotkey`→`keypress` rename in tool schema needed a backward-compat alias in the function-call parse path since old conversations may still emit `hotkey`; both names now accepted
+---

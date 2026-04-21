@@ -303,6 +303,7 @@ class DelegateGUITool(BaseTool):
                 model=model,
                 max_steps=max_steps,
                 thinking_params=self._thinking_params,
+                parent_session_dir=self._parent_session_dir,
             )
             # Take the post-delegation screenshot in the same driver so the
             # caller only spawns one asyncio.run / executor pass.

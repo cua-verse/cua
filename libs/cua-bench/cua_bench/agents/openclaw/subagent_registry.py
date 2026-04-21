@@ -1,15 +1,17 @@
 """
-SubagentRegistry — In-memory lifecycle tracking for spawned subagent runs.
+SubagentRegistry — Lifecycle tracking for spawned subagent runs with optional
+disk persistence (append-only JSONL).
 
 Reproduces OpenClaw's subagent registry (openclaw/src/agents/subagent-registry.ts,
-subagent-registry.types.ts) adapted for CUA's single-process asyncio model.
+subagent-registry.types.ts, subagent-registry.store.ts) adapted for CUA's
+single-process asyncio model.
 
 Key differences from OpenClaw:
-- In-memory only — runs are ephemeral within a single perform_task() call,
-  not persisted to disk across sessions.
+- Append-only JSONL persistence (vs. full-map JSON overwrite).
 - Direct method calls instead of gateway lifecycle event listeners.
 - asyncio.Queue instead of steer()-based mid-stream injection for result delivery.
 - Depth-1 only (no recursive delegation) for V1.
+- No versioned format migration — forward-compatible via from_dict() defaults.
 
 Two subagent types share this registry:
 - general: async one-shot workers (planning, analysis, memory). Results pushed
@@ -19,10 +21,12 @@ Two subagent types share this registry:
 """
 
 import asyncio
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 
@@ -107,6 +111,23 @@ class SubagentRun:
             d["error_message"] = self.error_message
         return d
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SubagentRun":
+        """Reconstruct a SubagentRun from a dict (inverse of to_dict)."""
+        return cls(
+            run_id=data["run_id"],
+            type=SubagentType(data["type"]),
+            task=data.get("task", ""),
+            label=data.get("label", ""),
+            model=data.get("model", ""),
+            status=SubagentStatus(data["status"]),
+            result_text=data.get("result_text"),
+            error_message=data.get("error_message"),
+            created_at=data.get("created_at", ""),
+            ended_at=data.get("ended_at"),
+            usage=SubagentUsage.from_dict(data.get("usage", {})),
+        )
+
 
 class SubagentLimitError(Exception):
     """Raised when the concurrency limit for general subagents is reached."""
@@ -121,30 +142,55 @@ def _new_run_id() -> str:
 
 
 class SubagentRegistry:
-    """In-memory registry tracking all subagent runs with a completion queue.
+    """Registry tracking all subagent runs with optional JSONL disk persistence.
 
     The completion queue (asyncio.Queue) collects finished general subagent runs.
     GUI subagent runs are blocking and return results directly — they are tracked
     in the registry for observability but never pushed to the queue.
 
     Concurrency limit (max_concurrent) applies only to general subagents.
+
+    When ``persist_path`` is provided, every state transition appends the affected
+    run's record as a single JSONL line. On restore, last entry per run_id wins
+    (natural dedup for append-only writes).
     """
 
-    def __init__(self, max_concurrent: int = 3) -> None:
+    def __init__(
+        self, max_concurrent: int = 3, persist_path: Path | None = None
+    ) -> None:
         self._runs: dict[str, SubagentRun] = {}
         self._completion_queue: asyncio.Queue[SubagentRun] = asyncio.Queue()
         self._post_delegation_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._tasks: dict[str, asyncio.Task] = {}
         self._max_concurrent = max_concurrent
+        self._persist_path = persist_path
 
     @property
     def max_concurrent(self) -> int:
         return self._max_concurrent
 
     @property
+    def persist_path(self) -> Path | None:
+        return self._persist_path
+
+    @property
     def completion_queue(self) -> "asyncio.Queue[SubagentRun]":
         """Read-only access to the completion queue for introspection/tests."""
         return self._completion_queue
+
+    def _persist_run(self, run_id: str) -> None:
+        """Append a single run's current state as one JSONL line.
+
+        No-op when persist_path is None or run_id is unknown.
+        """
+        if self._persist_path is None:
+            return
+        run = self._runs.get(run_id)
+        if run is None:
+            return
+        self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._persist_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(run.to_dict()) + "\n")
 
     def register(
         self,
@@ -176,6 +222,7 @@ class SubagentRegistry:
             created_at=_now_iso(),
         )
         self._runs[run.run_id] = run
+        self._persist_run(run.run_id)
         return run
 
     def mark_running(self, run_id: str) -> None:
@@ -185,6 +232,7 @@ class SubagentRegistry:
             return
         if run.status == SubagentStatus.PENDING:
             run.status = SubagentStatus.RUNNING
+            self._persist_run(run_id)
 
     def complete(
         self,
@@ -205,6 +253,7 @@ class SubagentRegistry:
         run.ended_at = _now_iso()
         if usage is not None:
             run.usage = usage
+        self._persist_run(run_id)
         if run.type == SubagentType.GENERAL:
             self._completion_queue.put_nowait(run)
 
@@ -227,6 +276,7 @@ class SubagentRegistry:
         run.ended_at = _now_iso()
         if usage is not None:
             run.usage = usage
+        self._persist_run(run_id)
         if run.type == SubagentType.GENERAL:
             self._completion_queue.put_nowait(run)
 
@@ -241,6 +291,7 @@ class SubagentRegistry:
             return
         run.status = SubagentStatus.KILLED
         run.ended_at = _now_iso()
+        self._persist_run(run_id)
 
     def attach_task(self, run_id: str, task: asyncio.Task) -> None:
         """Associate an asyncio.Task with a run so ``kill_run`` can cancel it.
@@ -330,6 +381,65 @@ class SubagentRegistry:
                 results.append(self._post_delegation_queue.get_nowait())
             except asyncio.QueueEmpty:
                 break
+        return results
+
+    def restore(self) -> int:
+        """Load runs from the JSONL persist file; mark orphaned non-terminal runs.
+
+        Deduplication: last entry for each run_id wins (append-only + last-write-wins).
+        Orphan detection: runs with status pending|running from a prior session are
+        transitioned to error with a descriptive message.
+
+        Returns the number of prior-session runs loaded (0 if no file or no path).
+        """
+        if self._persist_path is None or not self._persist_path.exists():
+            return 0
+
+        loaded: dict[str, SubagentRun] = {}
+        for line in self._persist_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except (json.JSONDecodeError, KeyError, ValueError):
+                continue
+            try:
+                run = SubagentRun.from_dict(data)
+            except (KeyError, ValueError):
+                continue
+            loaded[run.run_id] = run
+
+        for run in loaded.values():
+            if run.status in (SubagentStatus.PENDING, SubagentStatus.RUNNING):
+                run.status = SubagentStatus.ERROR
+                run.error_message = "stalled: prior session ended before completion"
+                run.ended_at = _now_iso()
+
+        count = len(loaded)
+        loaded.update(self._runs)
+        self._runs = loaded
+        return count
+
+    def completed_runs(self) -> list[dict[str, Any]]:
+        """Return all runs with terminal status, enriched with transcript paths.
+
+        Each returned dict is ``run.to_dict()`` plus a ``transcript_path`` key
+        (str or None) pointing to the subagent's on-disk transcript JSONL.
+        """
+        results: list[dict[str, Any]] = []
+        for run in self._runs.values():
+            if run.status not in _TERMINAL_STATUSES:
+                continue
+            d = run.to_dict()
+            if self._persist_path is not None:
+                transcript = (
+                    self._persist_path.parent / "subagents" / run.run_id / "transcript.jsonl"
+                )
+                d["transcript_path"] = str(transcript) if transcript.exists() else None
+            else:
+                d["transcript_path"] = None
+            results.append(d)
         return results
 
     def to_snapshot(self) -> list[dict[str, Any]]:

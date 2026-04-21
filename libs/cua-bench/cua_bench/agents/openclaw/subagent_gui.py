@@ -22,6 +22,9 @@ no nested tool inheritance, no depth tracking.
 from __future__ import annotations
 
 import base64
+import json
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from .subagent_gui_protocol import (
@@ -175,6 +178,58 @@ def _accumulate_usage(usage: SubagentUsage, response: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Transcript persistence
+# ---------------------------------------------------------------------------
+
+
+class _TranscriptWriter:
+    """Lightweight append-only JSONL writer for GUI subagent turns.
+
+    Each entry records one relay turn: the actions taken and the step number.
+    Screenshots are NOT stored (too large for JSONL); the transcript captures
+    the action sequence and model responses only.
+    """
+
+    def __init__(self, transcript_path: Path | None) -> None:
+        self._path = transcript_path
+
+    def _append(self, entry: dict[str, Any]) -> None:
+        if self._path is None:
+            return
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def write_turn(
+        self, step: int, actions: list[str], raw_choice: Any, is_done: bool
+    ) -> None:
+        ts = datetime.now(timezone.utc).isoformat()
+        # Extract tool_calls arguments from the raw choice for replay/debugging
+        message = getattr(raw_choice, "message", None)
+        tool_calls_raw = None
+        if message is not None:
+            tcs = getattr(message, "tool_calls", None)
+            if tcs:
+                tool_calls_raw = []
+                for tc in tcs:
+                    fn = getattr(tc, "function", None)
+                    if fn:
+                        tool_calls_raw.append({
+                            "id": getattr(tc, "id", ""),
+                            "name": getattr(fn, "name", ""),
+                            "arguments": getattr(fn, "arguments", ""),
+                        })
+        self._append({
+            "type": "turn",
+            "step": step,
+            "timestamp": ts,
+            "actions": actions,
+            "is_done": is_done,
+            "tool_calls": tool_calls_raw,
+        })
+
+
+# ---------------------------------------------------------------------------
 # Message construction helpers
 # ---------------------------------------------------------------------------
 
@@ -250,6 +305,7 @@ async def run_gui_subagent(
     model: str = DEFAULT_MODEL,
     max_steps: int = DEFAULT_MAX_STEPS,
     thinking_params: dict[str, Any] | None = None,
+    parent_session_dir: str | Path | None = None,
 ) -> str:
     """Blocking vision-to-action relay loop.
 
@@ -271,6 +327,11 @@ async def run_gui_subagent(
     Returns the final summary string. Raises the underlying exception on failure.
     """
     import litellm
+
+    transcript_path: Path | None = None
+    if parent_session_dir is not None:
+        transcript_path = Path(parent_session_dir) / "subagents" / run_id / "transcript.jsonl"
+    transcript = _TranscriptWriter(transcript_path)
 
     usage = SubagentUsage()
     registry.mark_running(run_id)
@@ -330,6 +391,9 @@ async def run_gui_subagent(
         if done_action:
             descs.append(f"done: {done_action.summary}")
         print(f"  [GUI {run_id}] step {_step}: {descs}")
+
+        # Persist turn to disk transcript.
+        transcript.write_turn(_step, descs, choice, is_done=done_action is not None)
 
         # Record the assistant turn + tool acks in transcript.
         messages.append(_assistant_tool_call_message(choice))

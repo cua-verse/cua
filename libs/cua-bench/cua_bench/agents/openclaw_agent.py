@@ -168,8 +168,10 @@ class OpenClawAgent(BaseAgent):
             resolved_model if self.summary_model == self.model else resolve_model(self.summary_model)
         )
 
-        # Subagent registry (US-SUB-005) — per-task, ephemeral in-memory.
-        registry = SubagentRegistry()
+        # Subagent registry (US-SUB-005/007) — disk-backed when session is active.
+        persist_path = session_mgr.task_dir / "subagent-runs.jsonl"
+        registry = SubagentRegistry(persist_path=persist_path)
+        registry.restore()
 
         # Tool assembly (US-OC-007 + US-SUB-005 delegation tools)
         thinking_api_params = self.thinking_config.to_api_params(self.model)

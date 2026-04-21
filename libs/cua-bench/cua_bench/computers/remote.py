@@ -975,9 +975,7 @@ class RemoteDesktopSession:
     async def scroll(self, direction: str = "down", amount: int = 300) -> None:
         """Scroll the screen."""
         await self.execute_action(
-            ScrollAction(
-                x=self._width // 2, y=self._height // 2, direction=direction, amount=amount
-            )
+            ScrollAction(direction=direction, amount=amount)
         )
 
     async def move_to(self, x: int, y: int) -> None:

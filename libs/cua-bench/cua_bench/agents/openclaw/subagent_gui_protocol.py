@@ -83,6 +83,19 @@ GUIAction = Union[
 _VALID_BUTTONS = frozenset({"left", "right", "double"})
 _VALID_DIRECTIONS = frozenset({"up", "down"})
 
+# Normalize key names from model output to CUA SDK names.
+# Matches the mapping in agent/computers/cua.py:98-101.
+_KEY_ALIASES: dict[str, str] = {
+    "arrowup": "up",
+    "arrowdown": "down",
+    "arrowleft": "left",
+    "arrowright": "right",
+}
+
+
+def _normalize_key(key: str) -> str:
+    return _KEY_ALIASES.get(key.lower(), key)
+
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -194,8 +207,9 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
 def _try_parse_computer_call(response: Any) -> list[GUIAction] | None:
     """Path (a): OpenAI Responses API computer_call items.
 
-    Response shape:
-        {"output": [{"type": "computer_call", "action": {"type": "click", ...}}, ...]}
+    Handles two sub-formats:
+      - singular ``action`` dict (one action per computer_call item)
+      - plural ``actions`` array (batch of sequential actions in one item)
 
     Collects ALL computer_call items in the output (GPT-5.4 can emit multiple).
     """
@@ -210,16 +224,29 @@ def _try_parse_computer_call(response: Any) -> list[GUIAction] | None:
         item_type = _get(item, "type")
         if item_type != "computer_call":
             continue
+
+        # Singular "action" dict
         action_dict = _get(item, "action")
-        if action_dict is None:
+        if action_dict is not None:
+            if not isinstance(action_dict, dict):
+                action_dict = _as_dict(action_dict)
+            if action_dict is not None:
+                parsed = _computer_call_to_gui_action(action_dict)
+                if parsed is not None:
+                    actions.append(parsed)
             continue
-        if not isinstance(action_dict, dict):
-            action_dict = _as_dict(action_dict)
-            if action_dict is None:
-                continue
-        parsed = _computer_call_to_gui_action(action_dict)
-        if parsed is not None:
-            actions.append(parsed)
+
+        # Plural "actions" array (batch of sequential actions)
+        actions_list = _get(item, "actions")
+        if isinstance(actions_list, list):
+            for entry in actions_list:
+                if not isinstance(entry, dict):
+                    entry = _as_dict(entry)
+                if entry is not None:
+                    parsed = _computer_call_to_gui_action(entry)
+                    if parsed is not None:
+                        actions.append(parsed)
+
     return actions or None
 
 
@@ -240,7 +267,7 @@ def _computer_call_to_gui_action(action: dict[str, Any]) -> GUIAction | None:
         return GUITypeAction(text=str(action.get("text", "")))
     if action_type == "keypress":
         keys = action.get("keys") or []
-        return GUIHotkeyAction(keys=[str(k) for k in keys])
+        return GUIHotkeyAction(keys=[_normalize_key(str(k)) for k in keys])
     if action_type == "scroll":
         scroll_y = int(action.get("scroll_y", 0))
         scroll_x = int(action.get("scroll_x", 0))
@@ -346,9 +373,9 @@ def _parse_gui_action_args(arguments: Any) -> GUIAction | None:
         )
     if kind == "type":
         return GUITypeAction(text=str(args.get("text", "")))
-    if kind == "hotkey":
+    if kind in ("hotkey", "keypress"):
         keys = args.get("keys") or []
-        return GUIHotkeyAction(keys=[str(k) for k in keys])
+        return GUIHotkeyAction(keys=[_normalize_key(str(k)) for k in keys])
     if kind == "scroll":
         return GUIScrollAction(
             x=int(args.get("x", 0)),
@@ -563,7 +590,7 @@ def gui_action_tool_schema() -> dict[str, Any]:
                         "enum": [
                             "click",
                             "type",
-                            "hotkey",
+                            "keypress",
                             "scroll",
                             "drag",
                             "wait",
@@ -582,7 +609,7 @@ def gui_action_tool_schema() -> dict[str, Any]:
                     "keys": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Key combination for hotkey action.",
+                        "description": "Keys to press (for action=keypress). Example: ['ctrl', 'c'] for combo, ['down'] for single key.",
                     },
                     "direction": {
                         "type": "string",
