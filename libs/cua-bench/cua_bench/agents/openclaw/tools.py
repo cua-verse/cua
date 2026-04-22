@@ -153,6 +153,7 @@ def build_tools(
     thinking_params: dict[str, Any] | None = None,
     gui_thinking_params: dict[str, Any] | None = None,
     disable_main_computer: bool = False,
+    disable_delegate_gui: bool = False,
     gui_model: str | None = None,
 ) -> list:
     """Assemble the canonical tool list for the OpenClaw agent.
@@ -160,7 +161,9 @@ def build_tools(
     Returns [Computer, MilestoneTool, AnalyzeImageTool, MemorySearchTool,
              MemoryGetTool, MemoryWriteTool] by default. When ``registry`` and
     ``parent_session_dir`` are supplied (US-SUB-005), also appends
-    [DelegateGeneralTool, DelegateGUITool, SubagentsTool].
+    [DelegateGeneralTool, DelegateGUITool, SubagentsTool]. ``DelegateGUITool``
+    is suppressed when ``disable_delegate_gui=True`` (mirrors OpenClaw's
+    filterToolsByPolicy pattern — absence is the signal).
 
     Args:
         session: CUA DesktopSession (provides ``_computer`` and ``interface``).
@@ -184,6 +187,11 @@ def build_tools(
             alive) but cannot perform interactive GUI work — that must go
             through ``delegate_gui``. Useful for forcing GUI delegation in
             validation runs (US-SUB-006 Level 2 coverage).
+        disable_delegate_gui: When True, omit ``DelegateGUITool`` from the
+            returned list. ``DelegateGeneralTool`` and ``SubagentsTool``
+            remain. GUI interactions must go through the main ``computer``
+            tool. Conflicts with ``disable_main_computer`` — guarded at
+            agent construction.
     """
     from agent.tools import AnalyzeImageTool, MilestoneTool
 
@@ -230,9 +238,12 @@ def build_tools(
         }
         if gui_model:
             gui_tool_kwargs["default_model"] = gui_model
-        delegate_gui = DelegateGUITool(**gui_tool_kwargs)
         subagents_tool = SubagentsTool(registry=registry)
-        tools.extend([delegate_general, delegate_gui, subagents_tool])
+        if disable_delegate_gui:
+            tools.extend([delegate_general, subagents_tool])
+        else:
+            delegate_gui = DelegateGUITool(**gui_tool_kwargs)
+            tools.extend([delegate_general, delegate_gui, subagents_tool])
 
     return tools
 

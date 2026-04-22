@@ -497,9 +497,8 @@ class SubagentsTool(BaseTool):
             "action='list' returns active and recent runs. "
             "action='kill' cancels a runaway general subagent. "
             "action='steer' sends a follow-up message into a running "
-            "subagent (general or GUI) to refine or redirect its work "
-            "mid-flight. Target can be a run_id, label, run_id prefix, "
-            "or 'last'."
+            "subagent to refine or redirect its work mid-flight. "
+            "Target can be a run_id, label, run_id prefix, or 'last'."
         )
 
     @property

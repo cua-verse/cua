@@ -46,6 +46,15 @@ class OpenClawAgent(BaseAgent):
         # work must go through ``delegate_gui``. Used to validate the
         # post-delegation screenshot injection path end-to-end (US-SUB-006).
         self.disable_main_computer = bool(kwargs.get("disable_main_computer", False))
+        # When True, ``DelegateGUITool`` is omitted from the tool list — the
+        # main ``computer`` tool handles all GUI work. Mirrors OpenClaw's
+        # filterToolsByPolicy pattern; absence is the signal.
+        self.disable_delegate_gui = bool(kwargs.get("disable_delegate_gui", False))
+        if self.disable_main_computer and self.disable_delegate_gui:
+            raise ValueError(
+                "Both disable_main_computer and disable_delegate_gui set — "
+                "the agent has no way to interact with the VM."
+            )
         self.gui_model = kwargs.get("gui_model", None)
 
         # Thinking level configuration (US-OC-019)
@@ -200,6 +209,7 @@ class OpenClawAgent(BaseAgent):
             thinking_params=thinking_api_params,
             gui_thinking_params=gui_thinking_params,
             disable_main_computer=self.disable_main_computer,
+            disable_delegate_gui=self.disable_delegate_gui,
             gui_model=self.gui_model,
         )
         tool_summaries = get_tool_summaries(tools)
@@ -221,6 +231,7 @@ class OpenClawAgent(BaseAgent):
         instructions = builder.build(
             tool_summaries=tool_summaries,
             context_files=context_files,
+            main_computer_interactive=not self.disable_main_computer,
         )
 
         # System prompt report for observability (US-OC-008)
@@ -279,6 +290,8 @@ class OpenClawAgent(BaseAgent):
             print("  Summary/flush model:", self.summary_model)
         if self.disable_main_computer:
             print("  Main computer tool DISABLED — GUI work must go through delegate_gui")
+        if self.disable_delegate_gui:
+            print("  delegate_gui DISABLED — GUI work goes through the main computer tool")
         if self.thinking_config.level.value != "off":
             print("  Thinking level:", self.thinking_config.level.value)
         if self.thinking_config.flush_level != self.thinking_config.level:

@@ -116,6 +116,7 @@ def parse_args(argv: list[str]) -> dict:
         "vision_thinking_level": None,
         "gui_thinking_level": None,
         "disable_main_computer": False,
+        "disable_delegate_gui": False,
         "gui_model": None,
     }
 
@@ -130,6 +131,7 @@ def parse_args(argv: list[str]) -> dict:
     args["evaluate_only"] = "--evaluate-only" in argv
     args["task_only"] = "--task-only" in argv
     args["disable_main_computer"] = "--disable-main-computer" in argv
+    args["disable_delegate_gui"] = "--disable-delegate-gui" in argv
 
     for i, arg in enumerate(argv):
         if arg == "--agent" and i + 1 < len(argv):
@@ -282,6 +284,7 @@ def validate_args(args, logger):
         logger.error("  --flush-thinking-level <level> Flush thinking level (defaults to main)")
         logger.error("  --compaction-thinking-level <level> Compaction thinking level (defaults to main)")
         logger.error("  --disable-main-computer  Main agent cannot drive VM directly — must use delegate_gui")
+        logger.error("  --disable-delegate-gui   Omit delegate_gui — GUI work goes through the main computer tool")
         logger.error("  --gui-model <model>    Model for GUI subagent relay (default: openrouter/openai/gpt-5.4)")
         logger.error("  --save-pngs            Save screenshots as PNGs")
         logger.error("  --filter <events>      Filter trace events")
@@ -564,6 +567,8 @@ def initialize_agent(args, agent_class):
         agent_kwargs["gui_thinking_level"] = args["gui_thinking_level"]
     if args.get("disable_main_computer"):
         agent_kwargs["disable_main_computer"] = True
+    if args.get("disable_delegate_gui"):
+        agent_kwargs["disable_delegate_gui"] = True
     if args.get("gui_model"):
         agent_kwargs["gui_model"] = args["gui_model"]
     return agent_class(**agent_kwargs)
