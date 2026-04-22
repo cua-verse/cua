@@ -93,11 +93,17 @@ class MilestoneTool(BaseTool):
             return {"success": False, "error": str(e)}
 
     def _is_windows_path(self, path: str) -> bool:
-        """Detect if the path is a Windows path based on format."""
+        """Detect if the path is a Windows path based on format.
+
+        Accepts either separator after the drive letter — ``C:\\foo`` and
+        ``C:/foo`` both count as Windows paths. Agents commonly emit the
+        forward-slash form because it avoids double-escaping in JSON
+        tool-args; the remote VM normalises slashes internally.
+        """
         import re
-        # Windows paths: C:\, D:\, \\server\, or contain backslashes
-        return bool(re.match(r'^[A-Za-z]:\\', path) or 
-                    path.startswith('\\\\') or 
+        # Windows paths: C:\, C:/, D:\, \\server\, or contain backslashes
+        return bool(re.match(r'^[A-Za-z]:[\\/]', path) or
+                    path.startswith('\\\\') or
                     '\\' in path)
 
     async def _execute_save(self, path: str, description: str) -> dict:

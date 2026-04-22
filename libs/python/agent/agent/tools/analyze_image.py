@@ -58,10 +58,15 @@ def _mime_from_extension(path: str) -> str:
 def _is_remote_path(path: str) -> bool:
     """Detect if the path is a Windows/remote path based on format.
 
+    Accepts either separator after the drive letter — ``C:\\foo`` and
+    ``C:/foo`` both count as Windows paths, since the remote VM normalises
+    slashes and agents frequently emit forward-slash form (easier to
+    escape in JSON tool-args).
+
     Same heuristic as MilestoneTool._is_windows_path().
     """
     return bool(
-        re.match(r"^[A-Za-z]:\\", path)
+        re.match(r"^[A-Za-z]:[\\/]", path)
         or path.startswith("\\\\")
         or "\\" in path
     )
