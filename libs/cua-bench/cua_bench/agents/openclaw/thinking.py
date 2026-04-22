@@ -66,6 +66,7 @@ class ThinkingConfig:
     flush_level: ThinkLevel = ThinkLevel.OFF
     compaction_level: ThinkLevel = ThinkLevel.OFF
     vision_level: ThinkLevel = ThinkLevel.OFF
+    gui_level: ThinkLevel = ThinkLevel.OFF
 
     def to_api_params(self, model: str) -> dict[str, Any]:
         """Return provider-specific kwargs for the main agent loop."""
@@ -100,6 +101,10 @@ class ThinkingConfig:
             model,
             transport=resolved.helper_transport_defaults.vision,
         )
+
+    def gui_params(self, model: str) -> dict[str, Any]:
+        """Return provider-specific kwargs for the GUI subagent's ComputerAgent."""
+        return resolve_thinking_params(self.gui_level, model, transport="chat")
 
 
 # ---------------------------------------------------------------------------

@@ -114,7 +114,9 @@ def parse_args(argv: list[str]) -> dict:
         "flush_thinking_level": None,
         "compaction_thinking_level": None,
         "vision_thinking_level": None,
+        "gui_thinking_level": None,
         "disable_main_computer": False,
+        "gui_model": None,
     }
 
     if len(argv) < 2:
@@ -154,6 +156,10 @@ def parse_args(argv: list[str]) -> dict:
             args["compaction_thinking_level"] = argv[i + 1]
         elif arg == "--vision-thinking-level" and i + 1 < len(argv):
             args["vision_thinking_level"] = argv[i + 1]
+        elif arg == "--gui-thinking-level" and i + 1 < len(argv):
+            args["gui_thinking_level"] = argv[i + 1]
+        elif arg == "--gui-model" and i + 1 < len(argv):
+            args["gui_model"] = argv[i + 1]
 
     return args
 
@@ -276,6 +282,7 @@ def validate_args(args, logger):
         logger.error("  --flush-thinking-level <level> Flush thinking level (defaults to main)")
         logger.error("  --compaction-thinking-level <level> Compaction thinking level (defaults to main)")
         logger.error("  --disable-main-computer  Main agent cannot drive VM directly — must use delegate_gui")
+        logger.error("  --gui-model <model>    Model for GUI subagent relay (default: openrouter/openai/gpt-5.4)")
         logger.error("  --save-pngs            Save screenshots as PNGs")
         logger.error("  --filter <events>      Filter trace events")
         logger.error("  --task-index <n>       Override task index")
@@ -553,8 +560,12 @@ def initialize_agent(args, agent_class):
         agent_kwargs["compaction_thinking_level"] = args["compaction_thinking_level"]
     if args.get("vision_thinking_level"):
         agent_kwargs["vision_thinking_level"] = args["vision_thinking_level"]
+    if args.get("gui_thinking_level"):
+        agent_kwargs["gui_thinking_level"] = args["gui_thinking_level"]
     if args.get("disable_main_computer"):
         agent_kwargs["disable_main_computer"] = True
+    if args.get("gui_model"):
+        agent_kwargs["gui_model"] = args["gui_model"]
     return agent_class(**agent_kwargs)
 
 

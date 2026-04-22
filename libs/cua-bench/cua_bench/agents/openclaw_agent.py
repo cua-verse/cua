@@ -45,6 +45,7 @@ class OpenClawAgent(BaseAgent):
         # work must go through ``delegate_gui``. Used to validate the
         # post-delegation screenshot injection path end-to-end (US-SUB-006).
         self.disable_main_computer = bool(kwargs.get("disable_main_computer", False))
+        self.gui_model = kwargs.get("gui_model", None)
 
         # Thinking level configuration (US-OC-019)
         # CLI --thinking-level overrides auto-detection; omitting uses model default.
@@ -58,6 +59,7 @@ class OpenClawAgent(BaseAgent):
         flush_level_str = kwargs.get("flush_thinking_level")
         compaction_level_str = kwargs.get("compaction_thinking_level")
         vision_level_str = kwargs.get("vision_thinking_level")
+        gui_level_str = kwargs.get("gui_thinking_level")
         flush_level = ThinkLevel(flush_level_str) if flush_level_str is not None else level
         compaction_level = (
             ThinkLevel(compaction_level_str)
@@ -69,11 +71,17 @@ class OpenClawAgent(BaseAgent):
             if vision_level_str is not None
             else ThinkLevel.OFF
         )
+        gui_level = (
+            ThinkLevel(gui_level_str)
+            if gui_level_str is not None
+            else ThinkLevel.OFF
+        )
         self.thinking_config = ThinkingConfig(
             level=level,
             flush_level=flush_level,
             compaction_level=compaction_level,
             vision_level=vision_level,
+            gui_level=gui_level,
         )
 
     @staticmethod
@@ -175,6 +183,8 @@ class OpenClawAgent(BaseAgent):
 
         # Tool assembly (US-OC-007 + US-SUB-005 delegation tools)
         thinking_api_params = self.thinking_config.to_api_params(self.model)
+        gui_model_str = self.gui_model or self.model
+        gui_thinking_params = self.thinking_config.gui_params(gui_model_str)
         tools = build_tools(
             session,
             memory_store,
@@ -187,7 +197,9 @@ class OpenClawAgent(BaseAgent):
             parent_session_dir=session_mgr.task_dir,
             default_model=self.model,
             thinking_params=thinking_api_params,
+            gui_thinking_params=gui_thinking_params,
             disable_main_computer=self.disable_main_computer,
+            gui_model=self.gui_model,
         )
         tool_summaries = get_tool_summaries(tools)
         agents_md = (Path(__file__).parent / "openclaw" / "AGENTS.md").read_text()
@@ -274,6 +286,8 @@ class OpenClawAgent(BaseAgent):
             print("  Compaction thinking level:", self.thinking_config.compaction_level.value)
         if self.thinking_config.vision_level.value != "off":
             print("  Vision thinking level:", self.thinking_config.vision_level.value)
+        if self.thinking_config.gui_level.value != "off":
+            print("  GUI thinking level:", self.thinking_config.gui_level.value)
 
         # Single-loop execution (US-OC-017)
         # Compaction happens in-place inside OpenClawComputerAgent.run() — no

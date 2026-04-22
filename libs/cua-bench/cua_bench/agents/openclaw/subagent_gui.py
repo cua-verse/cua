@@ -1,45 +1,32 @@
-"""GUI subagent — blocking vision-to-action relay loop.
+"""GUI subagent — blocking vision-to-action relay loop via ComputerAgent.
 
-Consumes the protocol layer from ``subagent_gui_protocol`` (GUIAction types,
-parse_gui_response, execute_gui_action, gui_action_tool_schema) and drives a
-vision model through a take-screenshot → call → parse → execute → repeat
-loop until the model emits ``GUIDoneAction`` or a hard limit trips.
+Routes through ``ComputerAgent`` (the same agent infrastructure as the main
+agent) instead of raw ``litellm.acompletion``.  This gives the GUI subagent:
+  - Native computer tool registration (provider-specific schema + normalization)
+  - Automatic action execution and post-action screenshots
+  - ``ImageRetentionCallback`` for image history pruning
+  - ``OperatorNormalizerCallback`` for hallucination fixes
 
-Single request path: ``litellm.acompletion`` with the ``gui_action`` function-
-calling tool. CUA's ``agent/loops/openai.py:137-141`` confirms GPT-5.4 does
-not support native ``computer_use_preview``; all vision models go through
-this one path. A future story can add a native Responses-API branch when a
-``computer-use-preview`` model is available for end-to-end testing.
+The system prompt is intentionally minimal — the computer tool schema
+(built by ``ComputerAgent``'s agent loop) provides the action vocabulary.
+Only rules and output format guidance are needed.
 
 Design adapted from OpenClaw:
   - subagent-announce.ts:47-104 (buildSubagentSystemPrompt — role, rules,
     output format, ephemeral framing)
   - subagent-registry.ts (register → mark_running → complete/fail lifecycle)
-Simplified for CUA's single-process asyncio model: no gateway, no streaming,
-no nested tool inheritance, no depth tracking.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .subagent_gui_protocol import (
-    GUIAction,
-    GUIClickAction,
-    GUIDoneAction,
-    GUIDragAction,
-    GUIHotkeyAction,
-    GUIScrollAction,
-    GUITypeAction,
-    GUIWaitAction,
-    execute_gui_action,
-    gui_action_tool_schema,
-    parse_gui_response,
-)
+from agent import ComputerAgent
+
+from .memory import MemoryGetTool, MemorySearchTool, MemoryStore, MemoryWriteTool
 from .subagent_registry import SubagentRegistry, SubagentUsage
 
 DEFAULT_MAX_STEPS = 15
@@ -55,112 +42,149 @@ DEFAULT_IMAGE_HISTORY = 3
 def _build_system_prompt() -> str:
     """Build the GUI subagent system prompt.
 
+    Intentionally minimal — the computer tool schema (auto-built by
+    ComputerAgent's agent loop) already provides the action vocabulary.
+    Only behavioral guidance is needed here.
+
     Reference: openclaw/src/agents/subagent-announce.ts:47-104
     """
     return "\n".join([
         "# GUI Subagent",
         "",
-        "You are a **GUI automation subagent** spawned by the main agent to perform "
-        "a focused GUI task on a Windows VM.",
-        "",
-        "## Visibility Model",
-        "- Each turn, you receive the current VM screenshot.",
-        "- You do not have a memory of past turns beyond the action you just emitted.",
-        "- You may emit one or multiple `gui_action` tool calls per turn.",
-        "- Multiple actions execute sequentially; the next screenshot arrives after all complete.",
-        "",
-        "## Action Vocabulary",
-        "- `click` — click at (x, y) with button left/right/double.",
-        "- `type` — type literal text at the current focus.",
-        "- `hotkey` — press a key combination (e.g. ['ctrl', 'c']).",
-        "- `scroll` — scroll the page up or down by `amount` notches.",
-        "- `drag` — drag from (start_x, start_y) to (end_x, end_y).",
-        "- `wait` — wait for `ms` milliseconds (use for UI to settle).",
-        "- `done` — the task is complete; include a one-line `summary`.",
+        "You are a **GUI automation subagent** spawned by the main agent to "
+        "perform a focused GUI task on a Windows VM.",
         "",
         "## Rules",
-        "1. **Stay focused** — Do only the assigned task, no side quests.",
-        "2. **Complete and return** — Emit `done` with a summary as soon as the "
-        "task is visibly complete on screen.",
-        "3. **Observe before repeating** — Before repeating the same action, "
-        "check the latest screenshot to confirm it had the intended effect.",
-        "4. **Be ephemeral** — You will be terminated after returning. That's fine.",
-        "",
-        "## Output Format",
-        "- One `gui_action` function call per turn.",
-        "- No free-text narration; the tool call is the entire response.",
+        "1. **Observe before acting** — Read the screenshot carefully. "
+        "Check UI state before deciding your next action.",
+        "2. **Batch when predictable** — When the outcome of multiple "
+        "actions is predictable (e.g. pressing Space 10 times to dismiss "
+        "dialogs, or a known sequence of arrow keys for navigation), emit "
+        "them as multiple `computer` tool calls in a single turn. This is "
+        "faster and saves steps.",
+        "3. **Observe when uncertain** — When the next screen state matters "
+        "for deciding what to do (e.g. after clicking a button that opens "
+        "a new dialog), emit a single action and wait for the next "
+        "screenshot.",
+        "4. **Stay focused** — Do only the assigned task, no side quests.",
+        "5. **Record discoveries** — When you encounter useful information "
+        "during VM interaction (error messages, UI state, discovered paths), "
+        "use `memory_write` to record it. The main agent will see these "
+        "observations in shared memory.",
+        "6. **Complete and return** — When the task is visibly complete, "
+        "call `computer` with `action='done'` and a brief `summary`.",
+        "7. **Be ephemeral** — You will be terminated after returning.",
     ])
 
 
 # ---------------------------------------------------------------------------
-# Action formatting (human description)
+# Output item extraction helpers
 # ---------------------------------------------------------------------------
 
 
-def _describe_action(action: GUIAction) -> str:
-    """One-line human-readable description used in per-turn text."""
-    if isinstance(action, GUIClickAction):
-        return f"click ({action.x}, {action.y}) {action.button}"
-    if isinstance(action, GUITypeAction):
-        return f"type {action.text!r}"
-    if isinstance(action, GUIHotkeyAction):
-        return f"hotkey {'+'.join(action.keys)}"
-    if isinstance(action, GUIScrollAction):
-        return f"scroll {action.direction} {action.amount}"
-    if isinstance(action, GUIDragAction):
+def _extract_actions_from_output(
+    output_items: list[dict[str, Any]],
+) -> list[str]:
+    """Extract human-readable action descriptions from Responses API items."""
+    descs: list[str] = []
+    for item in output_items:
+        item_type = item.get("type", "")
+
+        if item_type == "computer_call":
+            action = item.get("action", {})
+            if isinstance(action, dict):
+                descs.append(_describe_action_dict(action))
+
+        elif item_type == "function_call" and item.get("name") == "computer":
+            try:
+                args = json.loads(item.get("arguments", "{}"))
+                descs.append(_describe_action_dict(args))
+            except (json.JSONDecodeError, TypeError):
+                descs.append("computer(?)")
+
+    return descs
+
+
+def _describe_action_dict(action: dict[str, Any]) -> str:
+    """One-line human-readable description from an action dict."""
+    a = action.get("action") or action.get("type", "")
+    if a in ("click", "double_click", "right_click"):
+        return f"{a} ({action.get('x')}, {action.get('y')})"
+    if a == "type":
+        return f"type {action.get('text', '')!r}"
+    if a == "keypress":
+        keys = action.get("keys", [])
+        return f"keypress {'+'.join(keys) if keys else '?'}"
+    if a == "scroll":
+        return f"scroll ({action.get('scroll_x', 0)}, {action.get('scroll_y', 0)})"
+    if a == "move":
+        return f"move ({action.get('x')}, {action.get('y')})"
+    if a == "drag":
         return (
-            f"drag ({action.start_x}, {action.start_y}) -> "
-            f"({action.end_x}, {action.end_y})"
+            f"drag ({action.get('start_x')}, {action.get('start_y')}) -> "
+            f"({action.get('end_x')}, {action.get('end_y')})"
         )
-    if isinstance(action, GUIWaitAction):
-        return f"wait {action.ms}ms"
-    if isinstance(action, GUIDoneAction):
-        return f"done: {action.summary}" if action.summary else "done"
-    return type(action).__name__
+    if a == "screenshot":
+        return "screenshot"
+    if a == "wait":
+        return f"wait {action.get('ms', action.get('seconds', 1000))}ms"
+    if a == "terminate":
+        return f"terminate ({action.get('status', '')})"
+    return str(action)
 
 
-# ---------------------------------------------------------------------------
-# Screenshot encoding + history pruning
-# ---------------------------------------------------------------------------
+def _is_terminated(output_items: list[dict[str, Any]]) -> bool:
+    """Check if any output item is a terminate action or its result."""
+    for item in output_items:
+        item_type = item.get("type", "")
+
+        # computer_call with terminate action
+        if item_type == "computer_call":
+            action = item.get("action", {})
+            if isinstance(action, dict) and action.get("type") == "terminate":
+                return True
+
+        # function_call with terminate action
+        if item_type == "function_call" and item.get("name") == "computer":
+            try:
+                args = json.loads(item.get("arguments", "{}"))
+                if args.get("action") == "terminate":
+                    return True
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # computer_call_output or function_call_output with terminated flag
+        if item_type in ("computer_call_output", "function_call_output"):
+            output = item.get("output", "")
+            if isinstance(output, dict) and output.get("terminated"):
+                return True
+            if isinstance(output, str):
+                try:
+                    parsed = json.loads(output)
+                    if isinstance(parsed, dict) and parsed.get("terminated"):
+                        return True
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+    return False
 
 
-def _encode_screenshot(png_bytes: bytes) -> dict[str, Any]:
-    """Encode PNG bytes as an OpenAI-compatible image_url content block."""
-    b64 = base64.b64encode(png_bytes).decode("ascii")
-    return {
-        "type": "image_url",
-        "image_url": {"url": f"data:image/png;base64,{b64}"},
-    }
-
-
-_IMAGE_PLACEHOLDER = {"type": "text", "text": "[older screenshot omitted]"}
-
-
-def _prune_images_to_last_n(
-    messages: list[dict[str, Any]], n: int = DEFAULT_IMAGE_HISTORY
-) -> None:
-    """Keep only the last ``n`` image blocks across all messages; replace older
-    ones with a text placeholder. Mutates ``messages`` in place.
-
-    Matches ``only_n_most_recent_images=3`` semantics used by the main agent.
-    """
-    if n < 0:
-        n = 0
-    kept = 0
-    # Walk newest → oldest, keep first n image blocks, replace rest.
-    for msg in reversed(messages):
-        content = msg.get("content")
-        if not isinstance(content, list):
+def _extract_text(output_items: list[dict[str, Any]]) -> str:
+    """Extract text content from message items."""
+    parts: list[str] = []
+    for item in output_items:
+        if item.get("type") != "message":
             continue
-        for i, block in enumerate(content):
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") != "image_url":
-                continue
-            if kept < n:
-                kept += 1
-            else:
-                content[i] = dict(_IMAGE_PLACEHOLDER)
+        content = item.get("content", "")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict):
+                    text = c.get("text", "")
+                    if text:
+                        parts.append(text)
+    return " ".join(parts).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -168,13 +192,18 @@ def _prune_images_to_last_n(
 # ---------------------------------------------------------------------------
 
 
-def _accumulate_usage(usage: SubagentUsage, response: Any) -> None:
-    """Add prompt+completion tokens from a litellm response to ``usage``."""
-    resp_usage = getattr(response, "usage", None)
-    if resp_usage is None:
+def _accumulate_usage(
+    usage: SubagentUsage, result_usage: Any,
+) -> None:
+    """Add tokens from a ComputerAgent result's usage to SubagentUsage."""
+    if result_usage is None:
         return
-    usage.input_tokens += int(getattr(resp_usage, "prompt_tokens", 0) or 0)
-    usage.output_tokens += int(getattr(resp_usage, "completion_tokens", 0) or 0)
+    if isinstance(result_usage, dict):
+        usage.input_tokens += int(result_usage.get("prompt_tokens", 0) or 0)
+        usage.output_tokens += int(result_usage.get("completion_tokens", 0) or 0)
+    else:
+        usage.input_tokens += int(getattr(result_usage, "prompt_tokens", 0) or 0)
+        usage.output_tokens += int(getattr(result_usage, "completion_tokens", 0) or 0)
 
 
 # ---------------------------------------------------------------------------
@@ -201,94 +230,29 @@ class _TranscriptWriter:
             f.write(json.dumps(entry) + "\n")
 
     def write_turn(
-        self, step: int, actions: list[str], raw_choice: Any, is_done: bool
+        self,
+        step: int,
+        actions: list[str],
+        output_items: list[dict[str, Any]],
+        is_done: bool,
     ) -> None:
         ts = datetime.now(timezone.utc).isoformat()
-        # Extract tool_calls arguments from the raw choice for replay/debugging
-        message = getattr(raw_choice, "message", None)
-        tool_calls_raw = None
-        if message is not None:
-            tcs = getattr(message, "tool_calls", None)
-            if tcs:
-                tool_calls_raw = []
-                for tc in tcs:
-                    fn = getattr(tc, "function", None)
-                    if fn:
-                        tool_calls_raw.append({
-                            "id": getattr(tc, "id", ""),
-                            "name": getattr(fn, "name", ""),
-                            "arguments": getattr(fn, "arguments", ""),
-                        })
+        tool_calls_raw: list[dict[str, Any]] = []
+        for item in output_items:
+            if item.get("type") == "function_call" and item.get("name") == "computer":
+                tool_calls_raw.append({
+                    "id": item.get("call_id", ""),
+                    "name": "computer",
+                    "arguments": item.get("arguments", ""),
+                })
         self._append({
             "type": "turn",
             "step": step,
             "timestamp": ts,
             "actions": actions,
             "is_done": is_done,
-            "tool_calls": tool_calls_raw,
+            "tool_calls": tool_calls_raw or None,
         })
-
-
-# ---------------------------------------------------------------------------
-# Message construction helpers
-# ---------------------------------------------------------------------------
-
-
-def _assistant_tool_call_message(choice: Any) -> dict[str, Any]:
-    """Build the assistant message that records a tool_call turn.
-
-    Works for both native litellm objects (choice.message.tool_calls) and our
-    dataclass-style mocks. Returns a message with an empty content string and
-    a tool_calls list faithful to what the model emitted, or — if the model
-    didn't actually emit tool_calls (text-fallback path) — a text-only
-    assistant message.
-    """
-    message = getattr(choice, "message", None)
-    content = "" if message is None else (getattr(message, "content", None) or "")
-    tool_calls = None if message is None else getattr(message, "tool_calls", None)
-
-    if not tool_calls:
-        return {"role": "assistant", "content": content}
-
-    serialized: list[dict[str, Any]] = []
-    for tc in tool_calls:
-        fn = getattr(tc, "function", None)
-        if fn is None:
-            continue
-        serialized.append({
-            "id": getattr(tc, "id", ""),
-            "type": "function",
-            "function": {
-                "name": getattr(fn, "name", ""),
-                "arguments": getattr(fn, "arguments", ""),
-            },
-        })
-    return {"role": "assistant", "content": content, "tool_calls": serialized}
-
-
-def _tool_result_messages(choice: Any, result: str) -> list[dict[str, Any]]:
-    """Build tool-result messages for each tool_call in the assistant turn.
-
-    Returns an empty list if the choice has no tool_calls (text-fallback path).
-    """
-    message = getattr(choice, "message", None)
-    tool_calls = None if message is None else getattr(message, "tool_calls", None)
-    if not tool_calls:
-        return []
-    return [
-        {"role": "tool", "tool_call_id": getattr(tc, "id", ""), "content": result}
-        for tc in tool_calls
-    ]
-
-
-def _user_screenshot_message(png_bytes: bytes, prefix: str) -> dict[str, Any]:
-    return {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": prefix},
-            _encode_screenshot(png_bytes),
-        ],
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -306,139 +270,91 @@ async def run_gui_subagent(
     max_steps: int = DEFAULT_MAX_STEPS,
     thinking_params: dict[str, Any] | None = None,
     parent_session_dir: str | Path | None = None,
+    memory_store: MemoryStore | None = None,
 ) -> str:
-    """Blocking vision-to-action relay loop.
+    """Blocking vision-to-action relay loop via ComputerAgent.
 
-    Each iteration:
-      1. Call ``litellm.acompletion`` with the current messages + gui_action tool.
-      2. Parse the response into one or more ``GUIAction`` via ``parse_gui_response``.
-      3. If any action is ``GUIDoneAction``: execute preceding actions, then
-         complete the run and return the summary.
-      4. Otherwise: execute all actions on ``session``, take a fresh screenshot,
-         append it to messages, prune image history, loop.
+    Creates a lightweight ``ComputerAgent`` with only the computer tool and
+    a minimal system prompt.  ``ComputerAgent`` handles:
+      - Tool schema registration (provider-specific)
+      - Action execution and post-action screenshots
+      - Image history pruning (``only_n_most_recent_images``)
+      - Action normalization (``OperatorNormalizerCallback``)
 
-    GPT-5.4 can emit multiple tool_calls per response (e.g. up, up, up, done).
-    All actions are executed sequentially before the next screenshot — matching
-    how CUA's main agent loop handles multi-action responses.
+    The relay loop iterates ``ComputerAgent.run()`` results, tracking usage
+    and writing a transcript.  Terminates when the model emits a
+    ``terminate`` action or ``max_steps`` is reached.
 
-    Terminates on ``GUIDoneAction``, ``max_steps`` reached, or any LLM/session
-    exception (re-raised after ``registry.fail``).
-
-    Returns the final summary string. Raises the underlying exception on failure.
+    Returns the final summary string.  Raises the underlying exception on
+    failure.
     """
-    import litellm
-
     transcript_path: Path | None = None
     if parent_session_dir is not None:
-        transcript_path = Path(parent_session_dir) / "subagents" / run_id / "transcript.jsonl"
+        transcript_path = (
+            Path(parent_session_dir) / "subagents" / run_id / "transcript.jsonl"
+        )
     transcript = _TranscriptWriter(transcript_path)
 
     usage = SubagentUsage()
     registry.mark_running(run_id)
 
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": _build_system_prompt()},
-        {"role": "user", "content": instruction},
-    ]
-
     try:
-        initial_screenshot = await session.screenshot()
-    except Exception as e:
-        registry.fail(run_id, f"initial screenshot failed: {e}", usage)
-        raise
+        tools: list[Any] = [session._computer]
+        if memory_store is not None:
+            tools.extend([
+                MemorySearchTool(memory_store),
+                MemoryGetTool(memory_store),
+                MemoryWriteTool(memory_store),
+            ])
 
-    messages.append(_user_screenshot_message(initial_screenshot, "Current screenshot:"))
+        agent = ComputerAgent(
+            model=model,
+            tools=tools,
+            instructions=_build_system_prompt(),
+            only_n_most_recent_images=DEFAULT_IMAGE_HISTORY,
+            telemetry_enabled=False,
+            **(thinking_params or {}),
+        )
 
-    for _step in range(max_steps):
-        try:
-            response = await litellm.acompletion(
-                model=model,
-                messages=messages,
-                tools=[gui_action_tool_schema()],
-                max_tokens=1024,
-                temperature=1.0,
-                **(thinking_params or {}),
-            )
-        except Exception as e:
-            registry.fail(run_id, str(e), usage)
-            raise
+        step = 0
+        terminated = False
+        last_text = ""
 
-        _accumulate_usage(usage, response)
+        async for result in agent.run(instruction):
+            output_items = result.get("output", [])
+            _accumulate_usage(usage, result.get("usage"))
 
-        try:
-            choice = response.choices[0]
-        except (AttributeError, IndexError) as e:
-            registry.fail(run_id, f"empty response: {e}", usage)
-            raise
+            actions = _extract_actions_from_output(output_items)
+            text = _extract_text(output_items)
+            if text:
+                last_text = text
+            is_done = _is_terminated(output_items)
 
-        try:
-            actions = parse_gui_response(choice)
-        except ValueError as e:
-            registry.fail(run_id, f"parse error: {e}", usage)
-            raise
+            if actions:
+                print(f"  [GUI {run_id}] step {step}: {actions}")
+                transcript.write_turn(step, actions, output_items, is_done)
+                step += 1
 
-        # Split at first GUIDoneAction — execute everything before it.
-        to_execute: list[GUIAction] = []
-        done_action: GUIDoneAction | None = None
-        for a in actions:
-            if isinstance(a, GUIDoneAction):
-                done_action = a
+            if is_done:
+                terminated = True
                 break
-            to_execute.append(a)
 
-        # Debug: log actions for this step
-        descs = [_describe_action(a) for a in to_execute]
-        if done_action:
-            descs.append(f"done: {done_action.summary}")
-        print(f"  [GUI {run_id}] step {_step}: {descs}")
+            if step >= max_steps:
+                break
 
-        # Persist turn to disk transcript.
-        transcript.write_turn(_step, descs, choice, is_done=done_action is not None)
+        if terminated:
+            summary = last_text or "(no summary)"
+        elif step >= max_steps:
+            summary = f"max_steps ({max_steps}) reached without completion"
+        else:
+            summary = last_text or "(completed)"
 
-        # Record the assistant turn + tool acks in transcript.
-        messages.append(_assistant_tool_call_message(choice))
-        messages.extend(_tool_result_messages(choice, "ok"))
+        registry.complete(run_id, summary, usage)
+        return summary
 
-        # Execute all non-done actions sequentially.
-        last_action_desc = ""
-        for action in to_execute:
-            try:
-                await execute_gui_action(action, session)
-                last_action_desc = _describe_action(action)
-            except Exception as e:
-                registry.fail(run_id, f"execute error: {e}", usage)
-                raise
-
-        if done_action is not None:
-            summary = done_action.summary or "(no summary)"
-            registry.complete(run_id, summary, usage)
-            return summary
-
-        # Take one screenshot after the entire batch.
-        action_desc = (
-            last_action_desc
-            if len(to_execute) == 1
-            else f"{len(to_execute)} actions (last: {last_action_desc})"
-        )
-        try:
-            new_screenshot = await session.screenshot()
-        except Exception as e:
-            registry.fail(run_id, f"screenshot failed: {e}", usage)
-            raise
-
-        messages.append(
-            _user_screenshot_message(
-                new_screenshot,
-                f"After {action_desc}. Current screenshot:",
-            )
-        )
-        _prune_images_to_last_n(messages, n=DEFAULT_IMAGE_HISTORY)
-    else:
-        partial = f"max_steps ({max_steps}) reached without completion"
-        registry.complete(run_id, partial, usage)
-        return partial
-
-    return ""  # unreachable — both for/else branches return; satisfies type checkers
+    except Exception as e:
+        registry.fail(run_id, str(e), usage)
+        raise
 
 
 __all__ = [
