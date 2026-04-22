@@ -245,6 +245,11 @@ class OpenClawComputerAgent(ComputerAgent):
             # Log model-emitted assistant content/tool calls to transcript.
             self._log_step_to_transcript(result)
 
+            # Log bare assistant text to stdout (tool calls are already
+            # logged by ToolLoggingCallback; text-only turns had no console
+            # visibility, which masked e.g. the DONE signal).
+            self._log_assistant_text(result.get("output", []))
+
             new_items += result.get("output", [])
             output_call_ids = get_output_call_ids(result.get("output", []))
 
@@ -423,6 +428,42 @@ class OpenClawComputerAgent(ComputerAgent):
                 idx = cb.current_artifact - 1  # just incremented by _save_artifact
                 return str(turn_dir / f"{idx:04d}_{name}.png")
         return None
+
+    @staticmethod
+    def _log_assistant_text(output: List[Dict[str, Any]]) -> None:
+        """Print any bare assistant text to stdout.
+
+        ToolLoggingCallback surfaces every function_call; bare text messages
+        (including the DONE termination signal) had no console hook, so the
+        operator only saw tool calls and infra lines. This adds one
+        ``[Agent]`` line per non-empty text message, truncated to keep the
+        log readable.
+        """
+        MAX_LEN = 500
+        for item in output:
+            if item.get("type") != "message":
+                continue
+            content = item.get("content", "")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        t = part.get("text", "")
+                        if t:
+                            parts.append(t)
+                text = "\n".join(parts)
+            else:
+                text = ""
+            text = text.strip()
+            if not text:
+                continue
+            shown = text if len(text) <= MAX_LEN else text[:MAX_LEN] + f"... [+{len(text) - MAX_LEN} chars]"
+            # Single-line form for grep friendliness; preserve embedded
+            # newlines by replacing them with a visible marker.
+            shown_inline = shown.replace("\n", " ⏎ ")
+            print(f"[Agent] {shown_inline}")
 
     def _log_step_to_transcript(self, result: Dict[str, Any]) -> None:
         """Log a step's output to the session transcript.
