@@ -227,3 +227,48 @@ class TestHandleFunctionCallScreenshot:
 
         payload = _json.loads(call_output["output"])
         assert payload == {"clicked": True, "target_x": 100, "target_y": 200}
+
+
+class TestNormalizeKey:
+    """Case-insensitive arrow-key aliasing in cuaComputerHandler._normalize_key.
+
+    Regression guard for the uppercase-only dict probe that silently passed
+    ``arrowup`` / ``ArrowUp`` through to the VM raw (pynput has no such key
+    name), so only the literal ``ARROWUP`` spelling moved the cursor.
+    """
+
+    @pytest.mark.parametrize(
+        "inp,expected",
+        [
+            # Arrow aliases — every casing must resolve to the canonical form.
+            ("ARROWUP", "up"),
+            ("arrowup", "up"),
+            ("ArrowUp", "up"),
+            ("ARROWDOWN", "down"),
+            ("arrowdown", "down"),
+            ("ArrowDown", "down"),
+            ("ARROWLEFT", "left"),
+            ("arrowleft", "left"),
+            ("ARROWRIGHT", "right"),
+            ("arrowright", "right"),
+            # Canonical forms round-trip through the fallback unchanged.
+            ("up", "up"),
+            ("down", "down"),
+            # Non-arrow regression — fallback still lowercases everything.
+            ("enter", "enter"),
+            ("ENTER", "enter"),
+            ("Enter", "enter"),
+            ("ctrl", "ctrl"),
+            ("CTRL", "ctrl"),
+            ("space", "space"),
+            # Single-character keys preserve expected lowercasing behavior.
+            ("a", "a"),
+            ("A", "a"),
+        ],
+    )
+    def test_normalize_key_case_insensitive(self, inp, expected):
+        from agent.computers.cua import cuaComputerHandler
+
+        # Bypass __init__ — _normalize_key is pure and needs no interface.
+        handler = cuaComputerHandler.__new__(cuaComputerHandler)
+        assert handler._normalize_key(inp) == expected

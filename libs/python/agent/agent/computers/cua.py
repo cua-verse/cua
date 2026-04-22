@@ -93,16 +93,17 @@ class cuaComputerHandler(AsyncComputerHandler):
     def _normalize_key(self, key: str) -> str:
         """Normalize key names from OpenAI format to interface format.
         """
-        # Mapping from OpenAI/DOM key names to interface key names
+        # Mapping from OpenAI/DOM key names to interface key names.
+        # Dict keys must be UPPERCASE; probe key is upper()'d so every casing
+        # variant (ArrowUp, arrowup, ARROWUP) resolves to the canonical form.
         key_mapping = {
             "ARROWUP": "up",
             "ARROWDOWN": "down",
             "ARROWLEFT": "left",
             "ARROWRIGHT": "right",
         }
-        
-        # Return mapped key if it exists, otherwise return lowercase version
-        return key_mapping.get(key, key.lower())
+
+        return key_mapping.get(key.upper(), key.lower())
 
     async def keypress(self, keys: Union[List[str], str]) -> None:
         """Press key combination."""
