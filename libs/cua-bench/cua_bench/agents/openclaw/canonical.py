@@ -496,6 +496,9 @@ def _normalize_content(
                 text=block.get("text", ""),
             ))
 
+        elif btype in ("image_url", "image", "input_image", "computer_screenshot"):
+            blocks.append(TextBlock(type="text", text=f"[{btype}]"))
+
         else:
             # Unknown block type — preserve as text
             text = block.get("text", block.get("content", str(block)))

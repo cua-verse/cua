@@ -101,6 +101,7 @@ async def run_general_subagent(
             thinking_params=thinking_params,
             initial_screenshot_paths=initial_screenshot_paths,
         )
+        registry.attach_inbox(run_id, session.inbox)
         result_text = await session.run()
         print(
             f"[Subagent] General subagent {run_id} completed "

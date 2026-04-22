@@ -1518,7 +1518,7 @@
         "Level 2: VM test — run_magic_tower.sh 50 — after any GUI delegation, the main agent's next predict_step input includes a fresh screenshot (verify via trajectory API payload)"
       ],
       "priority": 20,
-      "passes": false,
+      "passes": true,
       "notes": "Three changes: (1) General subagent screenshot attachment — the main agent's delegate_general tool optionally accepts screenshots (base64) that get injected into the subagent's context as vision content. This enables 'analyze this screenshot' delegation without the subagent having VM access. (2) GUI subagent history pruning — keep last 3 screenshots in the relay loop to avoid context overflow on long GUI sequences. Note: already implemented in US-SUB-004 (subagent_gui.py:389 _prune_images_to_last_n); this story just adds an assertion test. (3) Post-delegation screenshot — after GUI subagent finishes and control returns to main agent, automatically take a screenshot so the main agent sees the current VM state. This is critical because the VM state changed during delegation and the main agent's last screenshot is stale."
     },
     {
@@ -1571,7 +1571,7 @@
         "Level 2: VM test — run_magic_tower.sh 50 — if the main agent spawns a general subagent and later steers it, the subagent's transcript shows the steered message injected between its own turns"
       ],
       "priority": 22,
-      "passes": false,
+      "passes": true,
       "notes": "V2 delegation capability, deferred until US-SUB-005 validates V1 in real VM runs. Steering matters mainly for long interactive subagent sessions; not wiring it in V1 avoids speculative complexity in the loop. Reuses OpenClaw's design: inbox queue polled between turns (not mid-turn), single-message-per-turn guard to prevent message storms, same target-resolution precedence (exact run_id → label → most recent active) and a character cap on the message. No kill-like escalation path here — SubagentsTool(action=kill) handles termination; steer is for refinement. Loop shape in US-SUB-008 should be designed so adding the inbox poll is mechanical (single line between API calls, no restructuring)."
     },
     {
@@ -1601,8 +1601,86 @@
         "Level 2: VM smoke test — smoke/vm_action_test.py passes all action types (click, keypress single/combo, scroll, drag, type, wait, done)"
       ],
       "priority": 23,
-      "passes": false,
+      "passes": true,
       "notes": "Eliminates schema divergence between main agent and GUI subagent. Key insight: the model already knows how to use the `computer` tool from training — using a different schema (gui_action with different action names, field names, scroll model) forces it to learn a new interface and causes bugs (keypress vs hotkey confusion, ARROWLEFT not normalized, scroll_x/scroll_y vs direction/amount mismatch). Merging schemas means: (1) one action vocabulary (click, double_click, right_click, keypress, scroll, type, drag, wait, done), (2) one scroll format (scroll_x/scroll_y), (3) one key normalization path, (4) the model's existing training on the computer tool transfers directly. The GUIAction dataclasses and three parse paths (computer_call, function_call, text) can be replaced by a single dict-based dispatch. The text fallback path (c) may be dropped since the model always uses function calling with the tool schema."
+    },
+    {
+      "id": "US-SUB-011",
+      "title": "GUI Subagent — Memory Tool Access",
+      "description": "As the agent harness, I want the GUI subagent to have access to memory_write and memory_search tools alongside the computer tool, so that it can record useful observations discovered during VM interaction (e.g. UI state, error messages, discovered information) without waiting for the done action.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui.py (relay loop — add memory tools to litellm tools list)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui_protocol.py (parse path �� branch on tool name: computer vs memory)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_tools.py (DelegateGUITool — pass memory_store)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/tools.py (build_tools — thread memory_store to DelegateGUITool)"
+        ],
+        "depends": "US-SUB-010 (unified computer tool schema), US-SUB-004 (relay loop)",
+        "reference": "OpenClaw pi-tools.policy.ts:64-98 — subagents at depth 1+ get full tool access including memory"
+      },
+      "acceptanceCriteria": [
+        "Level 1: GUI subagent litellm call includes memory_write and memory_search tool schemas alongside computer",
+        "Level 1: Relay loop dispatches memory tool calls via BaseTool.call() and computer tool calls via execute_gui_action()",
+        "Level 1: Memory writes from GUI subagent land in the same MemoryStore as the main agent",
+        "Level 1: System prompt updated to mention memory tools and when to use them",
+        "Level 1: All existing GUI protocol and relay tests pass (no regression)",
+        "Level 2: VM smoke test — GUI subagent writes a memory entry during a relay run"
+      ],
+      "priority": 25,
+      "passes": true,
+      "notes": "Key implementation: in the relay loop, after getting tool_calls from litellm, check tool name — 'computer' goes through parse_gui_response + execute_gui_action, 'memory_write'/'memory_search' go through BaseTool.call(). The parse path already handles multiple tool_calls per turn."
+    },
+    {
+      "id": "US-SUB-012",
+      "title": "Subagent — Structured Result Injection & Session History",
+      "description": "As the agent harness, I want both general and GUI subagent completion results to be injected into the parent agent’s conversation with structured metadata (status, stats, task label) matching OpenClaw’s AgentInternalEvent pattern, and for the parent agent to be able to inspect subagent transcripts via a sessions_history mechanism.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (_drain_completions — current plain-text injection for both general and GUI runs)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_registry.py (SubagentRun — has usage/timing data not yet surfaced)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_tools.py (SubagentsTool — currently list/kill only)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui.py (relay loop — writes transcript JSONL)"
+        ],
+        "depends": "US-SUB-005 (delegation tools), US-SUB-008 (persistent session engine), US-SUB-013 (GUI completions enter drain queue)",
+        "reference": "OpenClaw subagent-announce.ts:498-557 (AgentInternalEvent construction); internal-events.ts:43-68 (INTERNAL_RUNTIME_CONTEXT wrapping); pi-tools.policy.ts:317-338 (sessions_history tool)"
+      },
+      "acceptanceCriteria": [
+        "Level 1: Completion messages for both general and GUI subagents include token usage, duration, and model in addition to status and result text",
+        "Level 1: Completion messages are wrapped with a structured delimiter (e.g. [Subagent Result Begin/End]) so the main agent can distinguish them from regular user messages",
+        "Level 1: SubagentsTool gains a \"history\" action that returns the last N transcript entries for a given run_id (works for both general and GUI runs)",
+        "Level 1: History action strips base64 image data and truncates long tool results to stay within token budget",
+        "Level 1: All existing drain and subagent tool tests pass (no regression)",
+        "Level 2: VM test — main agent receives structured subagent results with usage stats after both delegate_general and delegate_gui complete"
+      ],
+      "priority": 26,
+      "passes": false,
+      "notes": "Closes the gap between our simple [Subagent Result] text injection and OpenClaw’s AgentInternalEvent system. Key additions: (1) structured metadata in drain messages (usage, duration, model) for both general and GUI runs, (2) sessions_history equivalent via SubagentsTool \"history\" action reading from transcript JSONL files. The parent can then inspect what any subagent actually did, not just the final result. US-SUB-013 already routes GUI completions through the same drain queue as general runs, so the structured formatting applies uniformly."
+    },
+    {
+      "id": "US-SUB-013",
+      "title": "Async DelegateGUITool — Unblock General Subagents",
+      "description": "As the agent harness, I want DelegateGUITool to be fire-and-forget (like DelegateGeneralTool) so that general subagent asyncio.Tasks can make progress while a GUI delegation is running, instead of being starved by a blocking future.result() call on the main event loop thread.",
+      "context": {
+        "existingFiles": [
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_tools.py (DelegateGUITool — was blocking via ThreadPoolExecutor)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_registry.py (completion queue — GENERAL-only guard)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py (_drain_completions, _drain_post_delegation)",
+          "submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md (delegate_gui docs)"
+        ],
+        "depends": "US-SUB-005 (delegation tools), US-SUB-006 (cross-subagent context)",
+        "planFile": "docs/plan/US-SUB-013-async-gui-tool.md",
+        "reference": "DelegateGeneralTool (same file) — proven fire-and-forget pattern via loop.create_task()"
+      },
+      "acceptanceCriteria": [
+        "Level 1: DelegateGUITool.call() returns {status: accepted} immediately instead of blocking",
+        "Level 1: GUI completions push to registry._completion_queue (GENERAL-only guard removed from complete()/fail())",
+        "Level 1: _drain_completions() and _drain_post_delegation() log drained messages to session transcript",
+        "Level 1: AGENTS.md documents delegate_gui as async with VM-occupied constraint",
+        "Level 1: All existing drain, tool, and GUI subagent tests pass",
+        "Level 2: VM test — delegate_gui returns accepted, general subagent completes while GUI is running, [Subagent Result] appears in transcript for both types"
+      ],
+      "priority": 24,
+      "passes": true
     }
   ]
 }

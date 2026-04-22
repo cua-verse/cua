@@ -1368,3 +1368,64 @@
   - `_TranscriptWriter` uses `None` as a no-op sentinel — when `parent_session_dir` is not provided, all `write_turn` calls are silent no-ops with no file I/O overhead
   - The `hotkey`→`keypress` rename in tool schema needed a backward-compat alias in the function-call parse path since old conversations may still emit `hotkey`; both names now accepted
 ---
+
+## 2026-04-21 - US-SUB-010: GUI Subagent Unified Computer Tool Schema
+- Replaced the custom `gui_action` tool schema in the GUI subagent with the main agent's `computer` tool schema from `unified.py`. The vision model now sees an identical interface (same action names, field names, scroll model) in both the main agent and GUI subagent.
+- Removed all 7 GUIAction dataclasses (GUIClickAction, GUITypeAction, GUIHotkeyAction, GUIScrollAction, GUIWaitAction, GUIDragAction, GUIDoneAction). Replaced with plain `dict[str, Any]` throughout.
+- Dispatch now goes through `cuaComputerHandler` (created from `session.computer` via `make_computer_handler()`) — identical dispatch interface as the main agent. No per-action translation layer needed (key normalization, scroll format, drag coordinates all handled internally by the handler).
+- Action enum: `click, double_click, right_click, type, keypress, scroll, move, drag, screenshot, wait, done`. `done` replaces `terminate` (relay termination). `screenshot` is a no-op (relay takes screenshot every turn anyway). `move` added for hover actions.
+- Three parse paths preserved: (a) computer_call (GPT-5.4 native), (b) function_call (accepts both `computer` and legacy `gui_action` tool names, both `action` and `action_type` fields), (c) structured text fallback.
+- `_ACTION_PARAM_MAP` + `getattr(handler, action_type)(**params)` dispatch pattern adopted from `agent.py:798-828`.
+- Schema function `computer_tool_schema(width, height, environment)` queries real dimensions from handler at startup.
+- 99 tests (71 protocol + 28 relay) all passing. Full suite: 947/947 passing.
+- **Files changed (submodule):**
+  - REWRITE `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui_protocol.py` (remove dataclasses, computer schema, dict-based dispatch via cuaComputerHandler)
+  - REWRITE `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui.py` (handler creation, dict-based action checks, updated system prompt)
+- **Files changed (parent):**
+  - REWRITE `tests/test_subagent_gui_protocol.py` (71 tests migrated to dict-based API)
+  - REWRITE `tests/test_subagent_gui.py` (28 tests updated for handler dispatch)
+  - UPDATE `smoke/vm_action_test.py` (unified schema, handler dispatch, new action types)
+- **Learnings for future iterations:**
+  - `session.computer` property on `RemoteDesktopSession` exposes the underlying `Computer` SDK instance, enabling creation of `cuaComputerHandler` — the same dispatch interface the main agent uses. This avoids maintaining a separate translation layer between model output and session methods.
+  - Backward-compat aliases (`hotkey`→`keypress`, `terminate`→`done`, `gui_action` tool name, `action_type` field) are handled at the normalization layer in `_normalize_action_dict()`. The schema only advertises the canonical names.
+  - `_INT_FIELDS` frozenset used to coerce string coordinates/ms values to int during normalization — some models emit numbers as strings in JSON.
+  - `wait` dispatches to `asyncio.sleep(ms/1000)` in the protocol, not to `handler.wait()` — the handler's wait method may not exist or may have different semantics depending on the Computer implementation.
+---
+## 2026-04-22 - US-SUB-013 (in progress)
+- TODO: test whether nudging AGENTS.md toward `computer(action="wait", ms=<duration>)` reduces step waste when the main agent is idle waiting for a GUI subagent. VM test showed the model burned ~60/100 steps on rapid-fire `memory_write` busywork. `wait` with a duration would sleep wall-clock time, giving the subagent time to finish and costing fewer steps.
+---
+
+## 2026-04-22 - US-SUB-009: Subagent Mid-Stream Steering
+- Implemented the `steer` action for `SubagentsTool`, enabling the main agent to send follow-up messages into running general or GUI subagents mid-flight without spawning a new subagent.
+- `SubagentRegistry` gains `attach_inbox(run_id, queue)` and `get_inbox(run_id)`. The inbox is cleaned up automatically on terminal state transitions (complete/fail/kill).
+- `GeneralSubagentSession` gains `self._inbox: asyncio.Queue[str]` and `_poll_inbox()`. `_poll_inbox` is called once per loop iteration (single-message-per-turn guard) and appends the steer message to `self._messages` before the next LLM call.
+- `SteerInboxCallback(AsyncCallbackHandler)` added to `subagent_gui.py` — hooks into `on_run_continue` to inject steer messages into GUI subagent turns via `new_items`.
+- `run_general_subagent` wrapper now calls `registry.attach_inbox(run_id, session.inbox)` before `session.run()`.
+- `run_gui_subagent` creates its own `asyncio.Queue` inbox, attaches it to the registry, and passes a `SteerInboxCallback` to `ComputerAgent`.
+- `SubagentsTool._handle_steer` resolves targets using `_resolve_steer_target`: exact run_id → label (case-insensitive) → run_id prefix → `"last"` (most recent active). Validates message length against `MAX_STEER_MESSAGE_CHARS = 4000`.
+- `AGENTS.md` updated to document the `steer` action.
+- Collateral improvements shipped in this story: (1) `has_done_signal` refactored out of `openclaw_agent.py` into `agent_loop.py` as single source of truth; (2) DONE-based loop termination in `OpenClawComputerAgent.run()` replaces upstream "last item is assistant" exit; (3) `_strip_images_from_messages` in `agent_loop.py` replaces base64 image blocks with text placeholders before compaction so token budget matches post-normalization reality; (4) `_normalize_content` in `canonical.py` now handles `image_url`, `image`, `input_image`, `computer_screenshot` blocks as text placeholders.
+- 264 tests passing (85 new tests across registry, session, tools, gui, canonical test files).
+- **Files changed (submodule):**
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_registry.py` (attach_inbox, get_inbox, cleanup on terminal)
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_session.py` (inbox property, _poll_inbox, asyncio import)
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_general.py` (attach_inbox call)
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_gui.py` (SteerInboxCallback, inbox creation, callbacks=[])
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/subagent_tools.py` (steer action, _resolve_steer_target, _handle_steer, MAX_STEER_MESSAGE_CHARS)
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/agent_loop.py` (has_done_signal, DONE-based loop exit, _strip_images_from_messages, image blocks in compaction path)
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/canonical.py` (image block types → text placeholders in _normalize_content)
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw_agent.py` (use has_done_signal from agent_loop, remove private _check_done)
+  - MODIFY `submodules/cua/libs/cua-bench/cua_bench/agents/openclaw/AGENTS.md` (steer action docs)
+- **Files changed (parent):**
+  - EXTEND `tests/test_subagent_registry.py` (TestInboxManagement — 6 tests)
+  - EXTEND `tests/test_subagent_session.py` (TestInboxPolling — 4 tests)
+  - EXTEND `tests/test_subagent_tools.py` (TestSubagentsToolSteer — 15 tests)
+  - EXTEND `tests/test_subagent_gui.py` (TestSteerInboxCallback, TestGuiInboxAttachment — 4+1 tests)
+  - EXTEND `tests/test_subagent_general.py` (TestWrapperAttachesInbox — 1 test)
+  - EXTEND `tests/test_canonical_format.py` (TestNormalizeToCanonical image blocks, TestCompactionImageRoundTrip — 7 tests)
+- **Learnings for future iterations:**
+  - `SteerInboxCallback` hooks into `on_run_continue` (called once per ComputerAgent iteration, before `predict_step`). This is structurally the same single-message-per-turn guard as the session loop's `_poll_inbox`. Both implementations are kept minimal — no lock needed since each agent is single-threaded within its asyncio loop.
+  - `_resolve_steer_target` searches ALL runs (active + terminal) so the caller can produce specific error messages. Use `_ACTIVE_STATUSES` frozenset for the "already finished" vs "unknown" distinction.
+  - The `_strip_images_from_messages` + `_normalize_content` fix for base64 leaking into compaction is important: without it, each screenshot in the transcript counted ~1200 tokens in budget estimation but became ~3 tokens after normalization, causing systematic over-compaction. The fix makes budget estimates match post-normalization reality.
+  - `has_done_signal` as a shared utility avoids drift between `OpenClawComputerAgent.run()` (loop exit) and `OpenClawAgent.perform_task()` (step exit). Always use the one in `agent_loop.py`.
+---

@@ -26,6 +26,7 @@ minus Computer/Responses-API machinery; reuses the VM-agnostic
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json as _json
 import os
@@ -213,6 +214,7 @@ class GeneralSubagentSession:
         # Public counters / handles.
         self.usage = SubagentUsage()
         self.compaction_count = 0
+        self._inbox: asyncio.Queue[str] = asyncio.Queue()
 
         # Subagent-scoped session — transcript at
         # <parent_session_dir>/subagents/<run_id>/transcript.jsonl
@@ -250,6 +252,25 @@ class GeneralSubagentSession:
         self._tool_schemas = _tools_to_litellm_schema(self._filtered_tools)
         self._tool_map = {t.name: t for t in self._filtered_tools}
 
+    @property
+    def inbox(self) -> "asyncio.Queue[str]":
+        """Steer inbox — exposed so the wrapper can attach it to the registry."""
+        return self._inbox
+
+    def _poll_inbox(self) -> None:
+        """Consume at most one steer message from the inbox (US-SUB-009).
+
+        Called once per loop iteration so the single-message-per-turn guard
+        is enforced structurally. Additional queued messages are consumed on
+        subsequent turns.
+        """
+        try:
+            msg = self._inbox.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        self._messages.append({"role": "user", "content": msg})
+        self.session_mgr.append_message("user", f"[Steer] {msg}")
+
     # ------------------------------------------------------------------
     # Loop
     # ------------------------------------------------------------------
@@ -278,6 +299,9 @@ class GeneralSubagentSession:
                 and self.compaction_count < self._max_compactions
             ):
                 await self._compact_in_place()
+
+            # 1.5. Poll inbox for steer messages (at most one per turn).
+            self._poll_inbox()
 
             # 2. Pre-call token estimate. Single source of truth for
             #    current_tokens / needs_compaction; also truncates oversized

@@ -48,6 +48,7 @@ from .subagent_gui import run_gui_subagent
 from .subagent_registry import (
     SubagentLimitError,
     SubagentRegistry,
+    SubagentRun,
     SubagentStatus,
     SubagentType,
 )
@@ -380,13 +381,58 @@ class DelegateGUITool(BaseTool):
 
 
 # ---------------------------------------------------------------------------
-# subagents (list / kill)
+# subagents (list / kill / steer)
 # ---------------------------------------------------------------------------
+
+MAX_STEER_MESSAGE_CHARS = 4_000
+
+_ACTIVE_STATUSES = frozenset({SubagentStatus.PENDING, SubagentStatus.RUNNING})
+
+
+def _resolve_steer_target(
+    registry: SubagentRegistry,
+    target: str,
+) -> SubagentRun | None:
+    """Resolve a steer target to a SubagentRun (US-SUB-009).
+
+    Searches ALL runs (active + terminal) so the caller can produce
+    specific error messages (e.g. "already finished" vs "unknown").
+
+    Precedence (simplified from OpenClaw's ``resolveSubagentTargetFromRuns``):
+    1. Exact run_id match (any status)
+    2. Exact label match (case-insensitive) — active first, then terminal
+    3. Run ID prefix match — active first, then terminal
+    4. ``"last"`` keyword → most recently created active general run
+    """
+    run = registry.get_run(target)
+    if run is not None:
+        return run
+
+    all_runs = registry.list_runs()
+    active = [r for r in all_runs if r.status in _ACTIVE_STATUSES]
+    terminal = [r for r in all_runs if r.status not in _ACTIVE_STATUSES]
+
+    lowered = target.lower()
+
+    if lowered == "last":
+        return max(active, key=lambda r: r.created_at) if active else None
+
+    for pool in (active, terminal):
+        for r in pool:
+            if r.label and r.label.lower() == lowered:
+                return r
+
+    for pool in (active, terminal):
+        for r in pool:
+            if r.run_id.startswith(target):
+                return r
+
+    return None
 
 
 @register_tool("subagents")
 class SubagentsTool(BaseTool):
-    """Inspect or cancel active subagent runs (list / kill)."""
+    """Inspect, cancel, or steer active subagent runs."""
 
     def __init__(
         self,
@@ -399,11 +445,13 @@ class SubagentsTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Inspect or cancel subagent runs. "
-            "action='list' returns active (running/pending) and recent "
-            "(terminal) runs for debugging. action='kill' cancels a runaway "
-            "general subagent. Prefer letting general subagents finish on "
-            "their own — kill only when you're sure a run is stuck."
+            "Inspect, cancel, or steer subagent runs. "
+            "action='list' returns active and recent runs. "
+            "action='kill' cancels a runaway general subagent. "
+            "action='steer' sends a follow-up message into a running "
+            "subagent (general or GUI) to refine or redirect its work "
+            "mid-flight. Target can be a run_id, label, run_id prefix, "
+            "or 'last'."
         )
 
     @property
@@ -413,12 +461,22 @@ class SubagentsTool(BaseTool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list", "kill"],
-                    "description": "'list' (default) or 'kill'.",
+                    "enum": ["list", "kill", "steer"],
+                    "description": "'list' (default), 'kill', or 'steer'.",
                 },
                 "target": {
                     "type": "string",
-                    "description": "Required for action='kill'. The run_id to cancel.",
+                    "description": (
+                        "Required for kill/steer. "
+                        "A run_id, label, run_id prefix, or 'last'."
+                    ),
+                },
+                "message": {
+                    "type": "string",
+                    "description": (
+                        "Required for steer. The follow-up message to "
+                        "inject into the running subagent's conversation."
+                    ),
                 },
             },
             "required": [],
@@ -432,7 +490,7 @@ class SubagentsTool(BaseTool):
             active: list[dict] = []
             recent: list[dict] = []
             for run in self._registry.list_runs():
-                if run.status in (SubagentStatus.PENDING, SubagentStatus.RUNNING):
+                if run.status in _ACTIVE_STATUSES:
                     active.append(run.to_dict())
                 else:
                     recent.append(run.to_dict())
@@ -457,6 +515,56 @@ class SubagentsTool(BaseTool):
             self._registry.kill_run(target)
             return {"status": "ok", "killed": target}
 
+        if action == "steer":
+            return self._handle_steer(params_dict)
+
         return {"status": "error", "reason": f"unknown action: {action}"}
+
+    def _handle_steer(self, params_dict: dict) -> dict:
+        target = params_dict.get("target")
+        if not isinstance(target, str) or not target:
+            return {
+                "status": "error",
+                "reason": "target is required for action='steer'",
+            }
+
+        message = params_dict.get("message")
+        if not isinstance(message, str) or not message.strip():
+            return {
+                "status": "error",
+                "reason": "message is required for action='steer'",
+            }
+
+        if len(message) > MAX_STEER_MESSAGE_CHARS:
+            return {
+                "status": "error",
+                "reason": (
+                    f"message too long ({len(message)} chars, "
+                    f"max {MAX_STEER_MESSAGE_CHARS})"
+                ),
+            }
+
+        run = _resolve_steer_target(self._registry, target)
+        if run is None:
+            return {"status": "error", "reason": f"unknown target: {target}"}
+
+        if run.status not in _ACTIVE_STATUSES:
+            return {
+                "status": "error",
+                "reason": (
+                    f"target '{target}' ({run.run_id}) already "
+                    f"{run.status.value} — cannot steer a finished run"
+                ),
+            }
+
+        inbox = self._registry.get_inbox(run.run_id)
+        if inbox is None:
+            return {
+                "status": "error",
+                "reason": "no inbox for target (run may have just finished)",
+            }
+
+        inbox.put_nowait(message)
+        return {"status": "ok", "steered": run.run_id}
 
 

@@ -81,10 +81,11 @@ Returns immediately with `{status: accepted, run_id, note}`. Keep working — **
 
 Spawns a GUI automation subagent driven by a vision model. It takes over the VM for a bounded number of steps (default 15) to perform a focused GUI sequence — open an app, fill a form, click through a wizard. Returns immediately with `{status: accepted, run_id, note}`. Keep working on non-VM tasks — **do NOT poll**. When the subagent finishes, its result is injected as a `[Subagent Result]` user message followed by a fresh VM screenshot on a later turn. While the GUI subagent is running, the VM is occupied — **do not call `delegate_gui` again or use `computer` directly until it completes**.
 
-### `subagents(action=list | kill, target=...)` — observability + cancel
+### `subagents(action=list | kill | steer, target=..., message=...)` — observability + control
 
 - `action=list` returns active (running/pending) and recent (terminal) runs. **Do NOT poll** during normal operation — results auto-announce. Use `list` only if you suspect something is stuck.
 - `action=kill` (with `target=<run_id>`) cancels a runaway general subagent. The subagent transitions to `killed` and no completion message will be announced for that run.
+- `action=steer` (with `target` and `message`) sends a follow-up message into a **running subagent** (general or GUI) to refine or redirect its work mid-flight. The message is injected between the subagent's own turns. Target can be a run_id, label, run_id prefix, or `"last"`. Max 4000 chars.
 
 ### Rules of thumb
 - Don't delegate trivial things you can do in a single tool call.

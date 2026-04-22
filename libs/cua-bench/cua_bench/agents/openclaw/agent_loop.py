@@ -49,6 +49,26 @@ from .session import (
 from .subagent_registry import SubagentRegistry
 
 
+def has_done_signal(output: List[Dict[str, Any]]) -> bool:
+    """Return True if the assistant output contains the DONE completion signal.
+
+    Single source of truth for OpenClaw's task-completion detection. Used by
+    both the inner agent loop (to break the generator) and the outer
+    OpenClawAgent.perform_task consumer (to classify the run as completed).
+    """
+    for item in output:
+        if item.get("type") != "message":
+            continue
+        content = item.get("content", "")
+        if isinstance(content, str):
+            if "DONE" in content:
+                return True
+        elif isinstance(content, list) and content:
+            first = content[0]
+            text = first.get("text", "") if isinstance(first, dict) else str(first)
+            if "DONE" in text:
+                return True
+    return False
 
 
 class OpenClawComputerAgent(ComputerAgent):
@@ -161,7 +181,14 @@ class OpenClawComputerAgent(ComputerAgent):
         }
         await self._on_run_start(run_kwargs, items)
 
-        while new_items[-1].get("role") != "assistant" if new_items else True:
+        # Loop until the model emits an explicit DONE signal (or the outer
+        # consumer breaks out via max_steps). The upstream CUA exit condition
+        # `new_items[-1].role != "assistant"` terminates on any tool-less
+        # assistant turn, which silently killed runs whenever the model
+        # emitted bare text (e.g., the [!silent] memory-flush sentinel after
+        # a contaminated compaction). OpenClaw semantics want "stop on DONE,"
+        # not "stop when tool calls stop."
+        while True:
             should_continue = await self._on_run_continue(run_kwargs, items, new_items)
             if not should_continue:
                 break
@@ -258,6 +285,19 @@ class OpenClawComputerAgent(ComputerAgent):
                 items = items + new_items
                 new_items = []
                 continue
+
+            # === DONE-BASED TERMINATION ===
+            # Replaces the upstream "last item is assistant" exit. Only an
+            # explicit DONE in the assistant output ends the generator from
+            # inside; max_steps in the outer consumer is the other ceiling.
+            if has_done_signal(result.get("output", [])):
+                break
+
+            # TODO(bug-2-nudge): when the turn produced neither a tool call
+            # nor a DONE, inject a continuation nudge as a user message so
+            # the next predict_step has a user turn to respond to. Without
+            # one, bare-text turns leave new_items ending on an assistant
+            # message, which some APIs reject. Pick wording before enabling.
 
         await self._on_run_end(loop_kwargs, items, new_items)
 
@@ -618,6 +658,43 @@ class OpenClawComputerAgent(ComputerAgent):
         return items
 
 
+_IMAGE_BLOCK_TYPES = frozenset({"image_url", "image", "input_image", "computer_screenshot"})
+
+
+def _strip_images_from_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Replace image content blocks with text placeholders.
+
+    After compaction, images are normalized to ``[image_url]`` text by
+    ``_normalize_content``.  Stripping them here ensures that the compaction
+    pipeline's token budget (``estimate_message_tokens``) matches the
+    post-compaction reality — otherwise each image counts as 1200 tokens in
+    the budget but becomes ~3 tokens after normalization.
+    """
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            out.append(msg)
+            continue
+        new_blocks: list[Any] = []
+        changed = False
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in _IMAGE_BLOCK_TYPES:
+                new_blocks.append({"type": "text", "text": f"[{block['type']}]"})
+                changed = True
+            else:
+                new_blocks.append(block)
+        if changed:
+            replaced = dict(msg)
+            replaced["content"] = new_blocks
+            out.append(replaced)
+        else:
+            out.append(msg)
+    return out
+
+
 def _extract_messages_for_compaction(session_mgr: SessionManager) -> list[dict[str, Any]]:
     """Extract message entries from the transcript as dicts for compaction.
 
@@ -625,6 +702,10 @@ def _extract_messages_for_compaction(session_mgr: SessionManager) -> list[dict[s
     expected by the compaction pipeline. Propagates stop_reason from transcript
     entries so repair_tool_use_result_pairing() can skip synthesis for
     error/aborted turns (US-OC-013).
+
+    Image content blocks (base64 screenshots) are replaced with lightweight
+    text placeholders so the compaction budget matches the post-normalization
+    token count.
     """
     history = session_mgr.load_history()
     messages: list[dict[str, Any]] = []
@@ -640,4 +721,4 @@ def _extract_messages_for_compaction(session_mgr: SessionManager) -> list[dict[s
         if stop_reason:
             msg["stop_reason"] = stop_reason
         messages.append(msg)
-    return messages
+    return _strip_images_from_messages(messages)

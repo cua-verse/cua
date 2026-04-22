@@ -158,3 +158,34 @@ When a parent finishes its turn while children are still pending:
 - **Type B (Full agent)**: separate OpenClawComputerAgent on its own VM. Heavy lift, future work.
 - **Completion delivery**: drain asyncio.Queue between predict_step calls, inject as user messages into items list.
 - **Implementation sequence**: US-OC-050-054 (unified loop) first, then subagent stories on the stable loop.
+
+## Memory Store & Subagents (added 2026-04-21)
+
+### OpenClaw: workspace-based shared memory
+
+OpenClaw's memory is **workspace-based, not session-based**. Memory lives on disk
+in the workspace directory (`MEMORY.md` + `memory/YYYY-MM-DD.md` files). Key facts:
+
+- **Same-agent subagents inherit the parent's workspace** (`subagent-spawn.ts:698-707`),
+  so they read/write the **same memory files** as the parent.
+- **Memory tools are NOT in any subagent deny list** (`pi-tools.policy.ts:32-54`).
+  All subagents (leaf and orchestrator) can call `memory_search`, `memory_get`, etc.
+- **Parent sees child writes immediately** — same files on disk. Parent just needs to
+  call `memory_search` to discover new content.
+- **MEMORY.md injected at spawn** — subagents get the workspace's `MEMORY.md` in their
+  system context by default (`workspace.ts:503-550`). Skipped with `lightContext: true`.
+- **Cross-agent subagents** get the target agent's workspace (different memory store).
+
+### CUA: shared MemoryStore object
+
+Our implementation matches OpenClaw's shared-memory model. `DelegateGeneralTool`
+passes the same `MemoryStore` instance to subagents (`subagent_tools.py:112-116`),
+so general subagents can read/write the same memory as the main agent.
+
+The GUI subagent currently has no memory access (US-SUB-011 adds this).
+
+### Key distinction: conversation isolation ≠ memory isolation
+
+Subagents have **separate conversation sessions** (isolated message history) but
+**shared memory** (same MemoryStore / workspace). This is true in both OpenClaw
+and our CUA implementation.

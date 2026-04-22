@@ -19,12 +19,14 @@ Design adapted from OpenClaw:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from agent import ComputerAgent
+from agent.callbacks.base import AsyncCallbackHandler
 
 from .memory import MemoryGetTool, MemorySearchTool, MemoryStore, MemoryWriteTool
 from .subagent_registry import SubagentRegistry, SubagentUsage
@@ -32,6 +34,40 @@ from .subagent_registry import SubagentRegistry, SubagentUsage
 DEFAULT_MAX_STEPS = 15
 DEFAULT_MODEL = "openrouter/openai/gpt-5.4"
 DEFAULT_IMAGE_HISTORY = 3
+
+
+# ---------------------------------------------------------------------------
+# Steer inbox callback (US-SUB-009)
+# ---------------------------------------------------------------------------
+
+
+class SteerInboxCallback(AsyncCallbackHandler):
+    """Inject steer messages from an inbox queue between ComputerAgent turns.
+
+    Registered as a ComputerAgent callback. ``on_run_continue`` is called at
+    the top of each iteration of ``ComputerAgent.run()``'s while-loop, before
+    ``predict_step()``.  It receives ``new_items`` by reference — appending a
+    user-role message here makes it visible to the next LLM call.
+
+    Single-message-per-turn guard: consumes at most one message per call;
+    additional queued messages stay for subsequent turns.
+    """
+
+    def __init__(self, inbox: asyncio.Queue[str]) -> None:
+        self._inbox = inbox
+
+    async def on_run_continue(
+        self,
+        kwargs: dict[str, Any],
+        old_items: list[dict[str, Any]],
+        new_items: list[dict[str, Any]],
+    ) -> bool:
+        try:
+            msg = self._inbox.get_nowait()
+        except asyncio.QueueEmpty:
+            return True
+        new_items.append({"role": "user", "content": f"[Steer] {msg}"})
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +332,9 @@ async def run_gui_subagent(
     transcript = _TranscriptWriter(transcript_path)
 
     usage = SubagentUsage()
+    inbox: asyncio.Queue[str] = asyncio.Queue()
     registry.mark_running(run_id)
+    registry.attach_inbox(run_id, inbox)
 
     try:
         tools: list[Any] = [session._computer]
@@ -313,6 +351,7 @@ async def run_gui_subagent(
             instructions=_build_system_prompt(),
             only_n_most_recent_images=DEFAULT_IMAGE_HISTORY,
             telemetry_enabled=False,
+            callbacks=[SteerInboxCallback(inbox)],
             **(thinking_params or {}),
         )
 
@@ -361,5 +400,6 @@ __all__ = [
     "DEFAULT_IMAGE_HISTORY",
     "DEFAULT_MAX_STEPS",
     "DEFAULT_MODEL",
+    "SteerInboxCallback",
     "run_gui_subagent",
 ]

@@ -24,6 +24,7 @@ from agent.model_config import resolve_model
 
 from . import register_agent
 from .base import AgentResult, BaseAgent, FailureMode
+from .openclaw.agent_loop import has_done_signal
 
 
 if TYPE_CHECKING:
@@ -334,7 +335,7 @@ class OpenClawAgent(BaseAgent):
                     print(f"\n[Max steps reached] Stopped at step {step}/{self.max_steps}")
                     break
 
-                task_completed = _check_done(result)
+                task_completed = has_done_signal(result.get("output", []))
                 if task_completed:
                     print(f"\n[Task completed] Agent indicated completion at step {step}")
                     break
@@ -389,16 +390,3 @@ async def _record_tracer_step(tracer, session, step: int, model: str, result: di
         print(f"Warning: Failed to record agent step to tracer: {e}")
 
 
-def _check_done(result: dict) -> bool:
-    """Check if the agent indicated task completion (DONE signal)."""
-    for item in result["output"]:
-        if item.get("type") == "message":
-            content = item.get("content", "")
-            if isinstance(content, str):
-                if "DONE" in content:
-                    return True
-            elif isinstance(content, list) and content:
-                text = content[0].get("text", "") if isinstance(content[0], dict) else str(content[0])
-                if "DONE" in text:
-                    return True
-    return False

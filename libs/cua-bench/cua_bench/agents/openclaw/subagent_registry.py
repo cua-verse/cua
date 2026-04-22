@@ -162,6 +162,7 @@ class SubagentRegistry:
         self._completion_queue: asyncio.Queue[SubagentRun] = asyncio.Queue()
         self._post_delegation_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._tasks: dict[str, asyncio.Task] = {}
+        self._inboxes: dict[str, "asyncio.Queue[str]"] = {}
         self._max_concurrent = max_concurrent
         self._persist_path = persist_path
 
@@ -253,6 +254,7 @@ class SubagentRegistry:
         run.ended_at = _now_iso()
         if usage is not None:
             run.usage = usage
+        self._inboxes.pop(run_id, None)
         self._persist_run(run_id)
         self._completion_queue.put_nowait(run)
 
@@ -274,6 +276,7 @@ class SubagentRegistry:
         run.ended_at = _now_iso()
         if usage is not None:
             run.usage = usage
+        self._inboxes.pop(run_id, None)
         self._persist_run(run_id)
         self._completion_queue.put_nowait(run)
 
@@ -288,6 +291,7 @@ class SubagentRegistry:
             return
         run.status = SubagentStatus.KILLED
         run.ended_at = _now_iso()
+        self._inboxes.pop(run_id, None)
         self._persist_run(run_id)
 
     def attach_task(self, run_id: str, task: asyncio.Task) -> None:
@@ -299,6 +303,18 @@ class SubagentRegistry:
         """
         if run_id in self._runs:
             self._tasks[run_id] = task
+
+    def attach_inbox(self, run_id: str, inbox: "asyncio.Queue[str]") -> None:
+        """Associate a steer inbox with a run (US-SUB-009).
+
+        Idempotent: silently ignores unknown run_ids.
+        """
+        if run_id in self._runs:
+            self._inboxes[run_id] = inbox
+
+    def get_inbox(self, run_id: str) -> "asyncio.Queue[str] | None":
+        """Return the steer inbox for a run, or None if not attached / unknown."""
+        return self._inboxes.get(run_id)
 
     def kill_run(self, run_id: str) -> bool:
         """Cancel the underlying asyncio.Task and transition the run to KILLED.
