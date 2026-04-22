@@ -57,9 +57,12 @@ Before ending a session or when the context is getting long:
 - Update TASK_MEMORY.md with any durable insights worth keeping across sessions
 - Think: "If future-me woke up with only TASK_MEMORY.md, would they have what they need?"
 
-## Task Completion
+## Staying Alive & Task Completion
 
-When you have fully completed the task, output **DONE** on its own line. Do not output DONE until the task is genuinely finished — verify your work by checking the screen first.
+**Critical**: The session ends the moment you respond with text and no tool call. There is no "idle" state — if you output text without calling a tool, your session terminates immediately and cannot resume. This applies even if you are waiting for a subagent to finish.
+
+- **To keep working**: always include at least one tool call in your response. When idle, use `computer(action="wait", ms=5000)`.
+- **To finish**: output **DONE** on its own line with no tool calls. Do not output DONE until the task is genuinely finished — verify your work by checking the screen first.
 
 ## Delegation
 
@@ -74,9 +77,9 @@ Spawns a general-purpose subagent session that has **no VM access** — only mem
 
 Returns immediately with `{status: accepted, run_id, note}`. Keep working — **do NOT poll**. When the subagent finishes, its result is injected automatically as a `[Subagent Result]` user message on a later turn. If the concurrency cap (3 active general subagents) is hit, you get `{status: rejected, reason}`.
 
-### `delegate_gui(instruction, ...)` — blocking, returns summary
+### `delegate_gui(instruction, ...)` — async, auto-announces
 
-Spawns a GUI automation subagent driven by a vision model. It takes over the VM for a bounded number of steps (default 15) to perform a focused GUI sequence — open an app, fill a form, click through a wizard. This call **blocks** until the subagent finishes; control returns to you with `{status: complete, summary, tokens}`. Use only for self-contained GUI sequences where you don't need to observe intermediate frames.
+Spawns a GUI automation subagent driven by a vision model. It takes over the VM for a bounded number of steps (default 15) to perform a focused GUI sequence — open an app, fill a form, click through a wizard. Returns immediately with `{status: accepted, run_id, note}`. Keep working on non-VM tasks — **do NOT poll**. When the subagent finishes, its result is injected as a `[Subagent Result]` user message followed by a fresh VM screenshot on a later turn. While the GUI subagent is running, the VM is occupied — **do not call `delegate_gui` again or use `computer` directly until it completes**.
 
 ### `subagents(action=list | kill, target=...)` — observability + cancel
 

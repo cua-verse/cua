@@ -242,8 +242,8 @@ class SubagentRegistry:
     ) -> None:
         """Mark a run as successfully completed.
 
-        Sets result_text, status, ended_at. For GENERAL type, pushes the run
-        to the completion queue for drain_completions().
+        Sets result_text, status, ended_at. Pushes the run to the completion
+        queue for drain_completions().
         """
         run = self._runs.get(run_id)
         if run is None or run.status in _TERMINAL_STATUSES:
@@ -254,8 +254,7 @@ class SubagentRegistry:
         if usage is not None:
             run.usage = usage
         self._persist_run(run_id)
-        if run.type == SubagentType.GENERAL:
-            self._completion_queue.put_nowait(run)
+        self._completion_queue.put_nowait(run)
 
     def fail(
         self,
@@ -265,8 +264,7 @@ class SubagentRegistry:
     ) -> None:
         """Mark a run as failed with an error message.
 
-        For GENERAL type, pushes to the completion queue so the main loop
-        can report the failure.
+        Pushes to the completion queue so the main loop can report the failure.
         """
         run = self._runs.get(run_id)
         if run is None or run.status in _TERMINAL_STATUSES:
@@ -277,8 +275,7 @@ class SubagentRegistry:
         if usage is not None:
             run.usage = usage
         self._persist_run(run_id)
-        if run.type == SubagentType.GENERAL:
-            self._completion_queue.put_nowait(run)
+        self._completion_queue.put_nowait(run)
 
     def kill(self, run_id: str) -> None:
         """Mark a run as killed.

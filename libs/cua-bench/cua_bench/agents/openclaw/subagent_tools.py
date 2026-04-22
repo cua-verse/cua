@@ -33,7 +33,6 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import logging
 from pathlib import Path
 from typing import Any, Union
@@ -223,6 +222,7 @@ class DelegateGUITool(BaseTool):
         parent_session_dir: Path,
         default_model: str = GUI_DEFAULT_MODEL,
         thinking_params: dict[str, Any] | None = None,
+        memory_store: MemoryStore | None = None,
         cfg: dict | None = None,
     ) -> None:
         self._registry = registry
@@ -230,16 +230,20 @@ class DelegateGUITool(BaseTool):
         self._parent_session_dir = Path(parent_session_dir)
         self._default_model = default_model
         self._thinking_params = thinking_params
+        self._memory_store = memory_store
         super().__init__(cfg)
 
     @property
     def description(self) -> str:
         return (
             "Spawn a *GUI automation* subagent driven by a vision model. "
-            "BLOCKING — this call returns only after the subagent finishes "
-            "the instruction (click/type/hotkey/scroll/drag). Use this for "
-            "self-contained GUI sequences where the main agent does not "
-            "need to observe intermediate frames."
+            "Returns immediately with a run_id; the subagent takes over "
+            "the VM for a bounded number of steps. When finished, the "
+            "result is announced as a '[Subagent Result]' user message "
+            "followed by a fresh VM screenshot. DO NOT poll — results "
+            "auto-announce. While the GUI subagent is running, the VM is "
+            "occupied — do not call delegate_gui again or use computer "
+            "directly until it completes."
         )
 
     @property
@@ -294,60 +298,46 @@ class DelegateGUITool(BaseTool):
             model=model,
         )
 
-        async def _drive() -> tuple[str, bytes | None]:
-            summary = await run_gui_subagent(
-                instruction=instruction,
-                session=self._session,
-                registry=self._registry,
-                run_id=run.run_id,
-                model=model,
-                max_steps=max_steps,
-                thinking_params=self._thinking_params,
-                parent_session_dir=self._parent_session_dir,
-            )
-            # Take the post-delegation screenshot in the same driver so the
-            # caller only spawns one asyncio.run / executor pass.
+        async def _drive() -> None:
+            try:
+                await run_gui_subagent(
+                    instruction=instruction,
+                    session=self._session,
+                    registry=self._registry,
+                    run_id=run.run_id,
+                    model=model,
+                    max_steps=max_steps,
+                    thinking_params=self._thinking_params,
+                    parent_session_dir=self._parent_session_dir,
+                    memory_store=self._memory_store,
+                )
+                # run_gui_subagent already calls registry.complete()
+            except Exception as e:
+                # run_gui_subagent already calls registry.fail() before raising
+                _logger.warning("GUI subagent %s failed: %s", run.run_id, e)
+                return
+
             try:
                 post_shot = await self._session.screenshot()
-            except Exception as post_exc:  # noqa: BLE001
+            except Exception as post_exc:
                 _logger.warning(
                     "post-delegation screenshot failed for run %s: %s",
                     run.run_id,
                     post_exc,
                 )
                 post_shot = None
-            return summary, post_shot
 
-        # AnalyzeImageTool sync→async pattern (analyze_image.py:144-168).
-        try:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
+            if isinstance(post_shot, (bytes, bytearray)) and post_shot:
+                self._enqueue_post_delegation(run.run_id, bytes(post_shot))
 
-            if loop is not None and loop.is_running():
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, _drive())
-                    summary, post_shot = future.result()
-            else:
-                summary, post_shot = asyncio.run(_drive())
-        except Exception as e:  # run_gui_subagent already called registry.fail
-            usage = _usage_dict(self._registry, run.run_id)
-            return {
-                "status": "error",
-                "error": str(e),
-                "run_id": run.run_id,
-                "tokens": usage,
-            }
-
-        if isinstance(post_shot, (bytes, bytearray)) and post_shot:
-            self._enqueue_post_delegation(run.run_id, bytes(post_shot))
+        loop = asyncio.get_running_loop()
+        task_handle = loop.create_task(_drive())
+        self._registry.attach_task(run.run_id, task_handle)
 
         return {
-            "status": "complete",
-            "summary": summary,
+            "status": "accepted",
             "run_id": run.run_id,
-            "tokens": _usage_dict(self._registry, run.run_id),
+            "note": _ACCEPTED_NOTE,
         }
 
     def _enqueue_post_delegation(self, run_id: str, png_bytes: bytes) -> None:
@@ -470,14 +460,3 @@ class SubagentsTool(BaseTool):
         return {"status": "error", "reason": f"unknown action: {action}"}
 
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
-
-def _usage_dict(registry: SubagentRegistry, run_id: str) -> dict[str, int]:
-    """Snapshot a run's token usage for inclusion in DelegateGUITool's return."""
-    run = registry.get_run(run_id)
-    if run is None:
-        return {"input_tokens": 0, "output_tokens": 0}
-    return run.usage.to_dict()

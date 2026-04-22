@@ -296,7 +296,7 @@ class OpenClawComputerAgent(ComputerAgent):
     def _drain_completions(self, new_items: List[Dict[str, Any]]) -> None:
         """Drain the subagent registry's completion queue into ``new_items``.
 
-        Each completed/failed general subagent run is appended as a user
+        Each completed/failed subagent run (general or GUI) is appended as a user
         message in ``[Subagent Result]`` format so the next LLM turn sees
         it verbatim. No-op when no registry is wired (tests, legacy paths)
         or when the queue is empty. FIFO ordering is preserved because
@@ -314,11 +314,12 @@ class OpenClawComputerAgent(ComputerAgent):
                 f"{body}"
             )
             new_items.append({"role": "user", "content": content})
+            self.session_mgr.append_message("user", content)
 
     def _drain_post_delegation(self, new_items: List[Dict[str, Any]]) -> None:
         """Drain the registry's post-delegation queue into ``new_items``.
 
-        Messages are pushed by ``DelegateGUITool`` after a blocking GUI
+        Messages are pushed by ``DelegateGUITool`` after an async GUI
         subagent run completes (US-SUB-006). They carry a fresh VM
         screenshot as ``{role: user, content: [text, image_url]}`` so the
         main agent's next ``predict_step`` sees the updated state. Pre-built
@@ -326,7 +327,9 @@ class OpenClawComputerAgent(ComputerAgent):
         """
         if self._registry is None:
             return
-        new_items.extend(self._registry.drain_post_delegation())
+        for msg in self._registry.drain_post_delegation():
+            new_items.append(msg)
+            self.session_mgr.append_message("user", msg.get("content", []))
 
     # --- Screenshot path injection (US-OC-034) ---
 

@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from agent.callbacks.base import AsyncCallbackHandler
+from agent.computers.base import AsyncComputerHandler
+from agent.computers.cua import cuaComputerHandler
 from agent.tools.base import BaseTool
+from agent.types import ToolError
 
 from .memory import MemoryGetTool, MemorySearchTool, MemoryStore, MemoryWriteTool
 from .subagent_registry import SubagentRegistry
@@ -45,6 +48,99 @@ def _is_computer_tool(tool: Any) -> bool:
     return "computer" in class_name.lower()
 
 
+class _RestrictedComputerHandler(AsyncComputerHandler):
+    """Computer handler that only allows ``screenshot`` and ``wait`` actions.
+
+    Used when ``disable_main_computer`` is set — the agent can observe the VM
+    and idle (keeping the loop alive), but cannot perform interactive actions.
+    Interactive GUI work must go through ``delegate_gui``.
+
+    Wraps a ``cuaComputer`` with lazy initialization (the VM may not be ready
+    at tool-build time). Passes ``is_agent_computer()`` because
+    ``AsyncComputerHandler`` is a ``runtime_checkable`` Protocol.
+    """
+
+    def __init__(self, cua_computer: Any) -> None:
+        self._cua_computer = cua_computer
+        self._inner: cuaComputerHandler | None = None
+        self.interface: Any = None
+
+    async def _ensure_init(self) -> None:
+        if self._inner is None:
+            self._inner = cuaComputerHandler(self._cua_computer)
+            await self._inner._initialize()
+            self.interface = self._inner.interface
+
+    def _blocked(self, name: str):
+        async def _raise(**kw: Any) -> None:
+            raise ToolError(
+                f"Action '{name}' is not available — the main agent cannot "
+                "drive the VM directly. Use delegate_gui for GUI interactions."
+            )
+        return _raise
+
+    # -- Allowed actions --
+
+    async def screenshot(self, text: Optional[str] = None) -> str:
+        await self._ensure_init()
+        assert self._inner is not None
+        return await self._inner.screenshot(text=text)
+
+    async def wait(self, ms: int = 1000) -> None:
+        await self._ensure_init()
+        assert self._inner is not None
+        await self._inner.wait(ms=ms)
+
+    async def terminate(self, **kw: Any) -> Dict[str, Any]:
+        await self._ensure_init()
+        assert self._inner is not None
+        return await self._inner.terminate(**kw)
+
+    async def get_environment(self) -> Literal["windows", "mac", "linux", "browser"]:
+        await self._ensure_init()
+        assert self._inner is not None
+        return await self._inner.get_environment()
+
+    async def get_dimensions(self) -> tuple[int, int]:
+        await self._ensure_init()
+        assert self._inner is not None
+        return await self._inner.get_dimensions()
+
+    async def get_current_url(self) -> str:
+        await self._ensure_init()
+        assert self._inner is not None
+        return await self._inner.get_current_url()
+
+    # -- Blocked actions --
+
+    async def click(self, x: int, y: int, button: str = "left") -> None:
+        await self._blocked("click")()
+
+    async def double_click(self, x: int, y: int) -> None:
+        await self._blocked("double_click")()
+
+    async def scroll(self, x: int, y: int, scroll_x: int, scroll_y: int) -> None:
+        await self._blocked("scroll")()
+
+    async def type(self, text: str) -> None:
+        await self._blocked("type")()
+
+    async def move(self, x: int, y: int) -> None:
+        await self._blocked("move")()
+
+    async def keypress(self, keys: Union[List[str], str]) -> None:
+        await self._blocked("keypress")()
+
+    async def drag(self, path: List[Dict[str, int]]) -> None:
+        await self._blocked("drag")()
+
+    async def left_mouse_down(self, x: Optional[int] = None, y: Optional[int] = None) -> None:
+        await self._blocked("left_mouse_down")()
+
+    async def left_mouse_up(self, x: Optional[int] = None, y: Optional[int] = None) -> None:
+        await self._blocked("left_mouse_up")()
+
+
 def build_tools(
     session,
     memory_store: MemoryStore,
@@ -55,7 +151,9 @@ def build_tools(
     parent_session_dir: Any = None,
     default_model: str | None = None,
     thinking_params: dict[str, Any] | None = None,
+    gui_thinking_params: dict[str, Any] | None = None,
     disable_main_computer: bool = False,
+    gui_model: str | None = None,
 ) -> list:
     """Assemble the canonical tool list for the OpenClaw agent.
 
@@ -80,11 +178,12 @@ def build_tools(
             (falls back to the model used for normal turns).
         thinking_params: Main-agent thinking kwargs, forwarded unchanged into
             the subagent session's ``litellm.acompletion`` call.
-        disable_main_computer: When True, omit ``session._computer`` from the
-            tool list so the main agent cannot drive the VM directly. Pair
-            with ``registry``/``parent_session_dir`` so ``delegate_gui`` is
-            available as the only GUI path. Useful for forcing GUI delegation
-            in validation runs (US-SUB-006 Level 2 coverage).
+        disable_main_computer: When True, replace ``session._computer`` with a
+            restricted handler that only allows ``screenshot`` and ``wait``
+            actions. The agent can observe the VM and idle (keeping the loop
+            alive) but cannot perform interactive GUI work — that must go
+            through ``delegate_gui``. Useful for forcing GUI delegation in
+            validation runs (US-SUB-006 Level 2 coverage).
     """
     from agent.tools import AnalyzeImageTool, MilestoneTool
 
@@ -98,15 +197,19 @@ def build_tools(
     memory_get = MemoryGetTool(memory_store)
     memory_write = MemoryWriteTool(memory_store)
 
+    if disable_main_computer:
+        computer = _RestrictedComputerHandler(session._computer)
+    else:
+        computer = session._computer
+
     tools: list = [
+        computer,
         milestone_tool,
         analyze_image_tool,
         memory_search,
         memory_get,
         memory_write,
     ]
-    if not disable_main_computer:
-        tools.insert(0, session._computer)
 
     if registry is not None and parent_session_dir is not None:
         delegate_general = DelegateGeneralTool(
@@ -118,12 +221,16 @@ def build_tools(
             parent_session_dir=parent_session_dir,
             thinking_params=thinking_params,
         )
-        delegate_gui = DelegateGUITool(
-            registry=registry,
-            session=session,
-            parent_session_dir=parent_session_dir,
-            thinking_params=thinking_params,
-        )
+        gui_tool_kwargs: dict[str, Any] = {
+            "registry": registry,
+            "session": session,
+            "parent_session_dir": parent_session_dir,
+            "thinking_params": gui_thinking_params,
+            "memory_store": memory_store,
+        }
+        if gui_model:
+            gui_tool_kwargs["default_model"] = gui_model
+        delegate_gui = DelegateGUITool(**gui_tool_kwargs)
         subagents_tool = SubagentsTool(registry=registry)
         tools.extend([delegate_general, delegate_gui, subagents_tool])
 
