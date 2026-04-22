@@ -111,7 +111,12 @@ async def run_memory_flush(
         reply_content = response.text
         tool_calls = response.tool_calls
 
-        # Handle tool calls — the model may call memory_write
+        # Handle tool calls — the model may call memory_write.
+        # Flush prompt/reply are NOT appended to the main transcript: they are
+        # an out-of-band sub-agent turn (mirrors OpenClaw's runEmbeddedPiAgent
+        # with silentExpected=true). Leaking them into session history caused
+        # the main agent to mimic flush behavior after compaction and emit
+        # [!silent], prematurely terminating the run.
         if tool_calls:
             for tool_call in tool_calls:
                 if tool_call.get("name") == "memory_write":
@@ -129,19 +134,10 @@ async def run_memory_flush(
                                 print(f"[MemoryFlush] Appended {len(content)} chars to session log")
                     except (_json.JSONDecodeError, Exception) as e:
                         print(f"[MemoryFlush] Tool call failed: {e}")
-
-            # Log flush turn to transcript
-            session_mgr.append_message("user", flush_prompt)
-            session_mgr.append_message("assistant", reply_content or "[memory flush — tool calls executed]")
         elif silent_token in reply_content:
             print("[MemoryFlush] Model replied silent — nothing to persist")
-            session_mgr.append_message("user", flush_prompt)
-            session_mgr.append_message("assistant", reply_content)
         else:
-            # Model replied with text but no tool calls
-            print(f"[MemoryFlush] Model replied: {reply_content[:100]}")
-            session_mgr.append_message("user", flush_prompt)
-            session_mgr.append_message("assistant", reply_content)
+            print(f"[MemoryFlush] Model replied text without tool call (dropped): {reply_content[:100]}")
 
         session_mgr.record_memory_flush()
         print("[MemoryFlush] Flush recorded")
