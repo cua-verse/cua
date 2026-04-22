@@ -64,6 +64,40 @@ _ACCEPTED_NOTE = (
 )
 
 
+def _provider_prefix(model: str) -> str:
+    return model.split("/", 1)[0] if "/" in model else model
+
+
+def _sanitize_subagent_model(
+    requested: str | None, default_model: str
+) -> tuple[str, str | None]:
+    """Validate a subagent model override against the default's provider prefix.
+
+    The tool schema lets callers pass `model` to override `default_model`,
+    but main-agent models regularly hallucinate IDs that don't exist on the
+    routing provider (e.g. "openai/gpt-5.1-mini" when the default is
+    "openrouter/openai/gpt-5.4"). Rather than dispatching a doomed call,
+    require the override to share the default's provider prefix and fall
+    back silently (with a warning in the tool response) when it doesn't.
+
+    Returns `(resolved_model, warning)`. `warning` is `None` when the
+    requested model is accepted as-is.
+    """
+    if not requested:
+        return default_model, None
+    req_prefix = _provider_prefix(requested)
+    def_prefix = _provider_prefix(default_model)
+    if req_prefix != def_prefix:
+        warning = (
+            f"requested model '{requested}' has provider prefix "
+            f"'{req_prefix}' which does not match the main agent's default "
+            f"provider '{def_prefix}'. Using default '{default_model}' "
+            f"instead. Omit the `model` parameter to silence this warning."
+        )
+        return default_model, warning
+    return requested, None
+
+
 # ---------------------------------------------------------------------------
 # delegate_general
 # ---------------------------------------------------------------------------
@@ -157,7 +191,11 @@ class DelegateGeneralTool(BaseTool):
                 "reason": "task must be a non-empty string",
             }
 
-        model = params_dict.get("model") or self._default_model
+        model, model_warning = _sanitize_subagent_model(
+            params_dict.get("model"), self._default_model
+        )
+        if model_warning:
+            _logger.warning("delegate_general: %s", model_warning)
         max_steps = int(
             params_dict.get("max_steps", DELEGATE_GENERAL_DEFAULT_MAX_STEPS)
         )
@@ -200,11 +238,14 @@ class DelegateGeneralTool(BaseTool):
         task_handle = loop.create_task(coro)
         self._registry.attach_task(run.run_id, task_handle)
 
-        return {
+        response = {
             "status": "accepted",
             "run_id": run.run_id,
             "note": _ACCEPTED_NOTE,
         }
+        if model_warning:
+            response["model_warning"] = model_warning
+        return response
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +329,11 @@ class DelegateGUITool(BaseTool):
                 "reason": "instruction must be a non-empty string",
             }
 
-        model = params_dict.get("model") or self._default_model
+        model, model_warning = _sanitize_subagent_model(
+            params_dict.get("model"), self._default_model
+        )
+        if model_warning:
+            _logger.warning("delegate_gui: %s", model_warning)
         max_steps = int(params_dict.get("max_steps", GUI_DEFAULT_MAX_STEPS))
         label = params_dict.get("label", "") or ""
 
@@ -335,11 +380,14 @@ class DelegateGUITool(BaseTool):
         task_handle = loop.create_task(_drive())
         self._registry.attach_task(run.run_id, task_handle)
 
-        return {
+        response = {
             "status": "accepted",
             "run_id": run.run_id,
             "note": _ACCEPTED_NOTE,
         }
+        if model_warning:
+            response["model_warning"] = model_warning
+        return response
 
     def _enqueue_post_delegation(self, run_id: str, png_bytes: bytes) -> None:
         """Persist the fresh screenshot and enqueue a user message for the main agent.
