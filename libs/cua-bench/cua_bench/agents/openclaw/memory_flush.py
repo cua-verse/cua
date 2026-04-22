@@ -99,12 +99,20 @@ async def run_memory_flush(
 
     print(f"[MemoryFlush] Running pre-compaction memory flush turn ({len(conversation_text)} chars context)")
     try:
+        # Budget rationale: flush turns routinely chain multiple memory_write
+        # calls (session log + TASK_MEMORY), and with thinking_params set
+        # reasoning tokens share the output budget. 1024 was too tight — seen
+        # in practice to truncate a second tool call's JSON args mid-string
+        # ("Unterminated string starting at: line 1 column 12 char 11") after
+        # the first write consumed most of the budget. 4096 gives comfortable
+        # headroom; the model still stops naturally when it's out of things
+        # to persist, so the nominal cost per flush doesn't grow.
         response = await call_helper_model(
             resolved_summary,
             purpose="memory_flush",
             messages=messages,
             tools=[memory_write_tool],
-            max_tokens=1024,
+            max_tokens=4096,
             temperature=1.0,
             thinking_params=thinking_params,
         )
@@ -132,7 +140,19 @@ async def run_memory_flush(
                             else:
                                 memory_store.append_to_session_log(content)
                                 print(f"[MemoryFlush] Appended {len(content)} chars to session log")
-                    except (_json.JSONDecodeError, Exception) as e:
+                    except _json.JSONDecodeError as e:
+                        # Log the truncated/malformed payload (bounded) so we
+                        # can distinguish truncation from model-side bad JSON.
+                        raw = tool_call.get("arguments", "")
+                        raw_str = raw if isinstance(raw, str) else _json.dumps(raw)
+                        preview = raw_str[:200]
+                        suffix = "…" if len(raw_str) > 200 else ""
+                        print(
+                            f"[MemoryFlush] Tool call failed (JSON decode, "
+                            f"likely max_tokens truncation): {e}; "
+                            f"raw[{len(raw_str)}ch]={preview!r}{suffix}"
+                        )
+                    except Exception as e:
                         print(f"[MemoryFlush] Tool call failed: {e}")
         elif silent_token in reply_content:
             print("[MemoryFlush] Model replied silent — nothing to persist")
