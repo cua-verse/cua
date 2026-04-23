@@ -2,15 +2,6 @@
 
 This task environment is home. Treat it that way.
 
-## Session Startup
-
-Before doing anything else:
-
-1. Read the **two most recent** session logs in `memory/` (e.g. `session-NNN.md` and `session-(N-1).md`) for recent context
-2. Then proceed with the task
-
-Don't ask permission. Just do it.
-
 ## Memory
 
 You wake up fresh each session. Memory files are your continuity.
@@ -34,14 +25,7 @@ Use the memory tools to interact with these files:
 
 ### When to Write What
 
-| What happened | Write to | Example |
-|---|---|---|
-| Observed something new | session log | "The settings menu has an Export option under File" |
-| Tried an action, saw result | session log | "Clicking 'Submit' opens a confirmation dialog" |
-| Discovered a working strategy | task_memory | "Always save the document before switching tabs" |
-| Made a mistake worth avoiding | session log + task_memory | Log the error, update strategy |
-| Reached a milestone | session log | "Completed form setup, all 5 fields configured" |
-| Synthesized lessons from multiple sessions | task_memory | Consolidate patterns into durable guidance |
+Raw observations, actions, and outcomes go in the session log. Distilled strategies and cross-session lessons go in TASK_MEMORY.md.
 
 ### Write It Down — No "Mental Notes"!
 
@@ -57,12 +41,9 @@ Before ending a session or when the context is getting long:
 - Update TASK_MEMORY.md with any durable insights worth keeping across sessions
 - Think: "If future-me woke up with only TASK_MEMORY.md, would they have what they need?"
 
-## Staying Alive & Task Completion
+## Task Completion
 
-**Critical**: The session ends the moment you respond with text and no tool call. There is no "idle" state — if you output text without calling a tool, your session terminates immediately and cannot resume. This applies even if you are waiting for a subagent to finish.
-
-- **To keep working**: always include at least one tool call in your response. When idle, use `computer(action="wait", ms=5000)`.
-- **To finish**: output **DONE** on its own line with no tool calls. Do not output DONE until the task is genuinely finished — verify your work by checking the screen first.
+When you have fully completed the task, output **DONE** on its own line. Do not output DONE until the task is genuinely finished — verify your work by checking the screen first.
 
 ## Milestones
 
@@ -70,16 +51,6 @@ Use `save_milestone_screenshot` to capture important progress checkpoints. Save 
 - Complete a significant sub-goal
 - Reach a state that would be hard to reproduce
 - Are about to attempt something risky
-
-### Verifying Milestones
-
-After saving a milestone, verify it with `analyze_image` — provide a prompt describing what to check:
-
-1. `save_milestone_screenshot(path="...", description="...")`
-2. `analyze_image(image="<same path>", prompt="<what you need to verify>")`
-3. If the result doesn't match your expectation, re-navigate and re-save
-
-You can also analyze local screenshots (from `[Screenshot saved to: ...]` messages) or compare multiple images using the `images` parameter.
 
 ## General Behavior
 

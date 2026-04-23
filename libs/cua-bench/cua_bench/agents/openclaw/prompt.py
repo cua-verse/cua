@@ -37,7 +37,6 @@ class PromptConfig:
     tools: SectionConfig = field(default_factory=SectionConfig)
     memory: SectionConfig = field(default_factory=SectionConfig)
     delegation: SectionConfig = field(default_factory=SectionConfig)
-    gui_interaction: SectionConfig = field(default_factory=SectionConfig)
     project_context: SectionConfig = field(default_factory=SectionConfig)
 
 
@@ -49,15 +48,12 @@ class PromptBuilder:
       2. Tools — registered tool names with descriptions
       3. Memory Recall — when/how to use memory tools (only if memory tools present)
       4. Delegation — subagent delegation prose (only if delegation tools present)
-      5. GUI Interaction — direct-click/keyboard bullets (only if main computer
-         can drive the VM interactively, i.e. main_computer_interactive=True)
-      6. Current Date & Time — UTC timestamp (ref: OpenClaw system-prompt.ts)
-      7. Project Context — bootstrap injection (AGENTS.md, TASK_MEMORY.md, etc.)
+      5. Current Date & Time — UTC timestamp (ref: OpenClaw system-prompt.ts)
+      6. Project Context — bootstrap injection (AGENTS.md, TASK_MEMORY.md, etc.)
 
-    Feature-gated sections (delegation, gui_interaction) mirror OpenClaw's
-    buildAgentSystemPrompt pattern: absence is the signal — when a tool isn't
-    available, its prose isn't emitted, and the model is not told "X is
-    disabled."
+    The delegation section mirrors OpenClaw's buildAgentSystemPrompt pattern:
+    absence is the signal — when a tool isn't available, its prose isn't
+    emitted, and the model is not told "X is disabled."
     """
 
     def __init__(self, config: PromptConfig | None = None) -> None:
@@ -68,7 +64,6 @@ class PromptBuilder:
         *,
         tool_summaries: dict[str, str] | None = None,
         context_files: list[ContextFile] | None = None,
-        main_computer_interactive: bool = True,
     ) -> str:
         """Assemble all enabled sections into a single prompt string.
 
@@ -78,12 +73,6 @@ class PromptBuilder:
                 Memory Recall / Delegation subsections.
             context_files: Bootstrap files injected into the Project Context
                 section (AGENTS.md, optionally TASK_MEMORY.md).
-            main_computer_interactive: True when the main ``computer`` tool
-                can perform interactive actions (click/type/scroll/drag/move).
-                False when the tool is restricted to screenshot + wait (see
-                ``_RestrictedComputerHandler`` under ``disable_main_computer``).
-                Cannot be inferred from ``tool_summaries`` alone because both
-                the full and restricted handler expose ``name="computer"``.
         """
         parts: list[str] = []
 
@@ -102,9 +91,6 @@ class PromptBuilder:
             delegation_lines = self._build_delegation(tool_summaries)
             if delegation_lines:
                 parts.extend(delegation_lines)
-
-        if self.config.gui_interaction.enabled and main_computer_interactive:
-            parts.extend(self._build_gui_interaction())
 
         if self.config.time.enabled:
             parts.extend(self._build_time())
@@ -294,28 +280,6 @@ class PromptBuilder:
             ]
         )
         return lines
-
-    def _build_gui_interaction(self) -> list[str]:
-        """Build the GUI Interaction section.
-
-        Emitted only when the main ``computer`` tool can perform interactive
-        actions. Migrated from the static openclaw/AGENTS.md General Behavior
-        bullets so the guidance doesn't appear when the main computer is
-        restricted (``disable_main_computer=True``).
-        """
-        return [
-            "## GUI Interaction",
-            "",
-            (
-                "- Be precise with mouse clicks — target the center of "
-                "buttons and UI elements."
-            ),
-            (
-                "- Use keyboard shortcuts when they are more reliable than "
-                "mouse clicks."
-            ),
-            "",
-        ]
 
     def _build_project_context(self, context_files: list[ContextFile]) -> list[str]:
         """Build the Project Context section with injected file contents.

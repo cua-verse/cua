@@ -231,7 +231,6 @@ class OpenClawAgent(BaseAgent):
         instructions = builder.build(
             tool_summaries=tool_summaries,
             context_files=context_files,
-            main_computer_interactive=not self.disable_main_computer,
         )
 
         # System prompt report for observability (US-OC-008)
