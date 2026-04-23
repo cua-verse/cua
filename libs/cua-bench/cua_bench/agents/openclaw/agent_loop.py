@@ -90,7 +90,7 @@ class OpenClawComputerAgent(ComputerAgent):
         session_mgr: SessionManager,
         memory_store: MemoryStore,
         summary_model: str,
-        max_compactions: int = 3,
+        max_compactions: int = 10**9,
         on_compaction: Callable | None = None,
         thinking_config: Optional[Any] = None,
         resolved_model: ResolvedModel | None = None,

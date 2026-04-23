@@ -45,7 +45,7 @@ from .session import SessionManager
 from .subagent_registry import SubagentRegistry, SubagentUsage
 
 DEFAULT_MAX_STEPS = 50
-DEFAULT_MAX_COMPACTIONS = 3
+DEFAULT_MAX_COMPACTIONS = 10**9
 
 
 def _build_subagent_system_prompt(task: str) -> str:
