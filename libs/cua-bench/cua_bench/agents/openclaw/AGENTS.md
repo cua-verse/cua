@@ -45,13 +45,6 @@ Before ending a session or when the context is getting long:
 
 When you have fully completed the task, output **DONE** on its own line. Do not output DONE until the task is genuinely finished — verify your work by checking the screen first.
 
-## Milestones
-
-Use `save_milestone_screenshot` to capture important progress checkpoints. Save a milestone when you:
-- Complete a significant sub-goal
-- Reach a state that would be hard to reproduce
-- Are about to attempt something risky
-
 ## General Behavior
 
 - Observe the screen carefully before acting. Read text, check UI state, and plan your next action.
