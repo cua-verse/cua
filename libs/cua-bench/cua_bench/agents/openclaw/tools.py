@@ -28,6 +28,7 @@ from agent.types import ToolError
 from .memory import MemoryGetTool, MemorySearchTool, MemoryStore, MemoryWriteTool
 from .subagent_registry import SubagentRegistry
 from .subagent_tools import DelegateGeneralTool, DelegateGUITool, SubagentsTool
+from .tools_fs import EditFileTool, ReadFileTool, WriteFileTool
 
 
 COMPUTER_TOOL_NAME = "computer"
@@ -155,6 +156,8 @@ def build_tools(
     disable_main_computer: bool = False,
     disable_delegate_gui: bool = False,
     gui_model: str | None = None,
+    workspace_root: str | None = None,
+    context_window_tokens: int | None = None,
 ) -> list:
     """Assemble the canonical tool list for the OpenClaw agent.
 
@@ -192,6 +195,13 @@ def build_tools(
             remain. GUI interactions must go through the main ``computer``
             tool. Conflicts with ``disable_main_computer`` — guarded at
             agent construction.
+        workspace_root: Absolute path on the VM that bounds read/write/edit
+            file access (US-OC-055). When ``None``, path policy is permissive
+            (matches MilestoneTool / AnalyzeImageTool behavior).
+        context_window_tokens: Resolved model context window, forwarded to
+            ``ReadFileTool`` for adaptive byte-paging (cap = clamp(ctx * 4 *
+            0.10, 32 KB, 128 KB) — matches OpenClaw
+            ``resolveAdaptiveReadMaxBytes``).
     """
     from agent.tools import AnalyzeImageTool, MilestoneTool
 
@@ -201,6 +211,13 @@ def build_tools(
         model=summary_model,
         thinking_params=vision_thinking_params,
     )
+    read_tool = ReadFileTool(
+        session.interface,
+        workspace_root=workspace_root,
+        context_window_tokens=context_window_tokens,
+    )
+    write_tool = WriteFileTool(session.interface, workspace_root=workspace_root)
+    edit_tool = EditFileTool(session.interface, workspace_root=workspace_root)
     memory_search = MemorySearchTool(memory_store)
     memory_get = MemoryGetTool(memory_store)
     memory_write = MemoryWriteTool(memory_store)
@@ -214,6 +231,9 @@ def build_tools(
         computer,
         milestone_tool,
         analyze_image_tool,
+        read_tool,
+        write_tool,
+        edit_tool,
         memory_search,
         memory_get,
         memory_write,

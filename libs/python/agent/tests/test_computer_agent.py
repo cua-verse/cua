@@ -229,6 +229,125 @@ class TestHandleFunctionCallScreenshot:
         assert payload == {"clicked": True, "target_x": 100, "target_y": 200}
 
 
+class TestHandleFunctionCallImageResult:
+    """Regression tests for the BaseTool image-result adapter (US-OC-055).
+
+    When a BaseTool (e.g. ReadFileTool on an image file) returns a dict
+    shaped as ``{"type": "image", "data": <base64>, "mime_type": <mime>}``,
+    ``_handle_item`` must emit a sentinel in ``function_call_output.output``
+    AND a paired ``user``/``input_image`` message — mirroring the
+    action="screenshot" pattern — so the base64 never lands in the
+    tool-result content (otherwise it would escape ``only_n_most_recent_images``
+    pruning, same failure class as the pre-fix screenshot whale).
+    """
+
+    def test_image_tool_result_emits_sentinel_and_user_image(
+        self, disable_telemetry, mock_computer
+    ):
+        import asyncio
+        import json as _json
+
+        from agent import ComputerAgent
+        from agent.tools.base import BaseTool, register_tool
+
+        long_b64 = "iVBORw0KGgo" + "Z" * 1000
+
+        @register_tool("image_read_test_tool", allow_overwrite=True)
+        class _ImageTool(BaseTool):
+            @property
+            def description(self) -> str:
+                return "test"
+
+            @property
+            def parameters(self) -> dict:
+                return {"type": "object", "properties": {}, "required": []}
+
+            def call(self, params, **kwargs):
+                return {
+                    "success": True,
+                    "type": "image",
+                    "data": long_b64,
+                    "mime_type": "image/png",
+                    "text": "Read image file [image/png]",
+                }
+
+        tool = _ImageTool()
+        agent = ComputerAgent(
+            model="anthropic/claude-sonnet-4-5-20250929",
+            tools=[mock_computer, tool],
+        )
+        item = {
+            "type": "function_call",
+            "name": "image_read_test_tool",
+            "call_id": "call_img_1",
+            "arguments": "{}",
+        }
+        result = asyncio.run(agent._handle_item(item, mock_computer))
+
+        assert len(result) == 2
+        call_output, image_message = result
+
+        assert call_output["type"] == "function_call_output"
+        assert call_output["call_id"] == "call_img_1"
+        sentinel = _json.loads(call_output["output"])
+        assert sentinel["read_image"] is True
+        assert sentinel["mime_type"] == "image/png"
+        # The base64 must NOT appear in the tool-result content.
+        assert long_b64 not in call_output["output"]
+
+        # The paired user message carries the image.
+        assert image_message["role"] == "user"
+        assert image_message["content"][0]["type"] == "input_image"
+        assert long_b64 in image_message["content"][0]["image_url"]
+        assert image_message["content"][0]["image_url"].startswith(
+            "data:image/png;base64,"
+        )
+
+    def test_non_image_tool_result_falls_through_to_str(
+        self, disable_telemetry, mock_computer
+    ):
+        """Regression guard: tools returning plain dicts or strings use the
+        existing ``str(result)`` path unchanged (the image branch must be
+        gated on ``type == "image"``)."""
+        import asyncio
+
+        from agent import ComputerAgent
+        from agent.tools.base import BaseTool, register_tool
+
+        @register_tool("plain_text_test_tool", allow_overwrite=True)
+        class _PlainTool(BaseTool):
+            @property
+            def description(self) -> str:
+                return "test"
+
+            @property
+            def parameters(self) -> dict:
+                return {"type": "object", "properties": {}, "required": []}
+
+            def call(self, params, **kwargs):
+                return {"success": True, "content": "hello", "truncated": False}
+
+        tool = _PlainTool()
+        agent = ComputerAgent(
+            model="anthropic/claude-sonnet-4-5-20250929",
+            tools=[mock_computer, tool],
+        )
+        item = {
+            "type": "function_call",
+            "name": "plain_text_test_tool",
+            "call_id": "call_txt_1",
+            "arguments": "{}",
+        }
+        result = asyncio.run(agent._handle_item(item, mock_computer))
+
+        # Single function_call_output (no paired image message).
+        assert len(result) == 1
+        call_output = result[0]
+        assert call_output["type"] == "function_call_output"
+        # Content stringified via str(); the existing path preserves the dict repr.
+        assert "hello" in call_output["output"]
+
+
 class TestNormalizeKey:
     """Case-insensitive arrow-key aliasing in cuaComputerHandler._normalize_key.
 

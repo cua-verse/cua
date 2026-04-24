@@ -191,7 +191,32 @@ class OpenClawAgent(BaseAgent):
         registry = SubagentRegistry(persist_path=persist_path)
         registry.restore()
 
-        # Tool assembly (US-OC-007 + US-SUB-005 delegation tools)
+        # Resolve context window up-front so tools (adaptive paging in
+        # ReadFileTool) and the later ContextOverflowCallback share the
+        # same number. Honors CONTEXT_WINDOW_OVERRIDE for testing.
+        import os
+        from .openclaw.context import DEFAULT_CONTEXT_TOKENS, resolve_context_window
+        ctx_override = os.environ.get("CONTEXT_WINDOW_OVERRIDE")
+        if ctx_override:
+            context_window_tokens = int(ctx_override)
+        else:
+            context_window_tokens = (
+                resolved_model.context_window
+                or resolve_context_window(self.model)
+                or DEFAULT_CONTEXT_TOKENS
+            )
+
+        # Workspace root for FS-tool path policy (US-OC-055). Derived from
+        # GeneralTaskConfig-style env vars; None → permissive mode.
+        task_tag = os.environ.get("TASK_TAG", "").strip()
+        if task_tag:
+            root_dir = os.environ.get("REMOTE_ROOT_DIR", r"C:\Users\User\Desktop")
+            category = os.environ.get("TASK_CATEGORY", "tasks")
+            workspace_root: str | None = f"{root_dir}\\{category}\\{task_tag}"
+        else:
+            workspace_root = None
+
+        # Tool assembly (US-OC-007 + US-SUB-005 delegation tools + US-OC-055 fs tools)
         thinking_api_params = self.thinking_config.to_api_params(self.model)
         gui_model_str = self.gui_model or self.model
         gui_thinking_params = self.thinking_config.gui_params(gui_model_str)
@@ -211,6 +236,8 @@ class OpenClawAgent(BaseAgent):
             disable_main_computer=self.disable_main_computer,
             disable_delegate_gui=self.disable_delegate_gui,
             gui_model=self.gui_model,
+            workspace_root=workspace_root,
+            context_window_tokens=context_window_tokens,
         )
         tool_summaries = get_tool_summaries(tools)
         agents_md = (Path(__file__).parent / "openclaw" / "AGENTS.md").read_text()
@@ -242,13 +269,12 @@ class OpenClawAgent(BaseAgent):
         )
         session_mgr.set_system_prompt_report(report)
 
-        # Context overflow detection (US-OC-005)
-        # Allow env override for testing (e.g. CONTEXT_WINDOW_OVERRIDE=50000)
-        import os
-        ctx_override = os.environ.get("CONTEXT_WINDOW_OVERRIDE")
+        # Context overflow detection (US-OC-005).
+        # context_window_tokens was resolved above for FS-tool adaptive paging;
+        # reuse it here so the callback and the tools agree on the number.
         overflow_cb = ContextOverflowCallback(
             model=self.model,
-            context_window=int(ctx_override) if ctx_override else None,
+            context_window=context_window_tokens,
             instructions_tokens=len(instructions) // 4,
             resolved_model=resolved_model,
         )

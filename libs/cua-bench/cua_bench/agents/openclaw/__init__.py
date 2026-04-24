@@ -85,6 +85,7 @@ from .subagent_registry import (
 from .subagent_tools import DelegateGeneralTool, DelegateGUITool, SubagentsTool
 from .thinking import ThinkingConfig, ThinkLevel, resolve_thinking_default
 from .tools import ToolLoggingCallback, build_tools, get_tool_summaries
+from .tools_fs import EditFileTool, ReadFileTool, WriteFileTool
 from .transcript import group_step_output
 
 __all__ = [
@@ -151,4 +152,7 @@ __all__ = [
     "DelegateGeneralTool",
     "DelegateGUITool",
     "SubagentsTool",
+    "ReadFileTool",
+    "WriteFileTool",
+    "EditFileTool",
 ]

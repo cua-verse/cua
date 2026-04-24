@@ -1,0 +1,664 @@
+"""Remote-VM filesystem tools: read, write, edit (US-OC-055).
+
+Three BaseTool subclasses that route all file I/O through
+``session.interface`` (computer-server RPCs) — never the host ``open()``.
+Ports OpenClaw's ``createHostWorkspace{Read,Write,Edit}Tool`` behavior to
+CUA's sync-tool contract with async RPCs underneath.
+
+Kept from OpenClaw (``openclaw/src/agents/pi-tools.read.ts``,
+``pi-tools.host-edit.ts``, ``pi-tools.params.ts``):
+  - Required-param groups: read=[path], write=[path, content],
+    edit=[path, edits] — ``REQUIRED_PARAM_GROUPS`` at :75-85.
+  - Adaptive byte-paging on read when no explicit ``limit``:
+    ``cap = clamp(ctx_tokens * 4 * 0.10, 32KB, 128KB)`` —
+    ``resolveAdaptiveReadMaxBytes`` at :69-82.
+  - Image sanitization (MIME sniff vs extension, size cap, image
+    content block return) — ``normalizeReadImageResult`` at :292-349.
+  - Edit mismatch-hint recovery — ``wrapEditToolWithRecovery`` at
+    :150-212 (``EDIT_MISMATCH_HINT_LIMIT = 800``).
+  - Workspace-only path policy — ``wrapToolWorkspaceRootGuard``.
+
+Dropped:
+  - Sandbox bridge variants (docker-sandbox FS — no CUA analogue).
+  - Post-write retroactive-success inference (``didEditLikelyApply``) —
+    CUA writes over computer-server are single-shot RPCs with no
+    writeFile-vs-stat race.
+  - URL/file-URL/``@``-prefix handling — agents in our benchmark emit
+    plain Windows/POSIX paths.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import concurrent.futures
+import logging
+import ntpath
+import posixpath
+import re
+from typing import TYPE_CHECKING, Any, Optional, Union
+
+from agent.tools.base import BaseTool, register_tool
+
+if TYPE_CHECKING:
+    from computer.interface import BaseComputerInterface
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Constants (match OpenClaw pi-tools.read.ts:45-49 / pi-tools.host-edit.ts:22-23)
+# ---------------------------------------------------------------------------
+
+_MAX_IMAGE_BYTES_DEFAULT = 10 * 1024 * 1024            # matches DEFAULT_MAX_BYTES_MB
+_MAX_MISMATCH_HINT_CHARS = 800                         # matches EDIT_MISMATCH_HINT_LIMIT
+_DEFAULT_READ_PAGE_MAX_BYTES = 32 * 1024               # matches DEFAULT_READ_PAGE_MAX_BYTES
+_MAX_ADAPTIVE_READ_MAX_BYTES = 128 * 1024              # matches MAX_ADAPTIVE_READ_MAX_BYTES
+_ADAPTIVE_READ_CONTEXT_SHARE = 0.10                    # matches ADAPTIVE_READ_CONTEXT_SHARE
+_CHARS_PER_TOKEN_ESTIMATE = 4                          # matches CHARS_PER_TOKEN_ESTIMATE
+_DEFAULT_READ_LIMIT_LINES = 2000                       # explicit-limit fallback
+
+_MIME_MAP: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".tiff": "image/tiff",
+    ".tif": "image/tiff",
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_windows_path(path: str) -> bool:
+    """Detect Windows-style absolute paths (mirrors milestone.py:95)."""
+    return bool(
+        re.match(r"^[A-Za-z]:[\\/]", path)
+        or path.startswith("\\\\")
+        or "\\" in path
+    )
+
+
+def _normalize_path(path: str) -> str:
+    """Normalize a path using ntpath for Windows, posixpath otherwise."""
+    if _is_windows_path(path):
+        return ntpath.normpath(path)
+    return posixpath.normpath(path)
+
+
+def _parent_dir(path: str) -> str:
+    if _is_windows_path(path):
+        return ntpath.dirname(path)
+    return posixpath.dirname(path)
+
+
+def _assert_within_workspace(path: str, workspace_root: Optional[str]) -> None:
+    """Raise ``ValueError`` if ``path`` is outside ``workspace_root``.
+
+    Permissive no-op when ``workspace_root is None``.
+    On Windows paths comparison is case-insensitive (drive-letter semantics).
+    """
+    if not workspace_root:
+        return
+    is_win = _is_windows_path(workspace_root) or _is_windows_path(path)
+    normalized_path = _normalize_path(path)
+    normalized_root = _normalize_path(workspace_root)
+    sep = "\\" if is_win else "/"
+    if is_win:
+        candidate = normalized_path.lower()
+        root = normalized_root.lower()
+    else:
+        candidate = normalized_path
+        root = normalized_root
+    if candidate == root or candidate.startswith(root + sep):
+        return
+    raise ValueError(
+        f"path '{path}' is outside the task workspace ('{workspace_root}')."
+    )
+
+
+def _mime_from_extension(path: str) -> Optional[str]:
+    lower = path.lower()
+    for ext, mime in _MIME_MAP.items():
+        if lower.endswith(ext):
+            return mime
+    return None
+
+
+def _sniff_mime_from_bytes(data: bytes) -> Optional[str]:
+    """Return a MIME type sniffed from magic bytes, or ``None`` if unknown.
+
+    Mirrors the subset of ``sniffMimeFromBase64`` needed for our allowed
+    extensions plus PDF (for the non-image-sniff error path).
+    """
+    if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if len(data) >= 3 and data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if len(data) >= 6 and data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if len(data) >= 2 and data[:2] == b"BM":
+        return "image/bmp"
+    if len(data) >= 4 and data[:4] in (b"II*\x00", b"MM\x00*"):
+        return "image/tiff"
+    if len(data) >= 5 and data[:5] == b"%PDF-":
+        return "application/pdf"
+    return None
+
+
+def _format_bytes(n: int) -> str:
+    """Mirror OpenClaw ``formatBytes`` (pi-tools.read.ts:84-92)."""
+    if n >= 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f}MB"
+    if n >= 1024:
+        return f"{round(n / 1024)}KB"
+    return f"{n}B"
+
+
+def _resolve_adaptive_read_max_bytes(context_window_tokens: Optional[int]) -> int:
+    """Port of ``resolveAdaptiveReadMaxBytes`` (pi-tools.read.ts:69-82)."""
+    if context_window_tokens is None or not isinstance(context_window_tokens, (int, float)):
+        return _DEFAULT_READ_PAGE_MAX_BYTES
+    if context_window_tokens <= 0:
+        return _DEFAULT_READ_PAGE_MAX_BYTES
+    from_context = int(
+        context_window_tokens * _CHARS_PER_TOKEN_ESTIMATE * _ADAPTIVE_READ_CONTEXT_SHARE
+    )
+    return max(_DEFAULT_READ_PAGE_MAX_BYTES, min(_MAX_ADAPTIVE_READ_MAX_BYTES, from_context))
+
+
+def _run_async(coro):
+    """Drive an async coroutine from a sync ``BaseTool.call``.
+
+    Mirrors ``AnalyzeImageTool.call`` (analyze_image.py:149-170): spawn a
+    fresh loop in a worker thread when one is already running, otherwise
+    ``asyncio.run`` directly.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result()
+    return asyncio.run(coro)
+
+
+def _get_required_str(params: dict, key: str, tool_name: str) -> str:
+    value = params.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f'{tool_name}: required parameter "{key}" is missing or empty')
+    return value
+
+
+# ---------------------------------------------------------------------------
+# ReadFileTool
+# ---------------------------------------------------------------------------
+
+
+@register_tool("read")
+class ReadFileTool(BaseTool):
+    """Read a text or image file from the remote VM.
+
+    Text files return line-paginated content with adaptive byte-paging
+    when no explicit ``limit`` is supplied. Image files (PNG/JPEG/GIF/
+    WEBP/BMP/TIFF by extension) return a structured image block with
+    MIME-sniff correction and size cap (10 MB default).
+
+    Adapted from OpenClaw ``createHostWorkspaceReadTool`` (pi-tools.read.ts).
+    """
+
+    def __init__(
+        self,
+        interface: "BaseComputerInterface",
+        workspace_root: Optional[str] = None,
+        context_window_tokens: Optional[int] = None,
+        cfg: Optional[dict] = None,
+    ):
+        self.interface = interface
+        self.workspace_root = workspace_root
+        self.context_window_tokens = context_window_tokens
+        if workspace_root is None:
+            logger.info(
+                "ReadFileTool: workspace_root is None — permissive path policy"
+            )
+        super().__init__(cfg)
+
+    @property
+    def description(self) -> str:
+        return (
+            "Read a file on the remote VM (path resolves against the task "
+            "workspace). Text files return line-paginated content; image files "
+            "(PNG/JPEG/GIF/WEBP/BMP/TIFF) return the raw image for direct "
+            "inspection."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path on the VM (e.g. C:\\Users\\User\\Desktop\\tasks\\<tag>\\file.txt).",
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "1-based line offset to start reading from (default 1).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max lines to return. Omit to enable adaptive byte-paging.",
+                },
+                "max_bytes": {
+                    "type": "integer",
+                    "description": "Max bytes (image reads only; default 10 MB).",
+                },
+                "encoding": {
+                    "type": "string",
+                    "description": "Text decode encoding (default utf-8).",
+                },
+            },
+            "required": ["path"],
+        }
+
+    def call(self, params: Union[str, dict], **kwargs) -> dict:
+        try:
+            parsed = self._verify_json_format_args(params)
+            path = _get_required_str(parsed, "path", "read")
+            _assert_within_workspace(path, self.workspace_root)
+        except ValueError as e:
+            return {"success": False, "error": f"Error: {e}"}
+
+        try:
+            return _run_async(self._execute(parsed, path))
+        except Exception as e:  # noqa: BLE001 — surface RPC errors as tool errors
+            logger.error("read tool failure on %s: %s", path, e)
+            return {"success": False, "error": f"Error: {e}"}
+
+    async def _execute(self, params: dict, path: str) -> dict:
+        ext_mime = _mime_from_extension(path)
+        if ext_mime is not None:
+            return await self._read_image(params, path, ext_mime)
+        return await self._read_text(params, path)
+
+    # -- image branch --
+
+    async def _read_image(self, params: dict, path: str, declared_mime: str) -> dict:
+        max_bytes_raw = params.get("max_bytes")
+        if isinstance(max_bytes_raw, (int, float)) and max_bytes_raw > 0:
+            max_bytes = int(max_bytes_raw)
+        else:
+            max_bytes = _MAX_IMAGE_BYTES_DEFAULT
+
+        data = await self.interface.read_bytes(path)
+        if not data:
+            return {"success": False, "error": f"Error: file is empty: {path}"}
+        if len(data) > max_bytes:
+            actual_mb = len(data) / (1024 * 1024)
+            limit_mb = max_bytes / (1024 * 1024)
+            return {
+                "success": False,
+                "error": (
+                    f"Error: image too large ({actual_mb:.1f} MB), "
+                    f"maximum is {limit_mb:.0f} MB: {path}"
+                ),
+            }
+
+        sniffed = _sniff_mime_from_bytes(data)
+        effective_mime = declared_mime
+        if sniffed is not None:
+            if not sniffed.startswith("image/"):
+                return {
+                    "success": False,
+                    "error": (
+                        f"Error: file looks like {sniffed} but was treated as "
+                        f"{declared_mime} ({path})"
+                    ),
+                }
+            effective_mime = sniffed
+
+        b64 = base64.b64encode(data).decode("utf-8")
+        return {
+            "success": True,
+            "type": "image",
+            "data": b64,
+            "mime_type": effective_mime,
+            "text": f"Read image file [{effective_mime}]",
+        }
+
+    # -- text branch --
+
+    async def _read_text(self, params: dict, path: str) -> dict:
+        encoding = params.get("encoding") or "utf-8"
+        try:
+            raw_bytes = await self.interface.read_bytes(path)
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "error": f"Error: could not read file: {path} — {e}"}
+
+        try:
+            text = raw_bytes.decode(encoding)
+        except UnicodeDecodeError:
+            return {
+                "success": False,
+                "error": (
+                    f"Error: file is not {encoding} text ({path}) — use analyze_image "
+                    "for images or pass encoding='<other>'."
+                ),
+            }
+
+        lines = text.split("\n")
+        total_lines = len(lines)
+
+        offset_raw = params.get("offset")
+        offset = (
+            int(offset_raw)
+            if isinstance(offset_raw, (int, float)) and offset_raw > 0
+            else 1
+        )
+        if offset > total_lines:
+            return {
+                "success": True,
+                "content": "",
+                "truncated": False,
+                "total_lines": total_lines,
+                "next_offset": None,
+            }
+
+        limit_raw = params.get("limit")
+        has_explicit_limit = (
+            isinstance(limit_raw, (int, float)) and limit_raw > 0
+        )
+
+        if has_explicit_limit:
+            limit = int(limit_raw)
+            start = offset - 1
+            end = min(total_lines, start + limit)
+            sliced = lines[start:end]
+            truncated = end < total_lines
+            content = "\n".join(sliced)
+            return {
+                "success": True,
+                "content": content,
+                "truncated": truncated,
+                "total_lines": total_lines,
+                "next_offset": (end + 1) if truncated else None,
+            }
+
+        # Adaptive byte-paging: accumulate lines from offset until cap reached
+        cap = _resolve_adaptive_read_max_bytes(self.context_window_tokens)
+        start = offset - 1
+        accumulated: list[str] = []
+        accumulated_bytes = 0
+        next_index = start
+        capped = False
+        for i in range(start, total_lines):
+            line = lines[i]
+            # Byte cost for this line (include separator)
+            line_bytes = len(line.encode(encoding)) + (1 if accumulated else 0)
+            if accumulated and accumulated_bytes + line_bytes > cap:
+                capped = True
+                break
+            accumulated.append(line)
+            accumulated_bytes += line_bytes
+            next_index = i + 1
+
+        content = "\n".join(accumulated)
+        truncated = next_index < total_lines
+        next_offset = (next_index + 1) if truncated else None
+        if capped and next_offset is not None:
+            content = (
+                f"{content}\n\n[Read output capped at {_format_bytes(cap)} "
+                f"for this call. Use offset={next_offset} to continue.]"
+            )
+        return {
+            "success": True,
+            "content": content,
+            "truncated": truncated,
+            "total_lines": total_lines,
+            "next_offset": next_offset,
+        }
+
+
+# ---------------------------------------------------------------------------
+# WriteFileTool
+# ---------------------------------------------------------------------------
+
+
+@register_tool("write")
+class WriteFileTool(BaseTool):
+    """Write (or append) UTF-8 text to a file on the remote VM.
+
+    Adapted from OpenClaw ``createHostWorkspaceWriteTool`` (pi-tools.read.ts:656).
+    """
+
+    def __init__(
+        self,
+        interface: "BaseComputerInterface",
+        workspace_root: Optional[str] = None,
+        cfg: Optional[dict] = None,
+    ):
+        self.interface = interface
+        self.workspace_root = workspace_root
+        super().__init__(cfg)
+
+    @property
+    def description(self) -> str:
+        return (
+            "Create or overwrite a UTF-8 text file on the remote VM (path "
+            "resolves against the task workspace)."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path on the VM.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "UTF-8 text content to write.",
+                },
+                "append": {
+                    "type": "boolean",
+                    "description": "Append instead of overwrite (default false).",
+                },
+                "create_parents": {
+                    "type": "boolean",
+                    "description": "Create parent directories if missing (default true).",
+                },
+            },
+            "required": ["path", "content"],
+        }
+
+    def call(self, params: Union[str, dict], **kwargs) -> dict:
+        try:
+            parsed = self._verify_json_format_args(params)
+            path = _get_required_str(parsed, "path", "write")
+            if "content" not in parsed or not isinstance(parsed["content"], str):
+                raise ValueError('write: required parameter "content" is missing or not a string')
+            _assert_within_workspace(path, self.workspace_root)
+        except ValueError as e:
+            return {"success": False, "error": f"Error: {e}"}
+
+        try:
+            return _run_async(self._execute(parsed, path))
+        except Exception as e:  # noqa: BLE001
+            logger.error("write tool failure on %s: %s", path, e)
+            return {"success": False, "error": f"Error: {e}"}
+
+    async def _execute(self, params: dict, path: str) -> dict:
+        content: str = params["content"]
+        append = bool(params.get("append", False))
+        create_parents = bool(params.get("create_parents", True))
+
+        if create_parents:
+            parent = _parent_dir(path)
+            if parent and parent not in (".", "/", ""):
+                try:
+                    await self.interface.create_dir(parent)
+                except Exception as e:  # noqa: BLE001 — mkdir failure is recoverable
+                    logger.debug("create_dir(%s) failed (may already exist): %s", parent, e)
+
+        await self.interface.write_text(path, content, append=append)
+        return {
+            "success": True,
+            "bytes_written": len(content.encode("utf-8")),
+            "path": path,
+            "append": append,
+        }
+
+
+# ---------------------------------------------------------------------------
+# EditFileTool
+# ---------------------------------------------------------------------------
+
+
+@register_tool("edit")
+class EditFileTool(BaseTool):
+    """Exact-match string replacement on a file in the remote VM.
+
+    Adapted from OpenClaw ``createHostWorkspaceEditTool`` (pi-tools.read.ts:663)
+    plus ``wrapEditToolWithRecovery`` (pi-tools.host-edit.ts). We keep the
+    mismatch-hint recovery (include current file contents on failure) but
+    drop the post-write retroactive-success inference — CUA's ``write_text``
+    is a single-shot RPC with no write-vs-stat race.
+    """
+
+    def __init__(
+        self,
+        interface: "BaseComputerInterface",
+        workspace_root: Optional[str] = None,
+        cfg: Optional[dict] = None,
+    ):
+        self.interface = interface
+        self.workspace_root = workspace_root
+        super().__init__(cfg)
+
+    @property
+    def description(self) -> str:
+        return (
+            "Make precise edits to a file on the remote VM (path resolves "
+            "against the task workspace). Each `{oldText, newText}` "
+            "replacement must match exactly."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path on the VM.",
+                },
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "Non-empty array of {oldText, newText} replacements. "
+                        "oldText must be non-empty; newText may be empty (deletion)."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "oldText": {"type": "string"},
+                            "newText": {"type": "string"},
+                        },
+                        "required": ["oldText", "newText"],
+                    },
+                },
+            },
+            "required": ["path", "edits"],
+        }
+
+    def call(self, params: Union[str, dict], **kwargs) -> dict:
+        try:
+            parsed = self._verify_json_format_args(params)
+            path = _get_required_str(parsed, "path", "edit")
+            edits = self._validate_edits(parsed.get("edits"))
+            _assert_within_workspace(path, self.workspace_root)
+        except ValueError as e:
+            return {"success": False, "error": f"Error: {e}"}
+
+        try:
+            return _run_async(self._execute(path, edits))
+        except Exception as e:  # noqa: BLE001
+            logger.error("edit tool failure on %s: %s", path, e)
+            return {"success": False, "error": f"Error: {e}"}
+
+    @staticmethod
+    def _validate_edits(raw: Any) -> list[tuple[str, str]]:
+        if not isinstance(raw, list) or not raw:
+            raise ValueError('edit: "edits" must be a non-empty array')
+        normalized: list[tuple[str, str]] = []
+        for i, entry in enumerate(raw):
+            if not isinstance(entry, dict):
+                raise ValueError(f"edit: edits[{i}] must be an object")
+            old_text = entry.get("oldText")
+            new_text = entry.get("newText")
+            if not isinstance(old_text, str) or old_text == "":
+                raise ValueError(
+                    f"edit: edits[{i}].oldText must be a non-empty string"
+                )
+            if not isinstance(new_text, str):
+                raise ValueError(f"edit: edits[{i}].newText must be a string")
+            normalized.append((old_text, new_text))
+        return normalized
+
+    async def _execute(self, path: str, edits: list[tuple[str, str]]) -> dict:
+        try:
+            original_bytes = await self.interface.read_bytes(path)
+            original = original_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return {
+                "success": False,
+                "error": (
+                    f"Error: file is not utf-8 text ({path}); edit only supports "
+                    "utf-8 text files."
+                ),
+            }
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "error": f"Error: could not read file: {path} — {e}"}
+
+        current = original
+        for idx, (old_text, new_text) in enumerate(edits):
+            pos = current.find(old_text)
+            if pos < 0:
+                snippet = current[:_MAX_MISMATCH_HINT_CHARS]
+                truncated = len(current) > _MAX_MISMATCH_HINT_CHARS
+                hint_suffix = "\n... (truncated)" if truncated else ""
+                return {
+                    "success": False,
+                    "error": (
+                        f"Error: could not find the exact text in {path} for "
+                        f"edits[{idx}].oldText.\nCurrent file contents "
+                        f"(first {_MAX_MISMATCH_HINT_CHARS} chars):\n"
+                        f"{snippet}{hint_suffix}"
+                    ),
+                }
+            current = current[:pos] + new_text + current[pos + len(old_text) :]
+
+        if current == original:
+            return {
+                "success": True,
+                "edits_applied": len(edits),
+                "path": path,
+                "unchanged": True,
+            }
+
+        await self.interface.write_text(path, current, append=False)
+        return {
+            "success": True,
+            "edits_applied": len(edits),
+            "path": path,
+        }

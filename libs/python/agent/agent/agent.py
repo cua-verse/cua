@@ -928,7 +928,45 @@ class ComputerAgent:
                         },
                     )
 
-                # Create function call output
+                # Create function call output.
+                # If a tool returns an image block ({"type": "image", "data": b64,
+                # "mime_type": mime}), mirror the computer-call screenshot pattern:
+                # emit a sentinel in function_call_output.output and append a
+                # separate user message with an input_image content block. This
+                # keeps the screenshot-whale fix invariant (no base64 in tool-result
+                # content) while still delivering the image to the model.
+                # Introduced for US-OC-055 ReadFileTool image branch.
+                if (
+                    isinstance(result, dict)
+                    and result.get("type") == "image"
+                    and isinstance(result.get("data"), str)
+                    and isinstance(result.get("mime_type"), str)
+                ):
+                    sentinel = {
+                        "success": result.get("success", True),
+                        "read_image": True,
+                        "mime_type": result["mime_type"],
+                    }
+                    if isinstance(result.get("text"), str):
+                        sentinel["text"] = result["text"]
+                    call_output = {
+                        "type": "function_call_output",
+                        "call_id": item.get("call_id"),
+                        "output": json.dumps(sentinel),
+                    }
+                    image_message = {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": f"data:{result['mime_type']};base64,{result['data']}",
+                            }
+                        ],
+                    }
+                    result = [call_output, image_message]
+                    await self._on_function_call_end(item, result)
+                    return result
+
                 call_output = {
                     "type": "function_call_output",
                     "call_id": item.get("call_id"),
