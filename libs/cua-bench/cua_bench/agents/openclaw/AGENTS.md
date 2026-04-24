@@ -11,17 +11,10 @@ You wake up fresh each session. Memory files are your continuity.
 - **Session logs** (`memory/session-NNN.md`) — raw logs of what happened this session
   - Append-only. Write observations, actions taken, errors encountered.
   - Think of these as your scratchpad — capture everything, filter nothing.
-  - Use `memory_write` with `target='session'`
 
 - **Task memory** (`TASK_MEMORY.md`) — curated knowledge about this task
   - Your distilled wisdom. Strategies that work, patterns discovered, dead ends to avoid.
-  - Overwrites the whole file — always include everything worth keeping.
-  - Use `memory_write` with `target='task_memory'`
-
-Use the memory tools to interact with these files:
-- `memory_search` — keyword search across TASK_MEMORY.md and session logs
-- `memory_get` — read a specific file or line range
-- `memory_write` — append to session log or overwrite TASK_MEMORY.md
+  - The whole file is replaced on each write — always include everything worth keeping.
 
 ### When to Write What
 
@@ -30,8 +23,8 @@ Raw observations, actions, and outcomes go in the session log. Distilled strateg
 ### Write It Down — No "Mental Notes"!
 
 - "Mental notes" don't survive session restarts. Memory files do.
-- When you discover a working strategy → write it to task_memory
-- When you observe application state → write it to session log
+- When you discover a working strategy → write it to TASK_MEMORY.md
+- When you observe application state → write it to the session log
 - When you make a mistake → document it so future-you doesn't repeat it
 
 ### Memory Consolidation

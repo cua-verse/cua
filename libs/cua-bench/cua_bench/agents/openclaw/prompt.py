@@ -142,24 +142,60 @@ class PromptBuilder:
     def _build_memory(self, tool_summaries: dict[str, str]) -> list[str]:
         """Build the Memory Recall section. Only included if memory tools are present.
 
-        Mirrors OpenClaw's buildMemorySection() in system-prompt.ts:
-        search-first behavioral directive, not a generic tutorial.
+        Mirrors OpenClaw's memory-core/src/prompt-section.ts::buildPromptSection:
+        each tool contributes its own behavioral line, gated on that tool being
+        registered (absence-is-the-signal). Read guidance branches on the
+        search/get subset; memory_write adds its own target= guidance so the
+        operational rules live here rather than in AGENTS.md.
         """
-        memory_tools = {"memory_search", "memory_get"}
-        if not memory_tools.intersection(tool_summaries):
+        has_search = "memory_search" in tool_summaries
+        has_get = "memory_get" in tool_summaries
+        has_write = "memory_write" in tool_summaries
+        if not (has_search or has_get or has_write):
             return []
 
-        return [
-            "## Memory Recall",
-            (
-                "Before acting on anything about prior attempts, strategies, environment "
-                "observations, or task state: run memory_search on TASK_MEMORY.md + "
-                "memory/session-*.md; then use memory_get to pull only the needed lines. "
-                "If low confidence after search, say you checked."
-            ),
-            "Citations: include Source: <path#line> when referencing memory snippets.",
-            "",
-        ]
+        lines: list[str] = ["## Memory Recall"]
+
+        if has_search and has_get:
+            lines.append(
+                "Before acting on anything about prior attempts, strategies, "
+                "environment observations, or task state: run memory_search on "
+                "TASK_MEMORY.md + memory/session-*.md; then use memory_get to "
+                "pull only the needed lines. If low confidence after search, "
+                "say you checked."
+            )
+        elif has_search:
+            lines.append(
+                "Before acting on anything about prior attempts, strategies, "
+                "environment observations, or task state: run memory_search on "
+                "TASK_MEMORY.md + memory/session-*.md and answer from the "
+                "matching results. If low confidence after search, say you checked."
+            )
+        elif has_get:
+            lines.append(
+                "Before acting on anything about prior attempts, strategies, "
+                "environment observations, or task state that already points to "
+                "a specific memory file or note: run memory_get to pull only the "
+                "needed lines. If low confidence after reading them, say you checked."
+            )
+
+        if has_search or has_get:
+            lines.append(
+                "Citations: include Source: <path#line> when referencing memory snippets."
+            )
+
+        if has_write:
+            lines.append(
+                "Writing: use memory_write with target='session' for raw "
+                "observations, actions, and errors during the run; use "
+                "target='task_memory' to overwrite TASK_MEMORY.md with distilled "
+                "strategies and patterns worth keeping across sessions. "
+                "target='task_memory' replaces the whole file — always include "
+                "everything worth keeping."
+            )
+
+        lines.append("")
+        return lines
 
     def _build_delegation(self, tool_summaries: dict[str, str]) -> list[str]:
         """Build the Delegation section.
