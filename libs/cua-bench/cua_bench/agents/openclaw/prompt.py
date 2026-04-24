@@ -98,6 +98,9 @@ class PromptBuilder:
 
         if self.config.tools.enabled and tool_summaries:
             parts.extend(self._build_tools(tool_summaries))
+            exec_lines = self._build_exec(tool_summaries)
+            if exec_lines:
+                parts.extend(exec_lines)
 
         if self.config.memory.enabled and tool_summaries:
             memory_lines = self._build_memory(tool_summaries)
@@ -155,6 +158,59 @@ class PromptBuilder:
             lines.append(f"- **{name}**: {description}")
         lines.append("")
         return lines
+
+    def _build_exec(self, tool_summaries: dict[str, str]) -> list[str]:
+        """Build the Shell Execution section. Only included if ``exec`` is registered.
+
+        Layer 2 operational prose for the exec tool — per US-OC-068 the
+        tool-specific guardrails live in this gated builder, not AGENTS.md.
+        Mirrors OpenClaw's ``describeExecTool`` prose (bash-tools.descriptions.ts)
+        plus CUA-specific divergence notes (client-side timeout, cwd emulation,
+        middle truncation).
+        """
+        if "exec" not in tool_summaries:
+            return []
+        gui_alternatives = "the `computer` tool"
+        if "delegate_gui" in tool_summaries:
+            gui_alternatives = "the `computer` tool or `delegate_gui`"
+        return [
+            "## Shell Execution",
+            "",
+            (
+                "- `exec` runs a single non-GUI shell command inside the VM "
+                "(cmd.exe on Windows, /bin/sh on POSIX) and returns "
+                "stdout/stderr/exit_code. GUI apps launched via `exec` will "
+                f"block the call until they exit — use {gui_alternatives} "
+                "for GUI work."
+            ),
+            (
+                "- Prefer one command per call. Do NOT build tight polling "
+                "loops with `exec` — long-running or background work is not "
+                "supported yet; use a single deterministic command instead."
+            ),
+            (
+                "- `cwd` is emulated via a `cd` prefix and must resolve "
+                "inside the task workspace (bounded by TASK_CATEGORY / TASK_TAG)."
+            ),
+            (
+                "- `timeout` bounds the **client-side** wait only; on expiry "
+                "the VM-side process may keep running. Keep timeouts tight "
+                "(default 60s, max 300s)."
+            ),
+            (
+                "- On Windows prefer direct executables (`dir`, `type`, "
+                "`where`, `python3`). If you need PowerShell, write "
+                "`powershell -NoProfile -Command \"...\"` explicitly — "
+                "avoid wrapping in `cmd /c` or `& `."
+            ),
+            (
+                "- Each of `stdout`/`stderr` is middle-truncated at ~200K "
+                "chars; head + tail are preserved so exit/error lines stay "
+                "visible. Use `read` for reviewing large file contents "
+                "rather than `exec type ...`."
+            ),
+            "",
+        ]
 
     def _build_memory(self, tool_summaries: dict[str, str]) -> list[str]:
         """Build the Memory Recall section. Only included if memory tools are present.
