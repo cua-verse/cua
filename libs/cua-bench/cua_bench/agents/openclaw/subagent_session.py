@@ -351,7 +351,6 @@ class GeneralSubagentSession:
         kwargs: dict[str, Any] = {
             "model": resolved.model,
             "messages": self._messages,
-            "max_tokens": 4096,
             "temperature": 1.0,
             **self._thinking_params,
         }
