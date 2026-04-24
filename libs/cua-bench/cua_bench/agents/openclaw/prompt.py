@@ -2,6 +2,23 @@
 
 Design rationale: docs/plan/US-OC-001-system-prompt-builder.md
 Reference implementation: openclaw/src/agents/system-prompt.ts (buildAgentSystemPrompt)
+
+Authoring rule for tool-specific prose (enforced by US-OC-068):
+    Non-obvious operational rules for a tool (polling guardrails, `target=`
+    argument semantics, concurrency caps, patch-format rules, etc.) belong
+    in a gated `_build_<tool>()` method here — NOT in AGENTS.md. AGENTS.md
+    is injected verbatim into every prompt; putting tool-specific content
+    there means a disabled tool's prose still reaches the model. A gated
+    builder makes absence the signal: if `"<tool>" not in tool_summaries`,
+    return `[]` and the section vanishes.
+
+    Two layers:
+      - `BaseTool.description` owns Layer 1 (one-line "what it does").
+      - `_build_<tool>()` owns Layer 2 (non-obvious operational rules).
+
+    Reference: openclaw/extensions/memory-core/src/prompt-section.ts for the
+    subset-branching pattern; openclaw/src/agents/system-prompt.ts for the
+    inline `if (availableTools.has(...))` gating pattern.
 """
 
 from __future__ import annotations
