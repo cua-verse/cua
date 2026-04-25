@@ -6,7 +6,7 @@ import json as _json
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from agent.model_config import ResolvedModel, resolve_model
+from .model_config import ResolvedModel, resolve_model
 
 
 @dataclass(frozen=True)

@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agent.model_config import resolve_model
+from .openclaw.model_config import resolve_model
 
 from . import register_agent
 from .base import AgentResult, BaseAgent, FailureMode

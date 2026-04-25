@@ -33,7 +33,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from agent.model_config import ResolvedModel, resolve_model
+from .model_config import ResolvedModel, resolve_model
 from agent.tools.base import BaseTool
 
 from .context import (

@@ -6,7 +6,7 @@ import base64
 import logging
 from typing import TYPE_CHECKING, Optional, Union
 
-from .base import BaseTool, register_tool
+from agent.tools.base import BaseTool, register_tool
 
 if TYPE_CHECKING:
     from computer.interface import BaseComputerInterface

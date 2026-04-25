@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 
 import litellm
 
-from .base import BaseTool, register_tool
+from agent.tools.base import BaseTool, register_tool
 
 if TYPE_CHECKING:
     from computer.interface import BaseComputerInterface

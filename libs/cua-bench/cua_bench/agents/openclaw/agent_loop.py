@@ -31,7 +31,7 @@ from __future__ import annotations
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Union
 
 from agent.agent import ComputerAgent, get_json, get_output_call_ids
-from agent.model_config import ResolvedModel
+from .model_config import ResolvedModel
 from agent.responses import replace_failed_computer_calls_with_function_calls
 from litellm.responses.utils import Usage
 

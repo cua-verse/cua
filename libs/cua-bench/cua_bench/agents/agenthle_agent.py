@@ -62,7 +62,7 @@ class AgentHLEAgent(BaseAgent):
             trajectory_dir = logging_dir / "trajectories"
             trajectory_dir.mkdir(parents=True, exist_ok=True)
 
-        from agent.tools import MilestoneTool
+        from cua_bench.agents.openclaw.milestone import MilestoneTool
         milestone_tool = MilestoneTool(session.interface)
         # Create agent with custom computer
         agent = ComputerAgent(

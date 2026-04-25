@@ -205,7 +205,8 @@ def build_tools(
             0.10, 32 KB, 128 KB) — matches OpenClaw
             ``resolveAdaptiveReadMaxBytes``).
     """
-    from agent.tools import AnalyzeImageTool, MilestoneTool
+    from .analyze_image import AnalyzeImageTool
+    from .milestone import MilestoneTool
 
     milestone_tool = MilestoneTool(session.interface)
     analyze_image_tool = AnalyzeImageTool(

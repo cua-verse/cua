@@ -11,9 +11,7 @@ from .base import (
     get_tool,
     register_tool,
 )
-from .analyze_image import AnalyzeImageTool
 from .browser_tool import BrowserTool
-from .milestone import MilestoneTool
 
 __all__ = [
     "BaseTool",
@@ -22,7 +20,5 @@ __all__ = [
     "get_registered_tools",
     "get_tool",
     "TOOL_REGISTRY",
-    "AnalyzeImageTool",
     "BrowserTool",
-    "MilestoneTool",
 ]

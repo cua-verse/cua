@@ -18,7 +18,7 @@ from __future__ import annotations
 import json as _json
 from typing import TYPE_CHECKING, Any
 
-from agent.model_config import ResolvedModel, resolve_model
+from .model_config import ResolvedModel, resolve_model
 
 from .helper_runtime import call_helper_model
 

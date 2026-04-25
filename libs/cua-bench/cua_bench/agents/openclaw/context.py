@@ -33,7 +33,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from agent.model_config import ResolvedModel, resolve_model
+from .model_config import ResolvedModel, resolve_model
 from agent.callbacks.base import AsyncCallbackHandler
 
 from .helper_runtime import call_helper_model

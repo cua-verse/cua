@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
 
-from agent.model_config import ResolvedModel, resolve_model
+from .model_config import ResolvedModel, resolve_model
 
 
 class ThinkLevel(str, Enum):

@@ -9,8 +9,8 @@ through to the local-filesystem branch and returned ``file not found``.
 
 import pytest
 
-from agent.tools.analyze_image import _is_remote_path
-from agent.tools.milestone import MilestoneTool
+from cua_bench.agents.openclaw.analyze_image import _is_remote_path
+from cua_bench.agents.openclaw.milestone import MilestoneTool
 
 
 # Build a MilestoneTool without an interface — the helper is pure.
