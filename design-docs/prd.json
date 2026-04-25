@@ -1762,8 +1762,8 @@
         "Level 2: bash run_magic_tower.sh 50 with a task that requires reading a save file \u2014 trajectory logs show at least one successful read call returning non-empty content"
       ],
       "priority": 55,
-      "passes": false,
-      "notes": "Three-in-one story because read/write/edit share the same session.interface plumbing and a single Level 2 VM test exercises all three. From US-OC-031 audit (Category 1, P1). Prompt-builder obligation: none (schema-only is sufficient per audit meta-finding)."
+      "passes": true,
+      "notes": "Three-in-one story because read/write/edit share the same session.interface plumbing and a single Level 2 VM test exercises all three. From US-OC-031 audit (Category 1, P1). Prompt-builder obligation: none (schema-only is sufficient per audit meta-finding). Landed 2026-04-24: tools_fs.py (ReadFileTool/WriteFileTool/EditFileTool), wired in build_tools() (tools.py:215-221), 60 unit tests in tests/test_fs_tools.py, Level 2 evidence under logs/us_oc_055/, plan at docs/plan/US-OC-055-remote-fs-tools.md."
     },
     {
       "id": "US-OC-056",
@@ -1775,7 +1775,7 @@
         ],
         "reference": "../openclaw/src/agents/tools/web-tools.ts (createWebSearchTool, createWebFetchTool); ../openclaw/src/agents/tools/web-fetch.ts; ../openclaw/src/agents/tools/web-search.ts; ../openclaw/src/agents/tools/web-guarded-fetch.ts (SSRF guard reference)",
         "depends": "None \u2014 standalone",
-        "planFile": null
+        "planFile": "docs/plan/US-OC-056-web-tools.md"
       },
       "acceptanceCriteria": [
         "Level 1: Lint passes (uv run ruff check .)",
@@ -1785,8 +1785,8 @@
         "Level 2: bash run_magic_tower.sh 50 \u2014 trajectory logs show the agent invoking web_search or web_fetch at least once on a task that plausibly benefits from external context"
       ],
       "priority": 56,
-      "passes": false,
-      "notes": "From US-OC-031 audit (Category 5, P1). Pure BaseTool migration (low complexity). Prompt-builder obligation: none. Pick one search provider to ship with (Brave API or DuckDuckGo); fetch extractor: trafilatura preferred over readability-lxml for text quality."
+      "passes": true,
+      "notes": "From US-OC-031 audit (Category 5, P1). Pure BaseTool migration (low complexity). Prompt-builder obligation: none. Pick one search provider to ship with (Brave API or DuckDuckGo); fetch extractor: trafilatura preferred over readability-lxml for text quality. Landed 2026-04-24: tools_web.py (WebSearchTool/WebFetchTool), wired in build_tools() (tools.py:221-222/240-241), 58 unit tests in tests/test_web_tools.py, Level 2 VM run verified (logs/us_oc_056/), plan at docs/plan/US-OC-056-web-tools.md."
     },
     {
       "id": "US-OC-057",

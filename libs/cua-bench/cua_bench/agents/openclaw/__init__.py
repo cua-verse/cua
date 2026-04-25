@@ -87,6 +87,7 @@ from .thinking import ThinkingConfig, ThinkLevel, resolve_thinking_default
 from .tools import ToolLoggingCallback, build_tools, get_tool_summaries
 from .tools_fs import EditFileTool, ReadFileTool, WriteFileTool
 from .tools_shell import ExecTool
+from .tools_web import WebFetchTool, WebSearchTool
 from .transcript import group_step_output
 
 __all__ = [
@@ -157,4 +158,6 @@ __all__ = [
     "WriteFileTool",
     "EditFileTool",
     "ExecTool",
+    "WebSearchTool",
+    "WebFetchTool",
 ]

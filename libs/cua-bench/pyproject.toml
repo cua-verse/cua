@@ -42,6 +42,9 @@ dependencies = [
     "pyquery>=2.0.1",
     "html5lib>=1.1",
     "beautifulsoup4>=4.14.2",
+    "readability-lxml>=0.8.1",
+    "lxml[html_clean]>=5.0",
+    "markdownify>=0.11.6",
     # Core utilities
     "pillow>=11.0.0",
     "numpy>=2.0.0",

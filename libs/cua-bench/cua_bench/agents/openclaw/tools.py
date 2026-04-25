@@ -30,6 +30,7 @@ from .subagent_registry import SubagentRegistry
 from .subagent_tools import DelegateGeneralTool, DelegateGUITool, SubagentsTool
 from .tools_fs import EditFileTool, ReadFileTool, WriteFileTool
 from .tools_shell import ExecTool
+from .tools_web import WebFetchTool, WebSearchTool
 
 
 COMPUTER_TOOL_NAME = "computer"
@@ -220,6 +221,8 @@ def build_tools(
     write_tool = WriteFileTool(session.interface, workspace_root=workspace_root)
     edit_tool = EditFileTool(session.interface, workspace_root=workspace_root)
     exec_tool = ExecTool(session.interface, workspace_root=workspace_root)
+    web_search = WebSearchTool()
+    web_fetch = WebFetchTool()
     memory_search = MemorySearchTool(memory_store)
     memory_get = MemoryGetTool(memory_store)
     memory_write = MemoryWriteTool(memory_store)
@@ -237,6 +240,8 @@ def build_tools(
         write_tool,
         edit_tool,
         exec_tool,
+        web_search,
+        web_fetch,
         memory_search,
         memory_get,
         memory_write,
