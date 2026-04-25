@@ -680,18 +680,11 @@ class GenericComputerInterface(BaseComputerInterface):
         screen_y = y * height_scale
 
         self.logger.debug(
-            "to_screen_coordinates: (%.1f,%.1f) -> (%.1f,%.1f) "
-            "(screen=%dx%d, screenshot=%dx%d, scale=%.4fx%.4f)",
-            x,
-            y,
-            screen_x,
-            screen_y,
-            screen_size["width"],
-            screen_size["height"],
-            screenshot_width,
-            screenshot_height,
-            width_scale,
-            height_scale,
+            "to_screen_coordinates: "
+            f"({x:.1f},{y:.1f}) -> ({screen_x:.1f},{screen_y:.1f}) "
+            f"(screen={screen_size['width']}x{screen_size['height']}, "
+            f"screenshot={screenshot_width}x{screenshot_height}, "
+            f"scale={width_scale:.4f}x{height_scale:.4f})"
         )
 
         return screen_x, screen_y
@@ -720,18 +713,11 @@ class GenericComputerInterface(BaseComputerInterface):
         screenshot_y = y * height_scale
 
         self.logger.debug(
-            "to_screenshot_coordinates: (%.1f,%.1f) -> (%.1f,%.1f) "
-            "(screen=%dx%d, screenshot=%dx%d, scale=%.4fx%.4f)",
-            x,
-            y,
-            screenshot_x,
-            screenshot_y,
-            screen_size["width"],
-            screen_size["height"],
-            screenshot_width,
-            screenshot_height,
-            width_scale,
-            height_scale,
+            "to_screenshot_coordinates: "
+            f"({x:.1f},{y:.1f}) -> ({screenshot_x:.1f},{screenshot_y:.1f}) "
+            f"(screen={screen_size['width']}x{screen_size['height']}, "
+            f"screenshot={screenshot_width}x{screenshot_height}, "
+            f"scale={width_scale:.4f}x{height_scale:.4f})"
         )
 
         return screenshot_x, screenshot_y
