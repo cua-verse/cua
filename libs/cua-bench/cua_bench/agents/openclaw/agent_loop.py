@@ -31,11 +31,13 @@ from __future__ import annotations
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Union
 
 from agent.agent import ComputerAgent, get_json, get_output_call_ids
+from agent.computers.cua import cuaComputerHandler
 from .model_config import ResolvedModel
 from agent.responses import replace_failed_computer_calls_with_function_calls
 from litellm.responses.utils import Usage
 
 from .canonical import normalize_to_canonical, sanitize_items
+from .computer_handler import OpenClawComputerHandler
 from .context import ContextOverflowCallback, compact_messages, is_context_overflow_error
 from .memory import MemoryStore
 from .memory_flush import run_memory_flush
@@ -377,6 +379,32 @@ class OpenClawComputerAgent(ComputerAgent):
             self.session_mgr.append_message("user", msg.get("content", []))
 
     # --- Screenshot path injection (US-OC-034) ---
+
+    async def _initialize_computers(self) -> None:
+        """Upgrade the resolved computer handler to OpenClawComputerHandler.
+
+        Runs the SDK's normal handler resolution (BaseComputerTool path or
+        ``make_computer_handler`` factory) via super(), then re-wraps a
+        plain ``cuaComputerHandler`` in ``OpenClawComputerHandler`` so the
+        chord-vs-sequence keypress fix applies for every
+        ``OpenClawComputerAgent`` run. Default behavior for any other
+        ``ComputerAgent`` subclass is unchanged — the upgrade lives at this
+        cua-bench layer, not in the SDK.
+
+        Skip when the resolved handler is a ``BaseComputerTool`` (preferred
+        SDK path, different protocol) or already an ``OpenClawComputerHandler``
+        subclass (e.g. orchestration's monkey-patch path) — prevents
+        double-wrapping.
+        """
+        await super()._initialize_computers()
+        handler = self.computer_handler
+        if (
+            isinstance(handler, cuaComputerHandler)
+            and not isinstance(handler, OpenClawComputerHandler)
+        ):
+            upgraded = OpenClawComputerHandler(handler.cua_computer)
+            await upgraded._initialize()
+            self.computer_handler = upgraded
 
     async def _on_screenshot(
         self, screenshot: Union[str, bytes], name: str = "screenshot"
