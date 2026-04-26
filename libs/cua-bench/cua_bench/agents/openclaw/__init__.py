@@ -22,7 +22,13 @@ Components:
   - sanitize_items / repair_orphaned_pairs / ensure_valid_ordering: sanitize pipeline (US-OC-039)
 """
 
+from .adapters import (
+    OpenClawImageAwareComputerAgent,
+    OpenClawImageRetentionCallback,
+    OpenClawTrajectorySaverCallback,
+)
 from .agent_loop import OpenClawComputerAgent
+from .computer_handler import OpenClawComputerHandler
 from .canonical import (
     CanonicalMessage,
     CompactionSummaryBlock,
@@ -92,6 +98,10 @@ from .transcript import group_step_output
 
 __all__ = [
     "OpenClawComputerAgent",
+    "OpenClawComputerHandler",
+    "OpenClawImageAwareComputerAgent",
+    "OpenClawImageRetentionCallback",
+    "OpenClawTrajectorySaverCallback",
     "CanonicalMessage",
     "CompactionSummaryBlock",
     "ComputerCallBlock",
