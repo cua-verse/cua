@@ -245,6 +245,7 @@ class GeneralSubagentSession:
             model=model,
             context_window=int(ctx_override) if ctx_override else None,
             instructions_tokens=len(self._system_prompt) // 4,
+            tag=run_id,
         )
 
         # Filtered tool list + litellm schema built once; reused every turn.

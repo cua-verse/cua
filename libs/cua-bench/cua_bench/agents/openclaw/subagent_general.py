@@ -103,9 +103,18 @@ async def run_general_subagent(
         )
         registry.attach_inbox(run_id, session.inbox)
         result_text = await session.run()
+        log_limit = 2000
+        if len(result_text) > log_limit:
+            shown = (
+                f"{result_text[:log_limit]}"
+                f"... [truncated {len(result_text) - log_limit} chars]"
+            )
+        else:
+            shown = result_text
         print(
             f"[Subagent] General subagent {run_id} completed "
-            f"({session.usage.input_tokens}+{session.usage.output_tokens} tokens)"
+            f"({session.usage.input_tokens}+{session.usage.output_tokens} tokens)\n"
+            f"[Subagent:{run_id}] result:\n{shown}"
         )
         registry.complete(run_id, result_text, session.usage)
     except asyncio.CancelledError:

@@ -273,6 +273,7 @@ class ContextOverflowCallback(AsyncCallbackHandler):
         model: str = "",
         instructions_tokens: int = 0,
         resolved_model: ResolvedModel | None = None,
+        tag: str | None = None,
     ):
         if context_window is not None:
             self._context_window = context_window
@@ -285,6 +286,7 @@ class ContextOverflowCallback(AsyncCallbackHandler):
         self._current_tokens = 0
         self._turn_count = 0
         self._needs_compaction = False
+        self._tag = tag
 
     # -- Public read-only properties --
 
@@ -334,8 +336,9 @@ class ContextOverflowCallback(AsyncCallbackHandler):
         self._needs_compaction = (
             self._current_tokens > self._context_window * self._threshold
         )
+        prefix = f"[ContextOverflow:{self._tag}]" if self._tag else "[ContextOverflow]"
         print(
-            f"[ContextOverflow] turn {self._turn_count}: "
+            f"{prefix} turn {self._turn_count}: "
             f"~{self._current_tokens // 1000}K/{self._context_window // 1000}K tokens "
             f"({self.overflow_ratio:.0%}), needs_compaction={self._needs_compaction}"
         )
