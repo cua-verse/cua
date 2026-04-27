@@ -31,6 +31,31 @@ if TYPE_CHECKING:
     from ..computers import DesktopSession
 
 
+_LIGHTWEIGHT_SIBLINGS: dict[str, str] = {
+    "gpt-5.4": "gpt-5.4-mini",
+}
+
+
+def _derive_lightweight_model(model: str) -> str | None:
+    """Map a main-agent model string to its cheaper sibling, when known.
+
+    Lookup is suffix-based on the segment after the last ``/`` so the same
+    rule works for direct provider IDs (``openai/gpt-5.4``) and routed IDs
+    (``openrouter/openai/gpt-5.4``). Returns ``None`` when no sibling is
+    registered — the delegate tools then expose only the default.
+    """
+    if not model:
+        return None
+    suffix = model.rsplit("/", 1)[-1]
+    sibling_suffix = _LIGHTWEIGHT_SIBLINGS.get(suffix)
+    if sibling_suffix is None:
+        return None
+    if "/" not in model:
+        return sibling_suffix
+    prefix = model.rsplit("/", 1)[0]
+    return f"{prefix}/{sibling_suffix}"
+
+
 @register_agent("openclaw-agent")
 class OpenClawAgent(BaseAgent):
     """OpenClaw agent reproduction for CUA benchmark framework."""
@@ -56,6 +81,14 @@ class OpenClawAgent(BaseAgent):
                 "the agent has no way to interact with the VM."
             )
         self.gui_model = kwargs.get("gui_model", None)
+        # Optional lightweight sibling exposed to delegate tools as the
+        # second enum option. Explicit override wins; otherwise derive from
+        # ``self.model`` (e.g. ``…/gpt-5.4`` → ``…/gpt-5.4-mini``). Returns
+        # ``None`` for model families with no obvious sibling.
+        self.lightweight_model = (
+            kwargs.get("lightweight_model")
+            or _derive_lightweight_model(self.model)
+        )
 
         # Thinking level configuration (US-OC-019)
         # CLI --thinking-level overrides auto-detection; omitting uses model default.
@@ -216,6 +249,19 @@ class OpenClawAgent(BaseAgent):
         else:
             workspace_root = None
 
+        # Host workspace root for `target='host'` on read/write/edit. Operator
+        # override via OPENCLAW_HOST_WORKSPACE; otherwise auto-detect the repo
+        # root by walking up to the first ancestor containing a `.git` dir.
+        # When unresolved, the host backend isn't registered and the agent
+        # only sees `target='vm'` in the schema enum.
+        from .openclaw.fs_backends import detect_host_workspace_root
+        host_override = os.environ.get("OPENCLAW_HOST_WORKSPACE", "").strip()
+        if host_override:
+            host_workspace_root: str | None = str(Path(host_override).resolve())
+        else:
+            detected = detect_host_workspace_root()
+            host_workspace_root = str(detected) if detected is not None else None
+
         # Tool assembly (US-OC-007 + US-SUB-005 delegation tools + US-OC-055 fs tools)
         thinking_api_params = self.thinking_config.to_api_params(self.model)
         gui_model_str = self.gui_model or self.model
@@ -231,12 +277,14 @@ class OpenClawAgent(BaseAgent):
             registry=registry,
             parent_session_dir=session_mgr.task_dir,
             default_model=self.model,
+            lightweight_model=self.lightweight_model,
             thinking_params=thinking_api_params,
             gui_thinking_params=gui_thinking_params,
             disable_main_computer=self.disable_main_computer,
             disable_delegate_gui=self.disable_delegate_gui,
             gui_model=self.gui_model,
             workspace_root=workspace_root,
+            host_workspace_root=host_workspace_root,
             context_window_tokens=context_window_tokens,
         )
         tool_summaries = get_tool_summaries(tools)

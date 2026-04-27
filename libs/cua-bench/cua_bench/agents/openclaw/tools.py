@@ -25,7 +25,8 @@ from agent.computers.cua import cuaComputerHandler
 from agent.tools.base import BaseTool
 from agent.types import ToolError
 
-from .memory import MemoryGetTool, MemorySearchTool, MemoryStore, MemoryWriteTool
+from .fs_backends import FilesystemRegistry, HostBackend, VMBackend
+from .memory import MemoryGetTool, MemorySearchTool, MemoryStore  # MemoryWriteTool retained in memory.py; intentionally not exposed to the main agent (write(target='host') covers journaling).
 from .subagent_registry import SubagentRegistry
 from .subagent_tools import DelegateGeneralTool, DelegateGUITool, SubagentsTool
 from .tools_fs import EditFileTool, ReadFileTool, WriteFileTool
@@ -153,22 +154,28 @@ def build_tools(
     registry: SubagentRegistry | None = None,
     parent_session_dir: Any = None,
     default_model: str | None = None,
+    lightweight_model: str | None = None,
     thinking_params: dict[str, Any] | None = None,
     gui_thinking_params: dict[str, Any] | None = None,
     disable_main_computer: bool = False,
     disable_delegate_gui: bool = False,
     gui_model: str | None = None,
     workspace_root: str | None = None,
+    host_workspace_root: str | None = None,
     context_window_tokens: int | None = None,
 ) -> list:
     """Assemble the canonical tool list for the OpenClaw agent.
 
-    Returns [Computer, MilestoneTool, AnalyzeImageTool, MemorySearchTool,
-             MemoryGetTool, MemoryWriteTool] by default. When ``registry`` and
-    ``parent_session_dir`` are supplied (US-SUB-005), also appends
-    [DelegateGeneralTool, DelegateGUITool, SubagentsTool]. ``DelegateGUITool``
-    is suppressed when ``disable_delegate_gui=True`` (mirrors OpenClaw's
-    filterToolsByPolicy pattern — absence is the signal).
+    Returns [Computer, MilestoneTool, AnalyzeImageTool, ReadFileTool,
+             WriteFileTool, EditFileTool, ExecTool, WebSearchTool, WebFetchTool,
+             MemorySearchTool, MemoryGetTool] by default. ``MemoryWriteTool``
+    is no longer exposed to the main agent — its journaling role is covered
+    by ``write(target='host')``; the class lives in ``memory.py`` and is
+    still consumed by ``memory_flush.py`` and the GUI subagent. When
+    ``registry`` and ``parent_session_dir`` are supplied (US-SUB-005), also
+    appends [DelegateGeneralTool, DelegateGUITool, SubagentsTool].
+    ``DelegateGUITool`` is suppressed when ``disable_delegate_gui=True``
+    (mirrors OpenClaw's filterToolsByPolicy pattern — absence is the signal).
 
     Args:
         session: CUA DesktopSession (provides ``_computer`` and ``interface``).
@@ -184,6 +191,16 @@ def build_tools(
             land at ``<parent_session_dir>/subagents/<run_id>/transcript.jsonl``.
         default_model: Default model string for ``DelegateGeneralTool``
             (falls back to the model used for normal turns).
+        lightweight_model: Optional cheaper/faster sibling exposed alongside
+            ``default_model`` as the second enum option on
+            ``DelegateGeneralTool.model`` (e.g. ``openrouter/openai/gpt-5.4-mini``
+            when the default is ``openrouter/openai/gpt-5.4``). When ``None``
+            the general delegate accepts only the default. Constrains main-
+            agent model picks to a small allowlist so hallucinated sibling
+            IDs (e.g. ``gpt-5.1-mini``) cannot reach litellm. NOT plumbed
+            into ``DelegateGUITool``: the GUI default is user-controlled
+            via ``gui_model`` and shouldn't be silently swapped by the
+            main agent.
         thinking_params: Main-agent thinking kwargs, forwarded unchanged into
             the subagent session's ``litellm.acompletion`` call.
         disable_main_computer: When True, replace ``session._computer`` with a
@@ -200,6 +217,10 @@ def build_tools(
         workspace_root: Absolute path on the VM that bounds read/write/edit
             file access (US-OC-055). When ``None``, path policy is permissive
             (matches MilestoneTool / AnalyzeImageTool behavior).
+        host_workspace_root: Absolute path on the local host that bounds
+            ``target='host'`` file access. When ``None`` (or missing/invalid),
+            only ``target='vm'`` is registered and the agent never sees a
+            ``host`` option in the schema enum.
         context_window_tokens: Resolved model context window, forwarded to
             ``ReadFileTool`` for adaptive byte-paging (cap = clamp(ctx * 4 *
             0.10, 32 KB, 128 KB) — matches OpenClaw
@@ -214,19 +235,33 @@ def build_tools(
         model=summary_model,
         thinking_params=vision_thinking_params,
     )
+    fs_registry = FilesystemRegistry()
+    fs_registry.register(VMBackend(session.interface, workspace_root=workspace_root))
+    if host_workspace_root:
+        try:
+            fs_registry.register(HostBackend(host_workspace_root))
+        except ValueError as e:
+            # Bad host root (missing/not-a-dir): warn and skip — agent only
+            # sees `target='vm'`. Better than crashing the whole tool stack.
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "host backend not registered: %s", e
+            )
+
     read_tool = ReadFileTool(
-        session.interface,
-        workspace_root=workspace_root,
+        fs_registry,
         context_window_tokens=context_window_tokens,
     )
-    write_tool = WriteFileTool(session.interface, workspace_root=workspace_root)
-    edit_tool = EditFileTool(session.interface, workspace_root=workspace_root)
+    write_tool = WriteFileTool(fs_registry)
+    edit_tool = EditFileTool(fs_registry)
     exec_tool = ExecTool(session.interface, workspace_root=workspace_root)
     web_search = WebSearchTool()
     web_fetch = WebFetchTool()
     memory_search = MemorySearchTool(memory_store)
     memory_get = MemoryGetTool(memory_store)
-    memory_write = MemoryWriteTool(memory_store)
+    # memory_write intentionally not exposed to the main agent — superseded
+    # by write(target='host'). Class lives in memory.py and is still used by
+    # memory_flush.py and the GUI subagent's tool list.
 
     if disable_main_computer:
         computer = _RestrictedComputerHandler(session._computer)
@@ -245,7 +280,6 @@ def build_tools(
         web_fetch,
         memory_search,
         memory_get,
-        memory_write,
     ]
 
     if registry is not None and parent_session_dir is not None:
@@ -257,6 +291,7 @@ def build_tools(
             summary_model=summary_model or default_model or "",
             parent_session_dir=parent_session_dir,
             thinking_params=thinking_params,
+            lightweight_model=lightweight_model,
         )
         gui_tool_kwargs: dict[str, Any] = {
             "registry": registry,

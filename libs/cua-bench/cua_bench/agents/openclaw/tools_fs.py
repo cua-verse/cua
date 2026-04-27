@@ -36,14 +36,39 @@ import logging
 import ntpath
 import posixpath
 import re
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import Any, Optional, Union
 
 from agent.tools.base import BaseTool, register_tool
 
-if TYPE_CHECKING:
-    from computer.interface import BaseComputerInterface
+from .fs_backends import FilesystemBackend, FilesystemRegistry
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Per-target defaults
+# ---------------------------------------------------------------------------
+
+
+def _default_append_for(target: str, params: dict) -> bool:
+    """Resolve the effective ``append`` flag for ``write``.
+
+    VM mirrors the historical default (overwrite). Host defaults to append
+    so the agent's first instinct is journaling, not clobber. Either side
+    can be opted out by setting ``append`` explicitly in ``params``.
+    """
+    if "append" in params:
+        return bool(params["append"])
+    return target == "host"
+
+
+def _check_capability(backend: FilesystemBackend, op: str) -> Optional[str]:
+    if op not in backend.capabilities:
+        return (
+            f"'{op}' not supported on target '{backend.name}'; "
+            f"capabilities: {sorted(backend.capabilities)}"
+        )
+    return None
 
 # ---------------------------------------------------------------------------
 # Constants (match OpenClaw pi-tools.read.ts:45-49 / pi-tools.host-edit.ts:22-23)
@@ -217,27 +242,21 @@ class ReadFileTool(BaseTool):
 
     def __init__(
         self,
-        interface: "BaseComputerInterface",
-        workspace_root: Optional[str] = None,
+        registry: FilesystemRegistry,
         context_window_tokens: Optional[int] = None,
         cfg: Optional[dict] = None,
     ):
-        self.interface = interface
-        self.workspace_root = workspace_root
+        self.registry = registry
         self.context_window_tokens = context_window_tokens
-        if workspace_root is None:
-            logger.info(
-                "ReadFileTool: workspace_root is None — permissive path policy"
-            )
         super().__init__(cfg)
 
     @property
     def description(self) -> str:
         return (
-            "Read a file on the remote VM (path resolves against the task "
-            "workspace). Text files return line-paginated content; image files "
+            "Read a file. Pick a filesystem via `target` (default 'vm'). "
+            "Text files return line-paginated content; image files "
             "(PNG/JPEG/GIF/WEBP/BMP/TIFF) return the raw image for direct "
-            "inspection."
+            "inspection. " + self.registry.describe()
         )
 
     @property
@@ -245,9 +264,21 @@ class ReadFileTool(BaseTool):
         return {
             "type": "object",
             "properties": {
+                "target": {
+                    "type": "string",
+                    "enum": self.registry.names(),
+                    "description": (
+                        "Which filesystem to read from. "
+                        + self.registry.describe()
+                    ),
+                },
                 "path": {
                     "type": "string",
-                    "description": "Absolute path on the VM (e.g. C:\\Users\\User\\Desktop\\tasks\\<tag>\\file.txt).",
+                    "description": (
+                        "Path on the chosen target. For 'vm', an absolute "
+                        "Windows path. For 'host', a path under the host "
+                        "workspace (absolute or relative to the host root)."
+                    ),
                 },
                 "offset": {
                     "type": "integer",
@@ -273,32 +304,48 @@ class ReadFileTool(BaseTool):
         try:
             parsed = self._verify_json_format_args(params)
             path = _get_required_str(parsed, "path", "read")
-            _assert_within_workspace(path, self.workspace_root)
+            target = parsed.get("target", "vm")
+            backend = self.registry.get(target)
+            cap_err = _check_capability(backend, "read")
+            if cap_err:
+                return {"success": False, "error": f"Error: {cap_err}"}
+            resolved = backend.resolve(path)
         except ValueError as e:
             return {"success": False, "error": f"Error: {e}"}
 
         try:
-            return _run_async(self._execute(parsed, path))
+            return _run_async(self._execute(parsed, backend, resolved))
         except Exception as e:  # noqa: BLE001 — surface RPC errors as tool errors
             logger.error("read tool failure on %s: %s", path, e)
             return {"success": False, "error": f"Error: {e}"}
 
-    async def _execute(self, params: dict, path: str) -> dict:
+    async def _execute(
+        self,
+        params: dict,
+        backend: FilesystemBackend,
+        path: str,
+    ) -> dict:
         ext_mime = _mime_from_extension(path)
         if ext_mime is not None:
-            return await self._read_image(params, path, ext_mime)
-        return await self._read_text(params, path)
+            return await self._read_image(params, backend, path, ext_mime)
+        return await self._read_text(params, backend, path)
 
     # -- image branch --
 
-    async def _read_image(self, params: dict, path: str, declared_mime: str) -> dict:
+    async def _read_image(
+        self,
+        params: dict,
+        backend: FilesystemBackend,
+        path: str,
+        declared_mime: str,
+    ) -> dict:
         max_bytes_raw = params.get("max_bytes")
         if isinstance(max_bytes_raw, (int, float)) and max_bytes_raw > 0:
             max_bytes = int(max_bytes_raw)
         else:
             max_bytes = _MAX_IMAGE_BYTES_DEFAULT
 
-        data = await self.interface.read_bytes(path)
+        data = await backend.read_bytes(path)
         if not data:
             return {"success": False, "error": f"Error: file is empty: {path}"}
         if len(data) > max_bytes:
@@ -336,10 +383,15 @@ class ReadFileTool(BaseTool):
 
     # -- text branch --
 
-    async def _read_text(self, params: dict, path: str) -> dict:
+    async def _read_text(
+        self,
+        params: dict,
+        backend: FilesystemBackend,
+        path: str,
+    ) -> dict:
         encoding = params.get("encoding") or "utf-8"
         try:
-            raw_bytes = await self.interface.read_bytes(path)
+            raw_bytes = await backend.read_bytes(path)
         except Exception as e:  # noqa: BLE001
             return {"success": False, "error": f"Error: could not read file: {path} — {e}"}
 
@@ -441,19 +493,19 @@ class WriteFileTool(BaseTool):
 
     def __init__(
         self,
-        interface: "BaseComputerInterface",
-        workspace_root: Optional[str] = None,
+        registry: FilesystemRegistry,
         cfg: Optional[dict] = None,
     ):
-        self.interface = interface
-        self.workspace_root = workspace_root
+        self.registry = registry
         super().__init__(cfg)
 
     @property
     def description(self) -> str:
         return (
-            "Create or overwrite a UTF-8 text file on the remote VM (path "
-            "resolves against the task workspace)."
+            "Create, overwrite, or append to a UTF-8 text file. Pick a "
+            "filesystem via `target` (default 'vm'). Default `append` "
+            "behavior is target-aware: vm overwrites, host appends. "
+            + self.registry.describe()
         )
 
     @property
@@ -461,9 +513,21 @@ class WriteFileTool(BaseTool):
         return {
             "type": "object",
             "properties": {
+                "target": {
+                    "type": "string",
+                    "enum": self.registry.names(),
+                    "description": (
+                        "Which filesystem to write to. "
+                        + self.registry.describe()
+                    ),
+                },
                 "path": {
                     "type": "string",
-                    "description": "Absolute path on the VM.",
+                    "description": (
+                        "Path on the chosen target. For 'vm', an absolute "
+                        "Windows path. For 'host', a path under the host "
+                        "workspace (absolute or relative to the host root)."
+                    ),
                 },
                 "content": {
                     "type": "string",
@@ -471,7 +535,10 @@ class WriteFileTool(BaseTool):
                 },
                 "append": {
                     "type": "boolean",
-                    "description": "Append instead of overwrite (default false).",
+                    "description": (
+                        "Append instead of overwrite. Default depends on "
+                        "target: false for 'vm', true for 'host'."
+                    ),
                 },
                 "create_parents": {
                     "type": "boolean",
@@ -487,34 +554,46 @@ class WriteFileTool(BaseTool):
             path = _get_required_str(parsed, "path", "write")
             if "content" not in parsed or not isinstance(parsed["content"], str):
                 raise ValueError('write: required parameter "content" is missing or not a string')
-            _assert_within_workspace(path, self.workspace_root)
+            target = parsed.get("target", "vm")
+            backend = self.registry.get(target)
+            cap_err = _check_capability(backend, "write")
+            if cap_err:
+                return {"success": False, "error": f"Error: {cap_err}"}
+            resolved = backend.resolve(path)
         except ValueError as e:
             return {"success": False, "error": f"Error: {e}"}
 
         try:
-            return _run_async(self._execute(parsed, path))
+            return _run_async(self._execute(parsed, backend, resolved, target))
         except Exception as e:  # noqa: BLE001
             logger.error("write tool failure on %s: %s", path, e)
             return {"success": False, "error": f"Error: {e}"}
 
-    async def _execute(self, params: dict, path: str) -> dict:
+    async def _execute(
+        self,
+        params: dict,
+        backend: FilesystemBackend,
+        path: str,
+        target: str,
+    ) -> dict:
         content: str = params["content"]
-        append = bool(params.get("append", False))
+        append = _default_append_for(target, params)
         create_parents = bool(params.get("create_parents", True))
 
         if create_parents:
             parent = _parent_dir(path)
             if parent and parent not in (".", "/", ""):
                 try:
-                    await self.interface.create_dir(parent)
+                    await backend.create_dir(parent)
                 except Exception as e:  # noqa: BLE001 — mkdir failure is recoverable
                     logger.debug("create_dir(%s) failed (may already exist): %s", parent, e)
 
-        await self.interface.write_text(path, content, append=append)
+        await backend.write_text(path, content, append=append)
         return {
             "success": True,
             "bytes_written": len(content.encode("utf-8")),
             "path": path,
+            "target": target,
             "append": append,
         }
 
@@ -537,20 +616,18 @@ class EditFileTool(BaseTool):
 
     def __init__(
         self,
-        interface: "BaseComputerInterface",
-        workspace_root: Optional[str] = None,
+        registry: FilesystemRegistry,
         cfg: Optional[dict] = None,
     ):
-        self.interface = interface
-        self.workspace_root = workspace_root
+        self.registry = registry
         super().__init__(cfg)
 
     @property
     def description(self) -> str:
         return (
-            "Make precise edits to a file on the remote VM (path resolves "
-            "against the task workspace). Each `{oldText, newText}` "
-            "replacement must match exactly."
+            "Make precise edits to a file. Pick a filesystem via `target` "
+            "(default 'vm'). Each `{oldText, newText}` replacement must "
+            "match exactly. " + self.registry.describe()
         )
 
     @property
@@ -558,9 +635,20 @@ class EditFileTool(BaseTool):
         return {
             "type": "object",
             "properties": {
+                "target": {
+                    "type": "string",
+                    "enum": self.registry.names(),
+                    "description": (
+                        "Which filesystem to edit. " + self.registry.describe()
+                    ),
+                },
                 "path": {
                     "type": "string",
-                    "description": "Absolute path on the VM.",
+                    "description": (
+                        "Path on the chosen target. For 'vm', an absolute "
+                        "Windows path. For 'host', a path under the host "
+                        "workspace (absolute or relative to the host root)."
+                    ),
                 },
                 "edits": {
                     "type": "array",
@@ -586,12 +674,17 @@ class EditFileTool(BaseTool):
             parsed = self._verify_json_format_args(params)
             path = _get_required_str(parsed, "path", "edit")
             edits = self._validate_edits(parsed.get("edits"))
-            _assert_within_workspace(path, self.workspace_root)
+            target = parsed.get("target", "vm")
+            backend = self.registry.get(target)
+            cap_err = _check_capability(backend, "edit")
+            if cap_err:
+                return {"success": False, "error": f"Error: {cap_err}"}
+            resolved = backend.resolve(path)
         except ValueError as e:
             return {"success": False, "error": f"Error: {e}"}
 
         try:
-            return _run_async(self._execute(path, edits))
+            return _run_async(self._execute(backend, resolved, edits, target))
         except Exception as e:  # noqa: BLE001
             logger.error("edit tool failure on %s: %s", path, e)
             return {"success": False, "error": f"Error: {e}"}
@@ -615,9 +708,15 @@ class EditFileTool(BaseTool):
             normalized.append((old_text, new_text))
         return normalized
 
-    async def _execute(self, path: str, edits: list[tuple[str, str]]) -> dict:
+    async def _execute(
+        self,
+        backend: FilesystemBackend,
+        path: str,
+        edits: list[tuple[str, str]],
+        target: str,
+    ) -> dict:
         try:
-            original_bytes = await self.interface.read_bytes(path)
+            original_bytes = await backend.read_bytes(path)
             original = original_bytes.decode("utf-8")
         except UnicodeDecodeError:
             return {
@@ -653,12 +752,14 @@ class EditFileTool(BaseTool):
                 "success": True,
                 "edits_applied": len(edits),
                 "path": path,
+                "target": target,
                 "unchanged": True,
             }
 
-        await self.interface.write_text(path, current, append=False)
+        await backend.write_text(path, current, append=False)
         return {
             "success": True,
             "edits_applied": len(edits),
             "path": path,
+            "target": target,
         }
