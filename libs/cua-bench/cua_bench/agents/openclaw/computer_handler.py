@@ -1,10 +1,6 @@
 """OpenClaw-specific cuaComputerHandler subclass.
 
 Single source of truth for keypress semantics in the OpenClaw harness.
-Previously duplicated in the orchestration repo's adapter (motivated by an
-older CUA pin that lacked ``_normalize_key``); arrow-key normalization now
-lives upstream in ``cuaComputerHandler``, so the only remaining override
-is ``keypress`` — to fix the chord-vs-sequence ambiguity.
 
 Why override ``keypress``:
     The OpenAI computer-use spec leaves ``keys=["right","right","down"]``
@@ -13,6 +9,13 @@ Why override ``keypress``:
     ``hotkey``, which collapses duplicates and produces unintended
     diagonal-key holds — silently breaking games (e.g. Magic Tower) and
     any app that expects discrete key events.
+
+Why ship a local ``_normalize_key``:
+    Older ``cua-verse/cua`` mainline pins (e.g. ``2a10d326``) do not define
+    ``_normalize_key`` on ``cuaComputerHandler``; relying on the parent
+    raised ``AttributeError`` the moment a list-keypress fires. Carrying
+    the shim here keeps the openclaw harness working across both pins
+    that ship the helper upstream and pins that don't.
 
 Convention used here:
     - String input (``"ctrl+shift+s"`` or legacy ``"ctrl-shift-s"``) → chord.
@@ -28,8 +31,22 @@ from typing import List, Union
 from agent.computers.cua import cuaComputerHandler
 
 
+_KEY_MAPPING = {
+    "ARROWUP": "up",
+    "ARROWDOWN": "down",
+    "ARROWLEFT": "left",
+    "ARROWRIGHT": "right",
+}
+
+
 class OpenClawComputerHandler(cuaComputerHandler):
     """cuaComputerHandler with sequential multi-key keypress."""
+
+    def _normalize_key(self, key: str) -> str:
+        parent = getattr(super(), "_normalize_key", None)
+        if callable(parent):
+            return parent(key)
+        return _KEY_MAPPING.get(key.upper(), key.lower())
 
     async def keypress(self, keys: Union[List[str], str]) -> None:
         assert self.interface is not None

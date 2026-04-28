@@ -64,38 +64,79 @@ _ACCEPTED_NOTE = (
 )
 
 
-def _provider_prefix(model: str) -> str:
-    return model.split("/", 1)[0] if "/" in model else model
+def _build_model_param_schema(
+    default_model: str, lightweight_model: str | None
+) -> dict[str, Any]:
+    """Build the JSON Schema for a delegate tool's `model` parameter.
+
+    The schema constrains the override to an explicit allowlist via `enum`,
+    so the main agent can't hallucinate a sibling model ID. When a
+    lightweight option is configured, the description names the trade-off
+    so the main agent can pick deliberately; otherwise the enum has a
+    single element and the parameter is effectively a no-op.
+    """
+    allowed = _allowed_models(default_model, lightweight_model)
+    if lightweight_model and lightweight_model != default_model:
+        description = (
+            f"Optional model override. Pick one of:\n"
+            f"- '{default_model}' (default): stronger reasoning. Use for "
+            f"non-trivial planning, multi-step analysis, or anything where "
+            f"you'd want gpt-5.4 in the main loop.\n"
+            f"- '{lightweight_model}': cheaper/faster sibling. Use for "
+            f"simple lookups, short summarization, or one-shot extraction "
+            f"where stronger reasoning isn't needed."
+        )
+    else:
+        description = (
+            f"Optional model override (default: '{default_model}'). "
+            f"Only the default is currently allowed; pass nothing to use it."
+        )
+    return {"type": "string", "enum": allowed, "description": description}
+
+
+def _allowed_models(
+    default_model: str, lightweight_model: str | None
+) -> list[str]:
+    """Build the ordered allowlist of valid model strings for a delegate tool.
+
+    Order matters for schema enum stability: default first, lightweight second
+    (when provided). Duplicates are dropped (e.g. caller passes the same
+    string for both).
+    """
+    allowed = [default_model]
+    if lightweight_model and lightweight_model != default_model:
+        allowed.append(lightweight_model)
+    return allowed
 
 
 def _sanitize_subagent_model(
-    requested: str | None, default_model: str
+    requested: str | None,
+    default_model: str,
+    lightweight_model: str | None = None,
 ) -> tuple[str, str | None]:
-    """Validate a subagent model override against the default's provider prefix.
+    """Validate a subagent model override against an explicit allowlist.
 
-    The tool schema lets callers pass `model` to override `default_model`,
-    but main-agent models regularly hallucinate IDs that don't exist on the
-    routing provider (e.g. "openai/gpt-5.1-mini" when the default is
-    "openrouter/openai/gpt-5.4"). Rather than dispatching a doomed call,
-    require the override to share the default's provider prefix and fall
-    back silently (with a warning in the tool response) when it doesn't.
+    Earlier versions compared only the first ``/``-separated provider prefix,
+    which let hallucinated variants under the same routing provider slip
+    through (e.g. ``openrouter/openai/gpt-5.1-mini`` when the default is
+    ``openrouter/openai/gpt-5.4``). The allowlist here is exact-match against
+    ``[default_model, lightweight_model]`` — anything else falls back to the
+    default with a warning surfaced in the tool response.
 
-    Returns `(resolved_model, warning)`. `warning` is `None` when the
+    Returns ``(resolved_model, warning)``. ``warning`` is ``None`` when the
     requested model is accepted as-is.
     """
     if not requested:
         return default_model, None
-    req_prefix = _provider_prefix(requested)
-    def_prefix = _provider_prefix(default_model)
-    if req_prefix != def_prefix:
-        warning = (
-            f"requested model '{requested}' has provider prefix "
-            f"'{req_prefix}' which does not match the main agent's default "
-            f"provider '{def_prefix}'. Using default '{default_model}' "
-            f"instead. Omit the `model` parameter to silence this warning."
-        )
-        return default_model, warning
-    return requested, None
+    allowed = _allowed_models(default_model, lightweight_model)
+    if requested in allowed:
+        return requested, None
+    warning = (
+        f"requested model '{requested}' is not in the allowlist {allowed}. "
+        f"Using default '{default_model}' instead. Pick one of the listed "
+        f"models or omit the `model` parameter to silence this warning."
+    )
+    return default_model, warning
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +157,7 @@ class DelegateGeneralTool(BaseTool):
         summary_model: str,
         parent_session_dir: Path,
         thinking_params: dict[str, Any] | None = None,
+        lightweight_model: str | None = None,
         cfg: dict | None = None,
     ) -> None:
         self._registry = registry
@@ -125,6 +167,7 @@ class DelegateGeneralTool(BaseTool):
         self._summary_model = summary_model
         self._parent_session_dir = Path(parent_session_dir)
         self._thinking_params = thinking_params
+        self._lightweight_model = lightweight_model
         super().__init__(cfg)
 
     @property
@@ -147,13 +190,9 @@ class DelegateGeneralTool(BaseTool):
                     "type": "string",
                     "description": "What the subagent should accomplish.",
                 },
-                "model": {
-                    "type": "string",
-                    "description": (
-                        "Optional litellm model override "
-                        "(defaults to the main agent's model)."
-                    ),
-                },
+                "model": _build_model_param_schema(
+                    self._default_model, self._lightweight_model
+                ),
                 "max_steps": {
                     "type": "integer",
                     "description": (
@@ -173,8 +212,7 @@ class DelegateGeneralTool(BaseTool):
                         "Optional absolute paths to PNG screenshots to "
                         "attach to the subagent's initial message as vision "
                         "input. Use this to delegate 'analyze this frame' "
-                        "work. Paths are the local files the main agent has "
-                        "seen via '[Screenshot saved to: ...]' hints."
+                        "work."
                     ),
                 },
             },
@@ -192,7 +230,9 @@ class DelegateGeneralTool(BaseTool):
             }
 
         model, model_warning = _sanitize_subagent_model(
-            params_dict.get("model"), self._default_model
+            params_dict.get("model"),
+            self._default_model,
+            self._lightweight_model,
         )
         if model_warning:
             _logger.warning("delegate_general: %s", model_warning)
@@ -265,6 +305,7 @@ class DelegateGUITool(BaseTool):
         default_model: str = GUI_DEFAULT_MODEL,
         thinking_params: dict[str, Any] | None = None,
         memory_store: MemoryStore | None = None,
+        lightweight_model: str | None = None,
         cfg: dict | None = None,
     ) -> None:
         self._registry = registry
@@ -273,6 +314,7 @@ class DelegateGUITool(BaseTool):
         self._default_model = default_model
         self._thinking_params = thinking_params
         self._memory_store = memory_store
+        self._lightweight_model = lightweight_model
         super().__init__(cfg)
 
     @property
@@ -297,13 +339,9 @@ class DelegateGUITool(BaseTool):
                     "type": "string",
                     "description": "Self-contained GUI task (e.g. 'open Notepad').",
                 },
-                "model": {
-                    "type": "string",
-                    "description": (
-                        f"Optional litellm model override "
-                        f"(default: '{GUI_DEFAULT_MODEL}')."
-                    ),
-                },
+                "model": _build_model_param_schema(
+                    self._default_model, self._lightweight_model
+                ),
                 "max_steps": {
                     "type": "integer",
                     "description": (
@@ -330,7 +368,9 @@ class DelegateGUITool(BaseTool):
             }
 
         model, model_warning = _sanitize_subagent_model(
-            params_dict.get("model"), self._default_model
+            params_dict.get("model"),
+            self._default_model,
+            self._lightweight_model,
         )
         if model_warning:
             _logger.warning("delegate_gui: %s", model_warning)
