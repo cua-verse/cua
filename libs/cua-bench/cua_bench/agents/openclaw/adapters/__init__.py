@@ -22,8 +22,7 @@ consumer):
     ``self._get_turn_dir``, ``self._save_artifact``, ``self.model``.
   - ``ComputerAgent._handle_item`` body and dispatch helpers
     (``_on_function_call_start/end``, ``_on_screenshot``, ``_get_tool``,
-    ``_last_screenshot_path``, ``screenshot_delay``, ``telemetry_enabled``,
-    ``_dispatch_function_call``).
+    ``screenshot_delay``, ``telemetry_enabled``, ``_dispatch_function_call``).
 
 Note that ``OpenClawComputerHandler`` lives at the package root, not here:
 its keypress override is a real fix needed at every pin (chord-vs-sequence

@@ -28,7 +28,7 @@ Reference:
 
 from __future__ import annotations
 
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Union
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 from agent.agent import ComputerAgent, get_json, get_output_call_ids
 from agent.computers.cua import cuaComputerHandler
@@ -49,6 +49,37 @@ from .session import (
     should_run_memory_flush,
 )
 from .subagent_registry import SubagentRegistry
+
+
+def _rewrite_input_image_to_image_url(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Rewrite ``{type: input_image, image_url: <str>}`` content blocks into
+    ``{type: image_url, image_url: {url: <str>}}`` in user-message content lists.
+
+    Skips ``computer_call_output.output`` blocks: the OpenAI Responses API
+    contract for the native computer_call flow requires ``input_image`` there.
+    The harness doesn't currently target ``computer-use-preview`` models, but
+    leaving that block untouched keeps the API contract intact if it ever runs.
+    """
+    for item in items:
+        if item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        new_content = []
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "input_image"
+                and isinstance(block.get("image_url"), str)
+            ):
+                new_content.append(
+                    {"type": "image_url", "image_url": {"url": block["image_url"]}}
+                )
+            else:
+                new_content.append(block)
+        item["content"] = new_content
+    return items
 
 
 def has_done_signal(output: List[Dict[str, Any]]) -> bool:
@@ -107,6 +138,21 @@ class OpenClawComputerAgent(ComputerAgent):
         kwargs["callbacks"] = callbacks
 
         super().__init__(**kwargs)
+
+        # Upgrade the auto-added SDK ImageRetentionCallback to the OpenClaw
+        # variant. The SDK callback only prunes screenshots inside
+        # ``computer_call_output`` items — silently no-ops for the
+        # function-call shim path (Claude / GPT-5.4 / anything via
+        # OpenRouter), where screenshots arrive as standalone user
+        # ``image_url`` messages. The OpenClaw variant covers both paths.
+        from agent.callbacks.image_retention import ImageRetentionCallback as _SDKImageRetention
+        from .adapters.image_retention import OpenClawImageRetentionCallback
+        for i, cb in enumerate(self.callbacks):
+            if type(cb) is _SDKImageRetention:
+                self.callbacks[i] = OpenClawImageRetentionCallback(
+                    only_n_most_recent_images=cb.only_n_most_recent_images
+                )
+
         self.overflow_cb = overflow_cb
         self.session_mgr = session_mgr
         self.memory_store = memory_store
@@ -114,7 +160,6 @@ class OpenClawComputerAgent(ComputerAgent):
         self.max_compactions = max_compactions
         self._compaction_count = 0
         self._on_compaction = on_compaction
-        self._last_screenshot_path: str | None = None
         # Thinking config for per-call-site params (US-OC-019/020)
         self.thinking_config = thinking_config
         self.resolved_model = resolved_model
@@ -378,8 +423,6 @@ class OpenClawComputerAgent(ComputerAgent):
             new_items.append(msg)
             self.session_mgr.append_message("user", msg.get("content", []))
 
-    # --- Screenshot path injection (US-OC-034) ---
-
     async def _initialize_computers(self) -> None:
         """Upgrade the resolved computer handler to OpenClawComputerHandler.
 
@@ -406,56 +449,18 @@ class OpenClawComputerAgent(ComputerAgent):
             await upgraded._initialize()
             self.computer_handler = upgraded
 
-    async def _on_screenshot(
-        self, screenshot: Union[str, bytes], name: str = "screenshot"
-    ) -> None:
-        """Override to capture screenshot path from TrajectorySaverCallback.
-
-        After super() dispatches to all callbacks (TrajectorySaverCallback saves
-        the file to disk), we read the path from the callback's internal state.
-        Callback ordering is guaranteed: TrajectorySaverCallback is auto-added
-        by ComputerAgent.__init__() before our callbacks.
-        """
-        await super()._on_screenshot(screenshot, name)
-        self._last_screenshot_path = self._resolve_screenshot_path(name)
-
     async def _handle_item(
         self, item: Dict[str, Any], computer=None, ignore_call_ids=None
     ) -> List[Dict[str, Any]]:
-        """Override to inject screenshot path into computer call results.
+        """Rewrite SDK-emitted screenshot blocks into LiteLLM vision-input shape.
 
-        After the parent builds [computer_call_output], appends a user message
-        with the local file path so the agent can reference it later (e.g. via
-        analyze_image after compaction removes the base64 image).
+        The SDK emits screenshot content as ``{type: "input_image", image_url: <str>}``
+        (OpenAI Responses-API native). LiteLLM's chat-completions path expects
+        ``{type: "image_url", image_url: {url: <str>}}``. Without the rewrite,
+        the base64 payload is not reliably parsed as a vision input.
         """
-        self._last_screenshot_path = None
         result = await super()._handle_item(item, computer, ignore_call_ids)
-        if self._last_screenshot_path and result:
-            result.append({
-                "type": "message",
-                "role": "user",
-                "content": f"[Screenshot saved to: {self._last_screenshot_path}]",
-            })
-            self._last_screenshot_path = None
-        return result
-
-    def _resolve_screenshot_path(self, name: str) -> str | None:
-        """Get the file path where TrajectorySaverCallback just saved a screenshot.
-
-        Returns None when trajectory_dir is not set (no TrajectorySaverCallback
-        exists) — graceful degradation per US-OC-034 acceptance criteria.
-
-        Note: depends on TrajectorySaverCallback private API (_get_turn_dir,
-        current_artifact). Pinned via CUA submodule version.
-        """
-        from agent.callbacks.trajectory_saver import TrajectorySaverCallback
-
-        for cb in self.callbacks:
-            if isinstance(cb, TrajectorySaverCallback) and cb.trajectory_id:
-                turn_dir = cb._get_turn_dir()
-                idx = cb.current_artifact - 1  # just incremented by _save_artifact
-                return str(turn_dir / f"{idx:04d}_{name}.png")
-        return None
+        return _rewrite_input_image_to_image_url(result)
 
     @staticmethod
     def _log_assistant_text(output: List[Dict[str, Any]]) -> None:

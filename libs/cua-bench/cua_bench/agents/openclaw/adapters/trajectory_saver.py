@@ -3,11 +3,9 @@
 For CUA SDK pins that predate the openclaw fork, ``on_responses``
 increments ``self.current_turn`` at the end — immediately after saving
 the LLM response artifact, before the computer action that consumes the
-response runs. ``OpenClawComputerAgent._resolve_screenshot_path`` reads
-``cb._get_turn_dir()`` after the parent saves a screenshot, expecting the
-current turn dir; the early increment makes it return the next turn's
-empty dir, so the file path injected back into the prompt
-("[Screenshot saved to: ...]") points at nothing.
+response runs. The early increment causes ``cb._get_turn_dir()`` to
+return the next turn's empty dir for any caller reading turn state
+between ``on_responses`` and the action that follows.
 
 Upstream ``trycua/cua`` agrees with this fix: commits ``1f73713d`` and
 ``6275ea8d`` ("fix(trajectory_saver): Fix trajectory turn increment to

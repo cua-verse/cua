@@ -86,25 +86,10 @@ class OpenClawImageAwareComputerAgent(OpenClawComputerAgent):
         if ignore_call_ids and call_id and call_id in ignore_call_ids:
             return []
 
-        # Reset before dispatch so the post-process below can detect a
-        # screenshot saved by ``_on_screenshot`` during the call.
-        self._last_screenshot_path = None
-
         try:
-            result = await self._dispatch_function_call(item, computer)
+            return await self._dispatch_function_call(item, computer)
         except ToolError as e:
             return [make_tool_error_item(repr(e), call_id)]
-
-        if self._last_screenshot_path and result:
-            result.append(
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": f"[Screenshot saved to: {self._last_screenshot_path}]",
-                }
-            )
-            self._last_screenshot_path = None
-        return result
 
     async def _dispatch_function_call(
         self,
@@ -162,8 +147,10 @@ class OpenClawImageAwareComputerAgent(OpenClawComputerAgent):
                 "role": "user",
                 "content": [
                     {
-                        "type": "input_image",
-                        "image_url": f"data:{tool_result['mime_type']};base64,{tool_result['data']}",
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{tool_result['mime_type']};base64,{tool_result['data']}",
+                        },
                     }
                 ],
             }
@@ -257,8 +244,8 @@ class OpenClawImageAwareComputerAgent(OpenClawComputerAgent):
             "role": "user",
             "content": [
                 {
-                    "type": "input_image",
-                    "image_url": f"data:image/png;base64,{screenshot_base64}",
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"},
                 }
             ],
         }
