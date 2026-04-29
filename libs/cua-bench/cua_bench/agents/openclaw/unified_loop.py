@@ -7,6 +7,14 @@ through OpenRouter.
 
 US-OC-051: Unified Agent Loop via OpenRouter.
 Design reference: docs/plan/US-OC-050-054-unified-loop.md
+
+Vendored into the openclaw subpackage (single source of truth) so sparse-checkout
+consumers that only pull ``cua_bench/agents/openclaw/`` — and would otherwise
+fall through to the Responses-API ``loops/openai.py`` route — pick up the
+chat-completions OpenRouter route the moment openclaw is imported. The
+original ``agent/loops/unified.py`` is removed; this file is the canonical
+home. Registered via the side-effect import at the bottom of
+``cua_bench/agents/openclaw/__init__.py``.
 """
 
 import base64
@@ -17,9 +25,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import litellm
 from PIL import Image
 
-from ..decorators import register_agent
-from ..loops.base import AsyncAgentConfig
-from ..types import AgentCapability, Messages, Tools
+from agent.decorators import register_agent
+from agent.loops.base import AsyncAgentConfig
+from agent.types import AgentCapability, Messages, Tools
 
 
 # ---------------------------------------------------------------------------

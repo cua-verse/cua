@@ -96,6 +96,13 @@ from .tools_shell import ExecTool
 from .tools_web import WebFetchTool, WebSearchTool
 from .transcript import group_step_output
 
+# Side-effect import — registers the OpenRouter unified loop with
+# agent.decorators._AGENT_REGISTRY. Lives here (rather than agent/loops/)
+# so sparse-checkout consumers that only pull the openclaw subpackage
+# still get the chat-completions OpenRouter route instead of falling
+# through to loops/openai.py (Responses API).
+from . import unified_loop  # noqa: F401
+
 __all__ = [
     "OpenClawComputerAgent",
     "OpenClawComputerHandler",
