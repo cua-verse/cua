@@ -28,6 +28,7 @@ from .adapters import (
     OpenClawTrajectorySaverCallback,
 )
 from .agent_loop import OpenClawComputerAgent
+from .analyze_image import AnalyzeImageTool
 from .computer_handler import OpenClawComputerHandler
 from .canonical import (
     CanonicalMessage,
@@ -171,6 +172,7 @@ __all__ = [
     "DelegateGeneralTool",
     "DelegateGUITool",
     "SubagentsTool",
+    "AnalyzeImageTool",
     "ReadFileTool",
     "WriteFileTool",
     "EditFileTool",
