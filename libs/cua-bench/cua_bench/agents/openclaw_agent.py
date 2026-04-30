@@ -344,6 +344,9 @@ class OpenClawAgent(BaseAgent):
             trajectory_dir=trajectory_dir,
             instructions=instructions,
             callbacks=[tool_logging_cb],
+            # Only the explicit ``screenshot`` action returns an image —
+            # click/type/keypress/etc. return their tool result as text.
+            auto_screenshot=False,
             # OpenClaw compaction params
             overflow_cb=overflow_cb,
             session_mgr=session_mgr,

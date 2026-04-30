@@ -37,7 +37,10 @@ from .tools_web import WebFetchTool, WebSearchTool
 COMPUTER_TOOL_NAME = "computer"
 COMPUTER_TOOL_SUMMARY = (
     "Observe the current desktop via screenshots and interact with it using "
-    "mouse and keyboard actions."
+    "mouse and keyboard actions. Only the explicit `screenshot` action returns "
+    "an image — other actions (click, type, keypress, scroll, drag, wait, etc.) "
+    "return a textual result. Call `computer(action=\"screenshot\")` whenever "
+    "you need to see the updated screen state after performing actions."
 )
 
 

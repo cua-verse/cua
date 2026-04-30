@@ -352,6 +352,8 @@ async def run_gui_subagent(
             only_n_most_recent_images=DEFAULT_IMAGE_HISTORY,
             telemetry_enabled=False,
             callbacks=[SteerInboxCallback(inbox)],
+            # Vision-driven subagent: needs a fresh screenshot after every action.
+            auto_screenshot=True,
             **(thinking_params or {}),
         )
 
