@@ -28,13 +28,38 @@ Reference:
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import json
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
-from agent.agent import ComputerAgent, get_json, get_output_call_ids
+from agent.agent import ComputerAgent, assert_callable_with, get_json, get_output_call_ids
+from agent.computers.base import AsyncComputerHandler
 from agent.computers.cua import cuaComputerHandler
 from .model_config import ResolvedModel
-from agent.responses import replace_failed_computer_calls_with_function_calls
+from agent.responses import make_tool_error_item, replace_failed_computer_calls_with_function_calls
+from agent.tools.base import BaseTool
+from agent.types import ToolError
+from core.telemetry import is_telemetry_enabled, record_event
 from litellm.responses.utils import Usage
+
+
+# Map of computer-action name → the param keys the action accepts.
+# Used to filter the JSON arguments blob a model emits for
+# ``function_call name="computer"``.
+_COMPUTER_ACTION_PARAMS: Dict[str, List[str]] = {
+    "screenshot": [],
+    "click": ["x", "y", "button"],
+    "double_click": ["x", "y"],
+    "right_click": ["x", "y"],
+    "type": ["text"],
+    "keypress": ["keys"],
+    "scroll": ["x", "y", "scroll_x", "scroll_y"],
+    "move": ["x", "y"],
+    "drag": ["start_x", "start_y", "end_x", "end_y"],
+    "wait": ["seconds", "ms"],
+    "terminate": ["status"],
+}
 
 from .canonical import normalize_to_canonical, sanitize_items
 from .computer_handler import OpenClawComputerHandler
@@ -129,6 +154,7 @@ class OpenClawComputerAgent(ComputerAgent):
         resolved_model: ResolvedModel | None = None,
         summary_runtime: ResolvedModel | None = None,
         registry: SubagentRegistry | None = None,
+        auto_screenshot: bool = False,
         **kwargs,  # Pass through to ComputerAgent
     ):
         # Auto-inject overflow_cb into callbacks (US-OC-028)
@@ -138,6 +164,13 @@ class OpenClawComputerAgent(ComputerAgent):
         kwargs["callbacks"] = callbacks
 
         super().__init__(**kwargs)
+
+        # Read by ``OpenClawImageAwareComputerAgent._dispatch_b2_computer_call``.
+        # When False (default), only the explicit ``screenshot`` action returns
+        # an image — click/type/keypress/etc. return their result as text.
+        # Lives on the openclaw subclass so the SDK ``ComputerAgent`` stays
+        # diff-free against ``cua-verse/cua`` upstream.
+        self.auto_screenshot = bool(auto_screenshot)
 
         # Upgrade the auto-added SDK ImageRetentionCallback to the OpenClaw
         # variant. The SDK callback only prunes screenshots inside
@@ -450,17 +483,212 @@ class OpenClawComputerAgent(ComputerAgent):
             self.computer_handler = upgraded
 
     async def _handle_item(
-        self, item: Dict[str, Any], computer=None, ignore_call_ids=None
+        self,
+        item: Dict[str, Any],
+        computer: Optional[AsyncComputerHandler] = None,
+        ignore_call_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        """Rewrite SDK-emitted screenshot blocks into LiteLLM vision-input shape.
+        """Dispatch ``function_call`` items locally; delegate everything else.
 
-        The SDK emits screenshot content as ``{type: "input_image", image_url: <str>}``
-        (OpenAI Responses-API native). LiteLLM's chat-completions path expects
-        ``{type: "image_url", image_url: {url: <str>}}``. Without the rewrite,
-        the base64 payload is not reliably parsed as a vision input.
+        Two openclaw-only behaviors live here so the SDK ``ComputerAgent``
+        stays diff-free against ``cua-verse/cua`` upstream:
+
+        1. ``function_call`` name=="computer": parse the JSON action, run it,
+           and gate the post-action screenshot on ``self.auto_screenshot``.
+           When False (default), only the explicit ``screenshot`` action
+           returns an image — click/type/keypress/etc. return their tool
+           result as plain text.
+        2. ``function_call`` returning ``{type: "image", data, mime_type}``:
+           emit a sentinel function_call_output and a separate user message
+           with ``image_url`` content (used by ``ReadFileTool`` / US-OC-055).
+
+        Other item types (``message``, ``computer_call``) delegate to
+        ``super()._handle_item``, then any SDK-emitted ``input_image`` blocks
+        are rewritten into LiteLLM's ``image_url`` vision-input shape.
         """
-        result = await super()._handle_item(item, computer, ignore_call_ids)
-        return _rewrite_input_image_to_image_url(result)
+        if item.get("type") != "function_call":
+            result = await super()._handle_item(item, computer, ignore_call_ids)
+            return _rewrite_input_image_to_image_url(result)
+
+        call_id = item.get("call_id")
+        if ignore_call_ids and call_id and call_id in ignore_call_ids:
+            return []
+
+        try:
+            return await self._dispatch_function_call(item, computer)
+        except ToolError as e:
+            return [make_tool_error_item(repr(e), call_id)]
+
+    async def _dispatch_function_call(
+        self,
+        item: Dict[str, Any],
+        computer: Optional[AsyncComputerHandler],
+    ) -> List[Dict[str, Any]]:
+        await self._on_function_call_start(item)
+
+        if item.get("name") == "computer" and computer:
+            result = await self._dispatch_computer_function_call(item, computer)
+            await self._on_function_call_end(item, result)
+            return result
+
+        # Regular function dispatch.
+        function = self._get_tool(item.get("name"))
+        if not function:
+            raise ToolError(f"Function {item.get('name')} not found")
+
+        args = json.loads(item.get("arguments"))
+        if isinstance(function, BaseTool):
+            tool_result: Any = function.call(args)
+        else:
+            assert_callable_with(function, **args)
+            if inspect.iscoroutinefunction(function):
+                tool_result = await function(**args)
+            else:
+                tool_result = await asyncio.to_thread(function, **args)
+
+        if self.telemetry_enabled and is_telemetry_enabled():
+            record_event(
+                "agent_tool_executed",
+                {"tool_type": "function", "tool_name": item.get("name")},
+            )
+
+        # Image-shaped tool return → sentinel + image_message.
+        if (
+            isinstance(tool_result, dict)
+            and tool_result.get("type") == "image"
+            and isinstance(tool_result.get("data"), str)
+            and isinstance(tool_result.get("mime_type"), str)
+        ):
+            sentinel: Dict[str, Any] = {
+                "success": tool_result.get("success", True),
+                "read_image": True,
+                "mime_type": tool_result["mime_type"],
+            }
+            if isinstance(tool_result.get("text"), str):
+                sentinel["text"] = tool_result["text"]
+            call_output = {
+                "type": "function_call_output",
+                "call_id": item.get("call_id"),
+                "output": json.dumps(sentinel),
+            }
+            image_message = {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{tool_result['mime_type']};base64,{tool_result['data']}",
+                        },
+                    }
+                ],
+            }
+            wrapped = [call_output, image_message]
+            await self._on_function_call_end(item, wrapped)
+            return wrapped
+
+        call_output = {
+            "type": "function_call_output",
+            "call_id": item.get("call_id"),
+            "output": str(tool_result),
+        }
+        wrapped = [call_output]
+        await self._on_function_call_end(item, wrapped)
+        return wrapped
+
+    async def _dispatch_computer_function_call(
+        self,
+        item: Dict[str, Any],
+        computer: AsyncComputerHandler,
+    ) -> List[Dict[str, Any]]:
+        """Route ``function_call name="computer"`` to the computer handler.
+
+        Honors ``self.auto_screenshot``: when False, only the explicit
+        ``screenshot`` action attaches an image — other actions (click,
+        type, keypress, scroll, drag, wait, etc.) return their result as
+        a plain text ``function_call_output``.
+        """
+        args = json.loads(item.get("arguments", "{}"))
+        action_type = args.get("action")
+        if not action_type:
+            raise ToolError("Computer function call missing 'action' argument")
+
+        relevant_params = _COMPUTER_ACTION_PARAMS.get(action_type, [])
+        action_args: Dict[str, Any] = {}
+        for k, v in args.items():
+            if k == "action":
+                continue
+            if k in relevant_params or action_type not in _COMPUTER_ACTION_PARAMS:
+                if v is not None and v != "" and v != []:
+                    action_args[k] = v
+
+        computer_method = getattr(computer, action_type, None)
+        if not computer_method:
+            raise ToolError(f"Unknown computer action: {action_type}")
+        action_result = await computer_method(**action_args)
+
+        if self.telemetry_enabled and is_telemetry_enabled():
+            record_event("computer_action_executed", {"action_type": action_type})
+            record_event(
+                "agent_tool_executed",
+                {"tool_type": "computer", "tool_name": action_type},
+            )
+
+        is_terminate = action_type == "terminate" or (
+            isinstance(action_result, dict) and action_result.get("terminated")
+        )
+
+        if is_terminate:
+            output_content = json.dumps(action_result if action_result else {"terminated": True})
+            return [
+                {
+                    "type": "function_call_output",
+                    "call_id": item.get("call_id"),
+                    "output": output_content,
+                }
+            ]
+
+        # auto_screenshot=False and not an explicit screenshot —
+        # return only the textual function_call_output, no image.
+        if not self.auto_screenshot and action_type != "screenshot":
+            output_content = json.dumps(
+                action_result if action_result is not None else {"success": True}
+            )
+            return [
+                {
+                    "type": "function_call_output",
+                    "call_id": item.get("call_id"),
+                    "output": output_content,
+                }
+            ]
+
+        if self.screenshot_delay and self.screenshot_delay > 0:
+            await asyncio.sleep(self.screenshot_delay)
+        screenshot_base64 = await computer.screenshot()
+        await self._on_screenshot(screenshot_base64, "screenshot_after")
+
+        # ``action="screenshot"`` returns raw base64 — short-circuit so we
+        # don't dump 58K tokens of base64 into the tool-text channel (and
+        # so ``only_n_most_recent_images`` pruning still applies via the
+        # ``image_url`` block we emit).
+        if action_type == "screenshot" or action_result is None:
+            output_content = json.dumps({"success": True, "screenshot_captured": True})
+        else:
+            output_content = json.dumps(action_result)
+        call_output = {
+            "type": "function_call_output",
+            "call_id": item.get("call_id"),
+            "output": output_content,
+        }
+        image_message = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{screenshot_base64}"},
+                }
+            ],
+        }
+        return [call_output, image_message]
 
     @staticmethod
     def _log_assistant_text(output: List[Dict[str, Any]]) -> None:

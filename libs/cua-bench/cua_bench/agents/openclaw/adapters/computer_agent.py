@@ -221,24 +221,6 @@ class OpenClawImageAwareComputerAgent(OpenClawComputerAgent):
                 }
             ]
 
-        # Honor ``auto_screenshot``: when False, only the explicit
-        # ``screenshot`` action attaches an image — other actions
-        # (click/type/keypress/etc.) return their result as plain text.
-        should_capture = getattr(self, "auto_screenshot", True) or action_type == "screenshot"
-
-        if not should_capture:
-            if action_result is None:
-                output_content = json.dumps({"success": True})
-            else:
-                output_content = json.dumps(action_result)
-            return [
-                {
-                    "type": "function_call_output",
-                    "call_id": item.get("call_id"),
-                    "output": output_content,
-                }
-            ]
-
         if self.screenshot_delay and self.screenshot_delay > 0:
             await asyncio.sleep(self.screenshot_delay)
         screenshot_base64 = await computer.screenshot()

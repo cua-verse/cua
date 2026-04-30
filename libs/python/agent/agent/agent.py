@@ -206,7 +206,6 @@ class ComputerAgent:
         trajectory_dir: Optional[str | Path | dict] = None,
         max_retries: Optional[int] = 3,
         screenshot_delay: Optional[float | int] = 0.5,
-        auto_screenshot: Optional[bool] = False,
         use_prompt_caching: Optional[bool] = False,
         max_trajectory_budget: Optional[float | dict] = None,
         telemetry_enabled: Optional[bool] = True,
@@ -229,7 +228,6 @@ class ComputerAgent:
             trajectory_dir: If set, saves trajectory data (screenshots, responses) to this directory. Adds TrajectorySaverCallback automatically.
             max_retries: Maximum number of retries for failed API calls
             screenshot_delay: Delay before screenshots in seconds
-            auto_screenshot: If False (default), only the explicit ``screenshot`` action returns an image; other actions (click/type/keypress/etc.) return their tool result without an attached screenshot. If True, capture and return a screenshot after every computer action.
             use_prompt_caching: If set, use prompt caching to avoid reprocessing the same prompt. Intended for use with anthropic providers.
             max_trajectory_budget: If set, adds BudgetManagerCallback to track usage costs and stop when budget is exceeded
             telemetry_enabled: If set, adds TelemetryCallback to track anonymized usage data. Enabled by default.
@@ -252,7 +250,6 @@ class ComputerAgent:
         self.trajectory_dir = trajectory_dir
         self.max_retries = max_retries
         self.screenshot_delay = screenshot_delay
-        self.auto_screenshot = bool(auto_screenshot) if auto_screenshot is not None else False
         self.use_prompt_caching = use_prompt_caching
         self.telemetry_enabled = telemetry_enabled
         self.kwargs = additional_generation_kwargs
@@ -736,12 +733,8 @@ class ComputerAgent:
                     isinstance(action_result, dict) and action_result.get("terminated")
                 )
 
-                # Take screenshot after action (skip for terminate; honor auto_screenshot)
-                should_capture = (
-                    not is_terminate
-                    and (self.auto_screenshot or action_type == "screenshot")
-                )
-                if should_capture:
+                # Take screenshot after action (skip for terminate)
+                if not is_terminate:
                     if self.screenshot_delay and self.screenshot_delay > 0:
                         await asyncio.sleep(self.screenshot_delay)
                     screenshot_base64 = await computer.screenshot()
@@ -768,7 +761,7 @@ class ComputerAgent:
                         "acknowledged_safety_checks": acknowledged_checks,
                         "output": action_result if action_result else {"terminated": True},
                     }
-                elif should_capture:
+                else:
                     call_output = {
                         "type": "computer_call_output",
                         "call_id": item.get("call_id"),
@@ -777,16 +770,6 @@ class ComputerAgent:
                             "type": "input_image",
                             "image_url": f"data:image/png;base64,{screenshot_base64}",
                         },
-                    }
-                else:
-                    # auto_screenshot=False and not an explicit screenshot —
-                    # return a textual success/result payload with no image.
-                    output_payload = action_result if action_result is not None else {"success": True}
-                    call_output = {
-                        "type": "computer_call_output",
-                        "call_id": item.get("call_id"),
-                        "acknowledged_safety_checks": acknowledged_checks,
-                        "output": output_payload,
                     }
 
                 # # Additional URL safety checks for browser environments
@@ -862,12 +845,8 @@ class ComputerAgent:
                         isinstance(action_result, dict) and action_result.get("terminated")
                     )
 
-                    # Take screenshot after action (skip for terminate; honor auto_screenshot)
-                    should_capture = (
-                        not is_terminate
-                        and (self.auto_screenshot or action_type == "screenshot")
-                    )
-                    if should_capture:
+                    # Take screenshot after action (skip for terminate)
+                    if not is_terminate:
                         if self.screenshot_delay and self.screenshot_delay > 0:
                             await asyncio.sleep(self.screenshot_delay)
                         screenshot_base64 = await computer.screenshot()
@@ -884,7 +863,7 @@ class ComputerAgent:
                             "output": output_content,
                         }
                         result = [call_output]
-                    elif should_capture:
+                    else:
                         # Return both the function output AND a user message with the screenshot
                         # This allows the model to see the screenshot result.
                         # For action="screenshot", computer.screenshot() returns the raw
@@ -914,19 +893,6 @@ class ComputerAgent:
                             ],
                         }
                         result = [call_output, image_message]
-                    else:
-                        # auto_screenshot=False and not an explicit screenshot —
-                        # return only the textual function_call_output, no image_message.
-                        if action_result is None:
-                            output_content = json.dumps({"success": True})
-                        else:
-                            output_content = json.dumps(action_result)
-                        call_output = {
-                            "type": "function_call_output",
-                            "call_id": item.get("call_id"),
-                            "output": output_content,
-                        }
-                        result = [call_output]
 
                     await self._on_function_call_end(item, result)
                     return result
